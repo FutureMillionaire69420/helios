@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import http from 'node:http';
 import {Engine} from './engine.mjs';
+import {PUMP_TOKEN,QUOTES} from './solscan.mjs';
 
 const val = (key, fallback) => process.env[key]?.trim() || fallback;
 const number = (key, fallback) => Number(val(key,String(fallback)));
@@ -42,6 +43,27 @@ export function normalize(tx, leader, detectBuy, detectSell) {
   return result;
 }
 
+/**
+ * Why a leader transaction produced no copy signal, when it is still a trade worth knowing about:
+ * he paid with PUMP tokens he already held (the bot buys with SOL only), or a memecoin↔memecoin
+ * swap. Returns {kind, mint} or null.
+ */
+export function classifyUnsupported(tx, leader) {
+  if (!tx?.meta || tx.meta.err) return null;
+  const keys = tx.transaction?.message?.accountKeys || [];
+  const k = keys.find(x => (typeof x === 'string' ? x : x.pubkey) === leader);
+  if (!k || (typeof k === 'object' && !k.signer)) return null;
+  const delta = new Map();
+  for (const [rows, sign] of [[tx.meta.preTokenBalances, -1n], [tx.meta.postTokenBalances, 1n]])
+    for (const b of rows || []) if (b.owner === leader) delta.set(b.mint, (delta.get(b.mint) || 0n) + sign * BigInt(b.uiTokenAmount.amount));
+  const coins = [...delta].filter(([m, d]) => !QUOTES.has(m) && d !== 0n);
+  const pump = delta.get(PUMP_TOKEN) || 0n;
+  if (pump < 0n && coins.length === 1 && coins[0][1] > 0n) return {kind: 'paid-with-pump', mint: coins[0][0]};
+  if (pump > 0n && coins.length === 1 && coins[0][1] < 0n) return {kind: 'sold-for-pump', mint: coins[0][0]};
+  if (coins.length === 2 && coins.some(([, d]) => d > 0n) && coins.some(([, d]) => d < 0n)) return {kind: 'token-swap', mint: coins.find(([, d]) => d > 0n)[0]};
+  return null;
+}
+
 /** Phone alert (ntfy) for an engine event, or null. Paper/demo alerts are labelled so they can't be mistaken for real trades. */
 export function alertFor(e, mode, leaderLabel='Decu') {
   const tag = mode==='live' ? '' : mode==='paper' ? '[PAPER] ' : '[DEMO] ';
@@ -52,6 +74,8 @@ export function alertFor(e, mode, leaderLabel='Decu') {
   if (e.type==='confirmed' && e.side==='sell') return {title:`${tag}Sold ${short(e.mint)}`, body:`Received ${Number(e.solDelta).toFixed(4)} SOL after fees\nToken: ${e.mint}`, priority:4, tags:['moneybag'], click:mode==='live'?tx(e.signature):pump(e.mint)};
   if (e.type==='failed') return {title:`${tag}Trade FAILED (${e.side})`, body:`${e.message||'unknown error'}\nToken: ${e.mint}\nNo tokens changed hands.`, priority:4, tags:['x'], click:pump(e.mint)};
   if (e.type==='unresolved') return {title:`${tag}Trade outcome UNKNOWN`, body:`${e.message||''}\nThe bot keeps checking and will not double-trade.\nTx: ${e.signature||'?'}`, priority:5, tags:['warning'], click:e.signature?tx(e.signature):undefined};
+  if (e.type==='unsupported' && e.kind==='paid-with-pump') return {title:`${tag}${leaderLabel} bought with PUMP tokens (not copied)`, body:`He paid with PUMP tokens he held, not SOL. This bot buys with SOL only, so it skipped this one.\nToken: ${e.mint}`, priority:2, tags:['eyes'], click:pump(e.mint)};
+  if (e.type==='provider-gap') return {title:`${tag}Helius missed a ${leaderLabel} trade`, body:`Solscan caught it and the bot processed it late.\nTx: ${e.leaderSignature}`, priority:3, tags:['satellite'], click:tx(e.leaderSignature)};
   if (e.type==='paused' || e.type==='resumed') return {title:`${tag}Bot ${e.type==='paused'?'PAUSED (no new buys)':'RESUMED'}`, body:'Changed from the dashboard.', priority:3, tags:['pause_button']};
   if (e.type==='started') return {title:`${tag}Copy bot started (${mode.toUpperCase()})`, body:e.note||'', priority:2, tags:['robot']};
   return null;
@@ -67,16 +91,20 @@ export function paperSummary(stats={}) {
 }
 
 export async function startRuntime(k, {demo=false}={}) {
-  const c = runtimeConfig(k.config,demo), status={websocket:'starting',lastPoll:null,lastSignal:null,errors:0};
+  const c = runtimeConfig(k.config,demo), status={websocket:'starting',lastPoll:null,lastSignal:null,errors:0,firstSeen:{ws:0,poll:0,solscan:0},gaps:0,unsupported:0};
   c.wallet=c.mode==='live'?k.kp.publicKey:null;
   const token = val('DASHBOARD_TOKEN','');
   if (!demo && !k.config.dryRun && token.length<24) throw new Error('LIVE requires DASHBOARD_TOKEN of at least 24 characters');
-  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.jupiterApiKey].filter(Boolean);
+  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey].filter(Boolean);
   const clean = v => { let s=JSON.stringify(v); for(const secret of secrets) s=s.split(secret).join('[REDACTED]'); return JSON.parse(k.redact(s)); };
   const log = e => {
     e=clean(e); console.log(JSON.stringify(e)); fs.appendFileSync(k.config.logFile,JSON.stringify(e)+'\n',{mode:0o600});
     const a = !demo && k.notify ? alertFor(e,c.mode,k.config.leaderLabel) : null;
-    if (a) Promise.resolve(k.notify(a)).catch(()=>{});
+    if (a) {
+      // Name the coin from Solscan when available; never delay an alert by more than 1.5 s for it.
+      const label = e.mint && k.tokenLabel ? Promise.race([k.tokenLabel(e.mint).catch(()=>null), new Promise(r=>setTimeout(()=>r(null),1500))]) : Promise.resolve(null);
+      label.then(l=>{ if(l){ a.title=a.title.replace(e.mint.slice(0,6)+'…',l); a.body=l+'\n'+a.body; } return k.notify(a); }).catch(()=>{});
+    }
     if (c.mode==='paper') paperExits(e);
   };
   // PAPER ONLY: value each paper position at several sell timings (never sends anything).
@@ -184,15 +212,26 @@ export async function startRuntime(k, {demo=false}={}) {
     }
   }
   await engine.recover();
-  const inFlight=new Set(), completed=new Set();
-  const onSignature=async sig=>{
+  const inFlight=new Set(), completed=new Set(), delivered=new Set();
+  const onSignature=async(sig,source='poll')=>{
+    // Which provider saw each leader transaction first. Solscan arriving first means both Helius
+    // paths (websocket and polling) missed it: count it and alert, then process it normally.
+    if(!delivered.has(sig)) {
+      delivered.add(sig); if(delivered.size>20000) delivered.delete(delivered.values().next().value);
+      status.firstSeen[source]=(status.firstSeen[source]||0)+1;
+      if(source==='solscan') {status.gaps++;engine.event('provider-gap',{leaderSignature:sig,message:'Solscan delivered a leader transaction before Helius'});}
+    }
     if(completed.has(sig)||inFlight.has(sig)) return;
     inFlight.add(sig);
     try {
       const tx=await k.getTransaction(sig);
       if(!tx) throw new Error('transaction not available yet; will retry');
       const signals=normalize(tx,k.config.leader,k.detectBuy,k.detectSell);
-      if(!signals.length) engine.event('ignored',{leaderSignature:sig,reason:'no supported SOL trade detected'});
+      if(!signals.length) {
+        const u=classifyUnsupported(tx,k.config.leader);
+        if(u) {status.unsupported++;engine.event('unsupported',{leaderSignature:sig,mint:u.mint,kind:u.kind,reason:u.kind==='token-swap'?'token-to-token swap':'paid or received PUMP tokens instead of SOL; bot trades with SOL only'});}
+        else engine.event('ignored',{leaderSignature:sig,reason:'no supported SOL trade detected'});
+      }
       for(const s of signals) {
         if(s.side==='buy') s.usd=s.sol*await k.getSolUsd();
         await engine.ingest(s);
@@ -203,6 +242,8 @@ export async function startRuntime(k, {demo=false}={}) {
     finally {inFlight.delete(sig);}
   };
   const stopWatcher=demo?()=>{}:k.startWatcher(onSignature,{log:message=>engine.event('connection',{message}),status});
+  const stopSolscan=demo||!k.startSolscanWatcher?()=>{}:k.startSolscanWatcher(onSignature,{log:message=>engine.event('connection',{message}),status});
+  if(!demo) status.solscan ||= k.startSolscanWatcher ? {ok:null,note:'starting'} : {ok:false,note:'SOLSCAN_API_KEY not set: Helius only'};
   const timer=setInterval(()=>engine.recover().catch(e=>engine.event('error',{message:e.message})),5000);
   const balanceTimer=c.mode==='live'?setInterval(()=>adapter.balance().then(b=>{status.balance=b;}).catch(e=>engine.event('error',{message:e.message})),10000):null;
   let demonstration;
@@ -238,5 +279,5 @@ export async function startRuntime(k, {demo=false}={}) {
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});
   engine.event('started',{mode:c.mode,dashboard:`http://${host}:${port}`,note:demo?'SYNTHETIC DEMO; no chain or wallet connection':'confirmed leader signals; paper estimates are not guaranteed fills'});
-  return {engine,server,stop:()=>{stopWatcher();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,stop:()=>{stopWatcher();stopSolscan();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }

@@ -25,3 +25,36 @@ misconfigurations and sends nothing.
 
 Still unverified here (this workspace can't reach Solana): live RPC, real PumpPortal builds, landing,
 iPhone rendering. `node copybot.mjs check` on the real server is the first live verification.
+
+## Helius + Solscan upgrade (Oct 7, 23:40, Claude)
+Data source for every finding below: Decu's last 100 swaps from Solscan, checked transaction by
+transaction against Helius.
+
+Bugs found in live data and fixed:
+1. **The bot could not see any of his trades.** All of his transactions are version 1, and the
+   bot asked Helius for version 0, so every `getTransaction` failed. Now asks for version 1
+   (`MAX_TX_VERSION`). The local signer refuses builder transactions newer than v0 instead of misreading them.
+2. **Multi-hop buys were skipped.** A route leaves 1 raw unit of the intermediate coin in his wallet;
+   the parser called that a two-coin trade and dropped a real 0.25 SOL buy. Dust is ignored now.
+3. **The backup poller couldn't recover anything.** His address gets ~1000 transactions per 4 s
+   (85% failed, sent by others). 20 pages of 100 covered ~8 s of a 300 s window and used up the
+   rate limit. Helius poll now 1–3 pages of 1000; Solscan, which lists only his own swaps, covers the window.
+
+Added:
+- `solscan.mjs`: Solscan Pro v2 client, second watcher, multi-leg netting, leader profile, parser cross-check.
+- Runtime: records which provider saw each trade first; alerts when Solscan catches one Helius missed;
+  reports buys paid with PUMP tokens instead of dropping them silently; coin names in alerts.
+- SOL price order: Solscan, Helius (DAS), Jupiter, DexScreener.
+- `node copybot.mjs diagnose` (see GO-LIVE.md 3b). Dashboard shows provider status.
+
+What the data shows about him (89 trades after netting route legs, 1.4 h, 11 coins; 2 not scored
+because they started before the window): 6 of 9 in profit, +6.9 SOL. He opens with one large buy
+(≈2 SOL, about $230–345) and adds smaller buys after it; there were no small test buys first. Median 104 s from that buy
+to his first sell; 1 of 10 under 30 s, none under 10 s, so a copy landing 1–2 s after him is in time.
+3 of 11 coins were PUMP-paired (he still pays SOL; whether PumpPortal can build those routes is unverified).
+Before netting, Solscan's per-leg rows counted an intermediate coin as a trade and overstated his profit as +12.2 SOL.
+
+Result: 39/39 tests (13 new, from real Solscan rows), both demo runs pass. Live against Helius:
+parser matches Solscan on 89/89 swaps (30/91 before the fixes), websocket subscription acknowledged,
+`check` and `diagnose` run. Not verified here: the Solscan API with a key (verified through the
+Solscan connector instead), live sends, PumpPortal builds for PUMP-paired coins.

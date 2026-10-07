@@ -3,12 +3,14 @@
 //         node copybot.mjs check      self-test (no trades)
 //         node copybot.mjs backtest --date YYYY-MM-DD --wallet 100
 //         node copybot.mjs export --days 7
+//         node copybot.mjs diagnose   Helius vs Solscan health, parser cross-check, leader profile
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import nodeHttp from 'node:http';
 import {pathToFileURL} from 'node:url';
-import {startRuntime} from './runtime.mjs';
+import {startRuntime,normalize} from './runtime.mjs';
+import {solscanClient,startSolscanWatcher,swapsFromActivities,leaderProfile,compareDetection} from './solscan.mjs';
 
 // ===== solana.js =====
 // Dependency-free Solana helpers: base58, program-derived addresses (PDA),
@@ -269,6 +271,9 @@ const config = {
   rebroadcast: bool('REBROADCAST', true), // re-send the same signed tx a few times while waiting (better landing)
   fastPath: bool('FAST_PATH', true), // act on pump.fun buys straight from live logs (fastest)
   heliusKey: helius,
+  // Solscan Pro API (v2): independent second watcher, parser cross-check, token names, SOL price.
+  solscanKey: env('SOLSCAN_API_KEY'),
+  solscanPollMs: num('SOLSCAN_POLL_MS', 10000), // 0 = no Solscan watcher
 
   ntfyTopic: env('NTFY_TOPIC'),
   ntfyServer: env('NTFY_SERVER', 'https://ntfy.sh'),
@@ -345,11 +350,17 @@ async function rpc(method, params, timeoutMs = 10000) {
   return r.result;
 }
 
+const solscan = solscanClient({ apiKey: config.solscanKey, http: (...a) => http(...a) });
+
 const getBalanceSol = async (pubkey) => (await rpc('getBalance', [pubkey, { commitment: 'confirmed' }])).value / 1e9;
+
+// The leader's trades are version-1 transactions (checked on Helius 2026-10-07). Asking for
+// version 0 makes the RPC reject every one of them, so the bot would never see a trade.
+const MAX_TX_VERSION = num('MAX_TX_VERSION', 1);
 
 async function getTransaction(sig, tries = 8) {
   for (let i = 0; i < tries; i++) {
-    const tx = await rpc('getTransaction', [sig, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]);
+    const tx = await rpc('getTransaction', [sig, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: MAX_TX_VERSION }]);
     if (tx) return tx;
     await new Promise((r) => setTimeout(r, 350));
   }
@@ -431,6 +442,9 @@ function parseTransaction(raw) {
   const message = buf.subarray(msgStart);
   let o = 0;
   const versioned = (message[0] & 0x80) !== 0;
+  // This parser (used for signing, tipping and the safety check) knows the legacy and v0 layouts.
+  // Refuse anything newer rather than mis-read it.
+  if (versioned && (message[0] & 0x7f) !== 0) throw new Error(`unsupported transaction version ${message[0] & 0x7f} from builder: refusing to sign`);
   if (versioned) o = 1;
   const numRequiredSignatures = message[o];
   o += 3; // header: required sigs, readonly signed, readonly unsigned
@@ -636,9 +650,14 @@ function detectBuy(tx, leader) {
   for (const [m, v] of deltas) if (STABLES[m] && v.delta < 0) stableUsd += -v.delta;
 
   const spentSol = -(solDelta + wsol);
-  const bought = [...deltas.entries()]
+  let bought = [...deltas.entries()]
     .filter(([m, v]) => m !== WSOL && !STABLES[m] && v.delta > 0)
     .map(([mint, v]) => ({ mint, amount: v.delta, decimals: v.decimals, raw: v.delta * 10 ** v.decimals }));
+  // Multi-hop routes can leave a few raw units of the intermediate coin in his wallet. Seen on
+  // 2026-10-07: +1 raw unit next to +877e9 of the coin he bought, which made a real 0.25 SOL buy
+  // look like a two-coin trade and get skipped. Ignore amounts a million times smaller than the main one.
+  const maxRaw = Math.max(0, ...bought.map((b) => b.raw));
+  bought = bought.filter((b) => b.raw >= maxRaw * 1e-6);
   const sold = [...deltas.entries()].some(([m, v]) => m !== WSOL && !STABLES[m] && v.delta < 0);
 
   if (!bought.length) return null;
@@ -1354,21 +1373,29 @@ async function getSolUsd() {
   }
 }
 
-/** Live SOL/USD from Jupiter, then DexScreener. Throws if both are down. */
+/** SOL/USD sources in priority order: Solscan and Helius (DAS getAsset price_info) first, then Jupiter, DexScreener. */
+const SOL_PRICE_SOURCES = [
+  ['Solscan', async () => (solscan.enabled ? solscan.tokenPrice(WSOL) : null)],
+  ['Helius', async () => {
+    if (config.rpcIsPublic) return null;
+    const r = await rpc('getAsset', { id: WSOL }, 4000);
+    return Number(r?.token_info?.price_info?.price_per_token);
+  }],
+  ['Jupiter', async () => {
+    const base = config.jupiterApiKey ? 'https://api.jup.ag' : 'https://lite-api.jup.ag';
+    const r = await http(`${base}/price/v3?ids=${WSOL}`, { headers: config.jupiterApiKey ? { 'x-api-key': config.jupiterApiKey } : {}, timeoutMs: 4000 });
+    return Number(r?.[WSOL]?.usdPrice);
+  }],
+  ['DexScreener', async () => {
+    const r = await http(`https://api.dexscreener.com/token-pairs/v1/solana/${WSOL}`, { timeoutMs: 4000 });
+    const p = (Array.isArray(r) ? r : []).filter((x) => x.baseToken?.symbol === 'SOL' && /USDC|USDT/.test(x.quoteToken?.symbol)).sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+    return Number(p?.priceUsd);
+  }],
+];
+
+/** Live SOL/USD from the first source that answers. Throws if all are down. */
 async function fetchSolUsdLive() {
-  const tries = [
-    async () => {
-      const base = config.jupiterApiKey ? 'https://api.jup.ag' : 'https://lite-api.jup.ag';
-      const r = await http(`${base}/price/v3?ids=${WSOL}`, { headers: config.jupiterApiKey ? { 'x-api-key': config.jupiterApiKey } : {}, timeoutMs: 4000 });
-      return Number(r?.[WSOL]?.usdPrice);
-    },
-    async () => {
-      const r = await http(`https://api.dexscreener.com/token-pairs/v1/solana/${WSOL}`, { timeoutMs: 4000 });
-      const p = (Array.isArray(r) ? r : []).filter((x) => x.baseToken?.symbol === 'SOL' && /USDC|USDT/.test(x.quoteToken?.symbol)).sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
-      return Number(p?.priceUsd);
-    },
-  ];
-  for (const t of tries) {
+  for (const [, t] of SOL_PRICE_SOURCES) {
     try {
       const v = await t();
       if (v > 0) {
@@ -1379,7 +1406,7 @@ async function fetchSolUsdLive() {
       /* next */
     }
   }
-  throw new Error('Jupiter and DexScreener price both unavailable');
+  throw new Error('Solscan, Helius, Jupiter and DexScreener price all unavailable');
 }
 
 class Copier {
@@ -1625,6 +1652,7 @@ function startWatcher(onSignature, { log = console.log, status = {} } = {}) {
   let backoff = 1000;
   let lastMsg = Date.now();
   const seenPoll = new Set();
+  let truncatedLogAt = 0;
 
   const connect = () => {
     if (stopped) return;
@@ -1678,15 +1706,21 @@ function startWatcher(onSignature, { log = console.log, status = {} } = {}) {
     try {
       const horizon=Math.max(config.maxSignalAgeSec,Number(env('MAX_SELL_SIGNAL_AGE_SEC','300')) || 300);
       const cutoff=Date.now()/1000-horizon;
-      let before, all=[],done=false;
-      for(let page=0;page<20 && !done;page++) {
-        const rows=await rpc('getSignaturesForAddress',[config.leader,{limit:100,commitment:'confirmed',...(before?{before}:{})}]);
+      // His address is flooded: on 2026-10-07 Helius returned 1000 signatures spanning 4 seconds,
+      // 85% of them failed transactions by others. Paging back the full horizon is impossible and
+      // burns the rate limit, so this poll covers only the last few seconds. With SOLSCAN_API_KEY,
+      // the Solscan watcher (his own swaps only) covers the whole horizon.
+      const pages=num('HELIUS_POLL_PAGES',config.solscanKey?1:3);
+      let before, all=[],done=false,oldest=null;
+      for(let page=0;page<pages && !done;page++) {
+        const rows=await rpc('getSignaturesForAddress',[config.leader,{limit:1000,commitment:'confirmed',...(before?{before}:{})}]);
         if(!rows?.length)break;
-        for(const row of rows) {if(row.blockTime && row.blockTime<cutoff){done=true;break;}all.push(row);}
+        for(const row of rows) {if(row.blockTime && row.blockTime<cutoff){done=true;break;}oldest=row.blockTime||oldest;all.push(row);}
         before=rows.at(-1).signature;
-        if(rows.length<100)done=true;
-        if(page===19 && !done)log('recovery window truncated: inspect leader history for missed trades');
+        if(rows.length<1000)done=true;
       }
+      if(!done && oldest && !config.solscanKey && Date.now()-truncatedLogAt>600_000) {truncatedLogAt=Date.now();log(`Helius backup poll reaches back only ${Math.round(Date.now()/1000-oldest)} s (leader address is flooded); set SOLSCAN_API_KEY for full recovery`);}
+      status.pollCoverageSec=oldest?Math.round(Date.now()/1000-oldest):null;
       status.lastPoll=new Date().toISOString();
       for(const row of all.reverse()) if(!row.err) onSignature(row.signature,'poll');
     } catch(e) { log('poll error: '+redact(e.message)); }
@@ -2137,6 +2171,119 @@ function rowsToCsv(rows) {
 // ===== commands.js =====
 // All command-line entry points live here so they can be bundled into one file.
 
+// ===== diagnose.js =====
+// DIAGNOSE: Helius and Solscan side by side. Read-only; nothing is signed or sent.
+//  1. both providers answer, latency, and how far Solscan's index trails Helius
+//  2. SOL price from every source, and how far they disagree
+//  3. leader profile from Solscan's decoded swaps (what he trades, how long he holds)
+//  4. Helius coverage: every swap Solscan saw must be in Helius' signature history
+//  5. parser cross-check: the bot's own detection on Helius data vs Solscan's decoding
+
+async function diagnose({ pages = 2, verify = 15, log = console.log } = {}) {
+  const r = { at: new Date().toISOString(), leader: config.leader, providers: {}, prices: {}, warnings: [] };
+  const warn = (m) => { r.warnings.push(m); log(`WARN ${m}`); };
+  const ok = (name, detail) => log(`OK   ${name}: ${detail}`);
+  const timed = async (fn) => { const t0 = Date.now(); return { v: await fn(), ms: Date.now() - t0 }; };
+
+  try {
+    const { v, ms } = await timed(() => rpc('getSlot', [{ commitment: 'confirmed' }]));
+    r.providers.helius = { ok: true, slot: v, latencyMs: ms, publicRpc: config.rpcIsPublic };
+    ok('Helius RPC', `slot ${v} in ${ms} ms`);
+    if (config.rpcIsPublic) warn('using the public Solana RPC: set HELIUS_API_KEY');
+  } catch (e) {
+    r.providers.helius = { ok: false, error: redact(e.message) };
+    warn(`Helius RPC failed: ${redact(e.message)}`);
+  }
+  if (!solscan.enabled) {
+    r.providers.solscan = { ok: false, error: 'SOLSCAN_API_KEY not set' };
+    warn('SOLSCAN_API_KEY not set: Solscan checks skipped (key: https://solscan.io/apis)');
+  } else {
+    try {
+      const { v, ms } = await timed(() => solscan.lastBlock());
+      const slot = v?.current_slot ?? v?.block_id ?? null;
+      const lag = r.providers.helius?.slot && slot ? r.providers.helius.slot - slot : null;
+      r.providers.solscan = { ok: true, slot, latencyMs: ms, lagSlots: lag };
+      ok('Solscan API', `indexed slot ${slot} in ${ms} ms${lag !== null ? ` (${lag} slots, about ${(lag * 0.4).toFixed(1)} s behind Helius)` : ''}`);
+      if (lag !== null && lag > 150) warn(`Solscan index is ${lag} slots behind: its watcher will report gaps late`);
+    } catch (e) {
+      r.providers.solscan = { ok: false, error: redact(e.message) };
+      warn(`Solscan API failed: ${redact(e.message)}`);
+    }
+  }
+
+  for (const [name, fn] of SOL_PRICE_SOURCES) {
+    try { const v = await fn(); if (v > 0) r.prices[name] = v; } catch { /* reported below */ }
+  }
+  const px = Object.values(r.prices);
+  const solUsd = px.length ? px.sort((a, b) => a - b)[px.length >> 1] : config.solPriceFallback;
+  if (!px.length) warn('no live SOL price source answered');
+  else {
+    const spread = (Math.max(...px) - Math.min(...px)) / Math.min(...px);
+    ok('SOL price', Object.entries(r.prices).map(([k, v]) => `${k} $${v.toFixed(2)}`).join(', ') + ` (spread ${(spread * 100).toFixed(2)}%)`);
+    if (spread > 0.01) warn(`SOL price sources disagree by ${(spread * 100).toFixed(1)}%: USD filters may misfire`);
+  }
+  r.solUsd = solUsd;
+
+  if (!solscan.enabled || !r.providers.solscan?.ok) return r;
+
+  const activities = [];
+  for (let page = 1; page <= pages; page++) {
+    const rows = await solscan.defiActivities(config.leader, { page, pageSize: 100 });
+    if (!Array.isArray(rows) || !rows.length) break;
+    activities.push(...rows);
+    if (rows.length < 100) break;
+  }
+  const swaps = swapsFromActivities(activities, { solUsd });
+  const profile = leaderProfile(swaps, { minUsd: config.minLeaderBuyUsd });
+  r.profile = { ...profile, roundsDetail: undefined, coins: profile.roundsDetail.map(({ mint, quote, buys, sells, buySol, sellSol, pnlSol, holdSec, windowSec, copyUsd, partial }) => ({ mint, quote, buys, sells, buySol, sellSol, pnlSol, holdSec, windowSec, copyUsd, partial })) };
+  const hrs = profile.from ? ((profile.to - profile.from) / 3600).toFixed(1) : 0;
+  ok('leader swaps (Solscan)', `${swaps.length} swaps in ${hrs} h, ${profile.rounds} coins, ${profile.wins}/${profile.closedRounds} closed coins in profit, ${profile.pnlSol >= 0 ? '+' : ''}${profile.pnlSol.toFixed(3)} SOL`);
+  ok('pairs', Object.entries(profile.quotes).map(([q, n]) => `${q} ${n}`).join(', ') + (profile.pumpPaired ? ` (PUMP-paired: he pays SOL through a SOL→PUMP→coin route; check PumpPortal can build these before relying on them)` : ''));
+  if (profile.copyableRounds) ok('copy window', `median ${profile.medianWindowSec?.toFixed(0)} s from his first buy >= $${config.minLeaderBuyUsd} to his first sell; ${profile.windowUnder10s}/${profile.copyableRounds} under 10 s, ${profile.windowUnder30s}/${profile.copyableRounds} under 30 s`);
+  if (profile.pumpPaired && profile.pumpPaired / Math.max(1, profile.rounds) > 0.2) warn(`${profile.pumpPaired}/${profile.rounds} of his coins are PUMP-paired: run "check --mint <one of them>" to confirm PumpPortal can build that route`);
+
+  if (r.providers.helius?.ok && swaps.length) {
+    // His address is flooded (≈250 signatures/s), so a few pages of Helius history reach back only
+    // minutes. Compare just the swaps inside the span Helius actually returned.
+    const oldest = Math.min(...swaps.map((s) => s.time));
+    const sigs = new Set();
+    let before, reached = Infinity, complete = false;
+    for (let page = 0; page < 5; page++) {
+      const rows = await rpc('getSignaturesForAddress', [config.leader, { limit: 1000, ...(before ? { before } : {}) }]);
+      if (!rows?.length) { complete = true; break; }
+      for (const x of rows) sigs.add(x.signature);
+      before = rows.at(-1).signature;
+      reached = Math.min(reached, rows.at(-1).blockTime ?? reached);
+      if (reached < oldest || rows.length < 1000) { complete = true; break; }
+    }
+    const inSpan = swaps.filter((s) => complete || s.time >= reached);
+    const missing = inSpan.filter((s) => !sigs.has(s.sig));
+    r.coverage = { solscanSwaps: swaps.length, comparedSwaps: inSpan.length, heliusSignatures: sigs.size, heliusReachedBackSec: Number.isFinite(reached) ? Math.round(Date.now() / 1000 - reached) : null, missingFromHelius: missing.map((s) => s.sig) };
+    if (!inSpan.length) ok('Helius coverage', `5000 Helius signatures reach back only ${r.coverage.heliusReachedBackSec} s and none of his swaps fall in that span (his address is flooded); nothing to compare`);
+    else if (missing.length) warn(`${missing.length}/${inSpan.length} swap(s) Solscan saw are missing from Helius history: ${missing.slice(0, 3).map((s) => s.sig.slice(0, 10)).join(', ')}`);
+    else ok('Helius coverage', `all ${inSpan.length} Solscan swaps in the compared span are in Helius history`);
+
+    const results = [];
+    for (const s of swaps.slice(0, verify)) {
+      const tx = await getTransaction(s.sig, 2).catch(() => null);
+      if (!tx) { results.push({ sig: s.sig, ok: false, reason: 'Helius returned no transaction' }); continue; }
+      results.push(compareDetection(s, normalize(tx, config.leader, detectBuy, detectSell)));
+    }
+    const bad = results.filter((x) => !x.ok);
+    r.parserCheck = { checked: results.length, mismatches: bad };
+    if (bad.length) { warn(`bot parser disagrees with Solscan on ${bad.length}/${results.length} swaps`); for (const b of bad.slice(0, 5)) log(`     ${b.sig.slice(0, 12)}…  ${b.reason}`); }
+    else ok('parser cross-check', `bot detection matches Solscan on ${results.length}/${results.length} recent swaps`);
+  }
+  return r;
+}
+
+async function runDiagnoseCmd(argv = process.argv) {
+  const r = await diagnose({ pages: Number(argVal(argv, 'pages', 2)), verify: Number(argVal(argv, 'verify', 15)) });
+  const name = `diagnose-${dayKey()}.json`;
+  fs.writeFileSync(name, JSON.stringify(r, null, 1));
+  console.log(`\n${r.warnings.length ? `${r.warnings.length} warning(s).` : 'No warnings.'} Full report: ${name}`);
+}
+
 const argVal = (argv, name, d) => {
   const i = argv.indexOf(`--${name}`);
   return i > -1 ? argv[i + 1] : d;
@@ -2163,6 +2310,8 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
     // ---- GO-LIVE PREFLIGHT (nothing is ever sent) ----
     const need=config.buySol*(1+config.slippagePct/100)+config.tipSol+config.priorityFeeSol+0.005+config.minSolReserve;
     if(kp) await step('enough SOL for one copy',async()=>{const b=await getBalanceSol(kp.publicKey);if(b<need)throw new Error(`${b.toFixed(4)} SOL < ${need.toFixed(4)} needed (buy + slippage + fees + reserve)`);return `${b.toFixed(4)} SOL >= ${need.toFixed(4)} (about ${Math.floor((b-config.minSolReserve)/(need-config.minSolReserve))} copies)`;});
+    if(solscan.enabled) await step('Solscan API (second watcher)',async()=>{const t0=Date.now();const b=await solscan.lastBlock();const a=await solscan.defiActivities(config.leader,{pageSize:10});return `slot ${b?.current_slot ?? '?'}, ${Array.isArray(a)?a.length:0} recent leader swaps, ${Date.now()-t0} ms`;});
+    else console.log('WARN Solscan: SOLSCAN_API_KEY not set. The bot runs on Helius alone (no second watcher, no gap alerts).');
     await step('fast RPC (Helius)',async()=>{if(config.rpcIsPublic)throw new Error('public RPC: set HELIUS_API_KEY');return 'private RPC configured';});
     await step('phone alerts',async()=>{if(!config.ntfyTopic)throw new Error('NTFY_TOPIC not set');await notify({title:'Copy bot check',body:'If you see this, alerts work.',tags:['bell']});return 'test alert sent: check your phone';});
     if(!config.dryRun){
@@ -2184,7 +2333,9 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
     process.exitCode=failed?1:0;return;
   }
   if (!config.dryRun && !demo && config.executor!=='pumpportal') throw new Error('v2 live execution supports EXECUTOR=pumpportal only; legacy Jupiter remains for quotes/backtests');
-  const r = await startRuntime({config,kp,notify,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  const solscanWatch = solscan.enabled && config.solscanPollMs > 0 ? (onSignature, opts) => startSolscanWatcher({ client: solscan, leader: config.leader, intervalMs: config.solscanPollMs, horizonSec: Math.max(config.maxSignalAgeSec, num('MAX_SELL_SIGNAL_AGE_SEC', 300)), onSignature, ...opts }) : null;
+  const tokenLabel = solscan.enabled ? async (mint) => { const m = await solscan.tokenMeta(mint); return m?.symbol ? `$${m.symbol}` : null; } : null;
+  const r = await startRuntime({config,kp,notify,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,tokenLabel,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();process.exit(0);});
 }
 
@@ -2251,13 +2402,14 @@ async function main(argv = process.argv) {
   if (cmd === 'backtest') return runBacktestCmd(argv);
   if (cmd === 'export') return runExportCmd(argv);
   if (cmd === 'report') return runReportCmd(argv);
+  if (cmd === 'diagnose') return runDiagnoseCmd(argv);
   if (cmd === 'run') return runBot();
   if (cmd === 'demo') return runBot({demo:true});
-  console.error(`Unknown command "${cmd}". Use: run | check | backtest | export | report`);
+  console.error(`Unknown command "${cmd}". Use: run | check | diagnose | demo | backtest | export | report`);
   process.exit(1);
 }
 
 
 // ===== entry =====
-export {config,setFetch,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
+export {config,setFetch,diagnose,solscan,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);

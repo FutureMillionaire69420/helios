@@ -25,10 +25,18 @@ Do these in order. Don't skip a step because an earlier one passed.
 | `ENGINE_STATE_FILE` | `engine-live.json` (Render: `/var/data/engine-live.json`) | the bot refuses to mix paper and live state |
 | `DASHBOARD_TOKEN` | 24+ random characters | required for live |
 | `HELIUS_API_KEY` | your key | fast detection + Helius Sender |
+| `SOLSCAN_API_KEY` | your key | second watcher, gap alerts, coin names |
 | `NTFY_TOPIC` | your topic | buy / SOLD / failure alerts |
 | `SIZING_MODE` / `BUY_SOL` / `DAILY_CAP_SOL` | `fixed` / `0.1` / `1` | your rules |
 | `AUTO_SELL` | `false` | you sell by hand from the SOLD alert |
 | `SLIPPAGE_PCT` | `20` | 10% failed often on his coins |
+
+## 3b. Data health: `node copybot.mjs diagnose`
+Read-only. Compares Helius and Solscan: both answer, how far Solscan's index trails, SOL price from
+Solscan / Helius / Jupiter / DexScreener, every Solscan swap present in Helius history, and the
+bot's own trade parser vs Solscan's decoding of his last 15 swaps. Fix every WARN before going live.
+It also profiles him: coins per hour, wins, and the median seconds between his first buy over
+`MIN_LEADER_BUY_USD` and his first sell (your whole window). Report saved to `diagnose-<date>.json`.
 
 ## 4. Preflight: must print "READY FOR LIVE"
 ```

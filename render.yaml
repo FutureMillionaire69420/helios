@@ -18,6 +18,8 @@ services:
         value: "true"
       - key: HELIUS_API_KEY
         sync: false
+      - key: SOLSCAN_API_KEY
+        sync: false
       - key: DASHBOARD_TOKEN
         generateValue: true
       - key: DASHBOARD_HOST
