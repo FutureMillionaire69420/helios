@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+node_modules/
+engine-*.json
+engine-*.json.tmp
+state.json
+state.json.tmp
+paper.json
+trades.log
+*.log

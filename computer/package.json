@@ -1,0 +1,19 @@
+{
+  "name": "decu-copybot",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node copybot.mjs",
+    "check": "node copybot.mjs check",
+    "backtest": "node copybot.mjs backtest",
+    "export": "node copybot.mjs export",
+    "test": "node --test engine.test.mjs",
+    "smoke": "node smoke.mjs",
+    "demo": "node copybot.mjs demo",
+    "report": "node copybot.mjs report"
+  }
+}
