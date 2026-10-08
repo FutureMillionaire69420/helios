@@ -216,7 +216,9 @@ function loadDotEnv(file) {
     let val = line.slice(eq + 1).trim();
     if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
     else val = val.replace(/\s+#.*$/, '').trim();
-    if (process.env[key] === undefined) process.env[key] = val;
+    // An empty inherited value counts as unset: setup starts the check as a child process, and the
+    // parent loaded the then-empty .env, so its blanks must not hide the keys setup just saved.
+    if (process.env[key] === undefined || process.env[key] === '') process.env[key] = val;
   }
 }
 loadDotEnv(path.resolve(process.cwd(), '.env'));

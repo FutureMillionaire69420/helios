@@ -139,3 +139,13 @@ test('websocket filter drops the measured spam and keeps every pump.fun trade', 
   assert.equal(relevantLogs(['Program X invoke [1]', 'Log truncated']), true, 'truncated logs are fetched');
   assert.equal(relevantLogs(undefined), true, 'no logs: fetch');
 });
+
+test('values saved in .env win over empty inherited ones (setup then check)', async (t) => {
+  const dir = tmp(t);
+  fs.writeFileSync(path.join(dir, '.env'), 'HELIUS_API_KEY=saved-key\nNTFY_TOPIC=saved-topic\n');
+  const p = spawn(process.execPath, ['--input-type=module', '-e', `const {config}=await import(${JSON.stringify(new URL('./copybot.mjs', import.meta.url).href)}); console.log(config.heliusKey+'|'+config.ntfyTopic); process.exit(0)`], {cwd: dir, env: {...process.env, HELIUS_API_KEY: '', NTFY_TOPIC: ''}});
+  t.after(() => p.kill('SIGKILL'));
+  let out = ''; p.stdout.on('data', (b) => { out += b; }); p.stderr.on('data', (b) => { out += b; });
+  await new Promise((r) => p.once('exit', r));
+  assert.equal(out.trim(), 'saved-key|saved-topic');
+});

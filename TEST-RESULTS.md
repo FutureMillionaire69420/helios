@@ -78,6 +78,6 @@ Also:
 - Double-click files for Mac and Windows: setup, start, check, status, go-live, back-to-paper.
 - `status` prints paper results per sell timing.
 
-Result: 46/46 tests (7 new: supervisor crash-restart and give-up, setup wizard, RPC retry, pruning,
+Result: 47/47 tests (8 new: supervisor crash-restart and give-up, setup wizard, RPC retry, pruning,
 spam filtering, error throttling), both demo runs pass, live paper run clean.
 Not tested here: the double-click files on real macOS/Windows (Linux sandbox), Windows sleep settings.
