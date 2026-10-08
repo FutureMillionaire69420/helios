@@ -58,3 +58,26 @@ Result: 39/39 tests (13 new, from real Solscan rows), both demo runs pass. Live 
 parser matches Solscan on 89/89 swaps (30/91 before the fixes), websocket subscription acknowledged,
 `check` and `diagnose` run. Not verified here: the Solscan API with a key (verified through the
 Solscan connector instead), live sends, PumpPortal builds for PUMP-paired coins.
+
+## Stability and setup (Oct 8, Claude)
+Live 45-second paper run on the free Helius key, before and after:
+- Before: 1,508 transactions mentioning his address in 45 s, each downloaded in full: **1,440 rate-limit
+  errors**, every Helius call failing. Measured cause: ~26 successful transactions a second from one
+  unrelated program (`Dhpy…`), none touching pump.fun, plus ~86 failed ones a second.
+- After: websocket messages that never touch pump.fun or PumpSwap are skipped without a download
+  (815 in 45 s); the Helius backup poll stands by while the websocket is healthy. **0 errors.**
+
+Also:
+- `node copybot.mjs start` supervises the bot: restarts after a crash (phone alert), stops after 5
+  failures within a minute of starting, keeps a Mac awake. Crashes are logged to trades.log.
+- RPC reads retry HTTP 429/5xx with backoff. Strangers' transactions are counted, not journaled;
+  repeated errors write one event per 30 s. Duplicate keys older than 2 days are pruned from state;
+  trades.log over 50 MB rotates at startup.
+- `node copybot.mjs setup` (keys, dashboard password, ntfy topic, then check), `setup --live`
+  (hidden key entry, address confirmation, 0.2 SOL first-day cap), `setup --paper`.
+- Double-click files for Mac and Windows: setup, start, check, status, go-live, back-to-paper.
+- `status` prints paper results per sell timing.
+
+Result: 46/46 tests (7 new: supervisor crash-restart and give-up, setup wizard, RPC retry, pruning,
+spam filtering, error throttling), both demo runs pass, live paper run clean.
+Not tested here: the double-click files on real macOS/Windows (Linux sandbox), Windows sleep settings.

@@ -92,8 +92,10 @@ export function paperSummary(stats={}) {
 }
 
 export async function startRuntime(k, {demo=false}={}) {
-  const c = runtimeConfig(k.config,demo), status={websocket:'starting',lastPoll:null,lastSignal:null,errors:0,firstSeen:{ws:0,poll:0,solscan:0},gaps:0,unsupported:0};
+  const c = runtimeConfig(k.config,demo), status={websocket:'starting',lastPoll:null,lastSignal:null,errors:0,firstSeen:{ws:0,poll:0,solscan:0},gaps:0,unsupported:0,otherWallets:0};
   c.wallet=c.mode==='live'?k.kp.publicKey:null;
+  // Keep the journal from filling the disk: over 50 MB it moves to trades.log.1 at startup.
+  try { if (fs.statSync(k.config.logFile).size > 50e6) fs.renameSync(k.config.logFile, k.config.logFile+'.1'); } catch {}
   const token = val('DASHBOARD_TOKEN','');
   if (!demo && !k.config.dryRun && token.length<24) throw new Error('LIVE requires DASHBOARD_TOKEN of at least 24 characters');
   const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey].filter(Boolean);
@@ -216,6 +218,7 @@ export async function startRuntime(k, {demo=false}={}) {
   }
   await engine.recover();
   const inFlight=new Set(), completed=new Set(), delivered=new Set();
+  let lastErrorEventAt=0, hiddenErrors=0;
   const onSignature=async(sig,source='poll')=>{
     // Which provider saw each leader transaction first. Solscan arriving first means both Helius
     // paths (websocket and polling) missed it: count it and alert, then process it normally.
@@ -233,7 +236,13 @@ export async function startRuntime(k, {demo=false}={}) {
       if(!signals.length) {
         const u=classifyUnsupported(tx,k.config.leader);
         if(u) {status.unsupported++;engine.event('unsupported',{leaderSignature:sig,mint:u.mint,kind:u.kind,reason:u.kind==='token-swap'?'token-to-token swap':'paid or received PUMP tokens instead of SOL; bot trades with SOL only'});}
-        else engine.event('ignored',{leaderSignature:sig,reason:'no supported SOL trade detected'});
+        else {
+          // Most transactions touching his address are other people's (bots, spam): ~5 a second on
+          // 2026-10-07. Count those instead of writing an event each (that filled the disk and log).
+          const me=(tx.transaction?.message?.accountKeys||[]).find(x=>(typeof x==='string'?x:x.pubkey)===k.config.leader);
+          if(me && typeof me==='object' && !me.signer) status.otherWallets++;
+          else engine.event('ignored',{leaderSignature:sig,reason:'no supported SOL trade detected'});
+        }
       }
       for(const s of signals) {
         if(s.side==='buy') s.usd=s.sol*await k.getSolUsd();
@@ -241,13 +250,19 @@ export async function startRuntime(k, {demo=false}={}) {
       }
       completed.add(sig); status.lastSignal=new Date().toISOString();
       if(completed.size>10000) completed.delete(completed.values().next().value);
-    } catch(e) {status.errors++;engine.event('error',{leaderSignature:sig,message:e.message});}
+    } catch(e) {
+      // Under rate limits this can fire several times a second: keep the count, write at most one event per 30 s.
+      status.errors++; status.lastError=e.message.slice(0,200);
+      if(Date.now()-lastErrorEventAt>30_000) {lastErrorEventAt=Date.now();engine.event('error',{leaderSignature:sig,message:e.message+(hiddenErrors?` (+${hiddenErrors} similar errors not listed)`:'')});hiddenErrors=0;}
+      else hiddenErrors++;
+    }
     finally {inFlight.delete(sig);}
   };
   const stopWatcher=demo?()=>{}:k.startWatcher(onSignature,{log:message=>engine.event('connection',{message}),status});
   const stopSolscan=demo||!k.startSolscanWatcher?()=>{}:k.startSolscanWatcher(onSignature,{log:message=>engine.event('connection',{message}),status});
   if(!demo) status.solscan ||= k.startSolscanWatcher ? {ok:null,note:'starting'} : {ok:false,note:'SOLSCAN_API_KEY not set: Helius only'};
   const timer=setInterval(()=>engine.recover().catch(e=>engine.event('error',{message:e.message})),5000);
+  const pruneTimer=setInterval(()=>engine.lock(()=>{if(engine.prune())engine.save();}).catch(()=>{}),600_000);
   const balanceTimer=c.mode==='live'?setInterval(()=>adapter.balance().then(b=>{status.balance=b;}).catch(e=>engine.event('error',{message:e.message})),10000):null;
   let demonstration;
   if(demo) {
@@ -285,5 +300,5 @@ export async function startRuntime(k, {demo=false}={}) {
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});
   engine.event('started',{mode:c.mode,dashboard:`http://${host}:${port}`,note:demo?'SYNTHETIC DEMO; no chain or wallet connection':'confirmed leader signals; paper estimates are not guaranteed fills'});
-  return {engine,server,stop:()=>{stopWatcher();stopSolscan();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,stop:()=>{stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }

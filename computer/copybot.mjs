@@ -4,11 +4,14 @@
 //         node copybot.mjs backtest --date YYYY-MM-DD --wallet 100
 //         node copybot.mjs export --days 7
 //         node copybot.mjs diagnose   Helius vs Solscan health, parser cross-check, leader profile
+//         node copybot.mjs setup      guided setup (keys, dashboard password, phone alerts)
+//         node copybot.mjs start      run the bot and restart it automatically if it crashes
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import nodeHttp from 'node:http';
-import {pathToFileURL} from 'node:url';
+import {pathToFileURL,fileURLToPath} from 'node:url';
+import {spawn,spawnSync} from 'node:child_process';
 import {startRuntime,normalize} from './runtime.mjs';
 import {solscanClient,startSolscanWatcher,swapsFromActivities,leaderProfile,compareDetection} from './solscan.mjs';
 
@@ -344,10 +347,18 @@ async function http(url, { method = 'GET', headers = {}, body, timeoutMs = 10000
 }
 
 let id = 1;
+/** JSON-RPC read. Rate limits (HTTP 429) and server errors are retried 3 times with backoff. */
 async function rpc(method, params, timeoutMs = 10000) {
-  const r = await http(config.rpcUrl, { method: 'POST', body: { jsonrpc: '2.0', id: id++, method, params }, timeoutMs });
-  if (r.error) throw new Error(`RPC ${method}: ${r.error.message || JSON.stringify(r.error)}`.slice(0, 240));
-  return r.result;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const r = await http(config.rpcUrl, { method: 'POST', body: { jsonrpc: '2.0', id: id++, method, params }, timeoutMs });
+      if (r.error) throw new Error(`RPC ${method}: ${r.error.message || JSON.stringify(r.error)}`.slice(0, 240));
+      return r.result;
+    } catch (e) {
+      if (attempt >= 3 || !/HTTP (429|5\d\d)/.test(e.message)) throw e;
+      await new Promise((res) => setTimeout(res, 300 * 2 ** attempt));
+    }
+  }
 }
 
 const solscan = solscanClient({ apiKey: config.solscanKey, http: (...a) => http(...a) });
@@ -1646,6 +1657,17 @@ class Copier {
 //  2. backup polling of getSignaturesForAddress (catches anything missed during reconnects)
 // Both feed the same callback; the copier de-duplicates by signature.
 
+/**
+ * Can this transaction be a trade the bot acts on? Measured 2026-10-08: ~26 successful transactions
+ * a second mention his address, all from one unrelated program, none touching pump.fun. Fetching
+ * each one exhausted the Helius rate limit within seconds. With PUMP_ONLY (the default) a trade must
+ * invoke pump.fun or PumpSwap, which always shows in the logs. Missing or truncated logs: fetch anyway.
+ */
+function relevantLogs(logs) {
+  if (!config.pumpOnly || !Array.isArray(logs) || !logs.length) return true;
+  return logs.some((l) => l.includes(PROGRAMS.PUMP) || l.includes(PROGRAMS.PUMP_AMM) || l.includes('Log truncated'));
+}
+
 function startWatcher(onSignature, { log = console.log, status = {} } = {}) {
   let ws;
   let stopped = false;
@@ -1678,7 +1700,10 @@ function startWatcher(onSignature, { log = console.log, status = {} } = {}) {
       }
       if(m.id===1){ if(m.error){status.websocket='subscription failed';log('subscription failed: '+m.error.message);ws.close();} else {status.websocket='subscribed';log('wallet subscription acknowledged');} }
       const v = m?.params?.result?.value;
-      if (m.method === 'logsNotification' && v?.signature && !v.err) onSignature(v.signature, 'ws', v.logs);
+      if (m.method === 'logsNotification' && v?.signature && !v.err) {
+        if (relevantLogs(v.logs)) onSignature(v.signature, 'ws', v.logs);
+        else status.filteredWs = (status.filteredWs || 0) + 1;
+      }
     };
     ws.onclose = () => {
       if (stopped) return;
@@ -1722,7 +1747,12 @@ function startWatcher(onSignature, { log = console.log, status = {} } = {}) {
       if(!done && oldest && !config.solscanKey && Date.now()-truncatedLogAt>600_000) {truncatedLogAt=Date.now();log(`Helius backup poll reaches back only ${Math.round(Date.now()/1000-oldest)} s (leader address is flooded); set SOLSCAN_API_KEY for full recovery`);}
       status.pollCoverageSec=oldest?Math.round(Date.now()/1000-oldest):null;
       status.lastPoll=new Date().toISOString();
-      for(const row of all.reverse()) if(!row.err) onSignature(row.signature,'poll');
+      // These rows carry no logs, so each one costs a full transaction download. While the websocket
+      // is healthy it already delivers everything (filtered), so the poll stands by. When it is down,
+      // fetch only the newest HELIUS_POLL_MAX; Solscan (his own swaps only) covers the rest.
+      const wsHealthy=status.websocket==='subscribed' && Date.now()-lastMsg<30_000;
+      status.pollMode=wsHealthy?'standby (websocket healthy)':'catch-up';
+      if(!wsHealthy) for(const row of all.filter(x=>!x.err).slice(0,num('HELIUS_POLL_MAX',25)).reverse()) onSignature(row.signature,'poll');
     } catch(e) { log('poll error: '+redact(e.message)); }
     if(!stopped)setTimeout(poll,config.pollIntervalMs);
   };
@@ -2427,11 +2457,152 @@ async function runControlCmd(argv = process.argv) {
   if (CONTROL[key]) await call(CONTROL[key], 'POST');
   const s = await call('/api/status');
   console.log(`Mode: ${s.mode.toUpperCase()} | New buys: ${s.paused ? 'PAUSED' : 'on'} | Alerts: ${s.alertsOff ? 'OFF' : 'on'}${s.alertsOff && s.mode === 'live' ? ' (unknown-outcome live trades still alert)' : ''}`);
+  if (s.paper?.length) {
+    console.log('\nPaper results (pretend money). "buy+5s" = sold 5 s after the bot bought, "his-sell+10s" = sold 10 s after he sold:');
+    for (const p of s.paper) console.log(`  ${p.exit.padEnd(13)} ${String(p.trades).padStart(4)} trades  ${String(p.wins).padStart(4)} wins  ${p.pnlSol >= 0 ? '+' : ''}${p.pnlSol.toFixed(4)} SOL`);
+  } else if (s.mode === 'paper') console.log('No paper trades yet. They appear after Decu buys a coin the bot copies.');
+}
+
+// ===== setup.js =====
+// node copybot.mjs setup          paper mode: asks for the Helius / Solscan keys, creates the rest
+// node copybot.mjs setup --live   asks for the trading wallet key and switches to real trades
+// node copybot.mjs setup --paper  back to pretend trades (the wallet key stays in .env, unused)
+async function runSetup(argv = process.argv) {
+  const { createInterface } = await import('node:readline');
+  const file = path.resolve(process.cwd(), '.env');
+  if (!fs.existsSync(file)) {
+    fs.copyFileSync(new URL('./.env.example', import.meta.url), file);
+    console.log('Created .env (your private settings file).');
+  }
+  let text = fs.readFileSync(file, 'utf8');
+  const get = (k) => (text.match(new RegExp(`^${k}=(.*)$`, 'm'))?.[1] ?? '').replace(/\s+#.*$/, '').trim();
+  const set = (k, v) => { const re = new RegExp(`^${k}=.*$`, 'm'); text = re.test(text) ? text.replace(re, `${k}=${v}`) : `${text.replace(/\n*$/, '\n')}${k}=${v}\n`; };
+  // .env holds keys: readable by this user only.
+  const save = () => { fs.writeFileSync(file, text, { mode: 0o600 }); try { fs.chmodSync(file, 0o600); } catch { /* Windows */ } };
+  // Queue every typed or pasted line, so answers given before a question appears are not lost.
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const lines = [], waiting = [];
+  let closed = false;
+  rl.on('line', (l) => (waiting.length ? waiting.shift()(l) : lines.push(l)));
+  rl.on('close', () => { closed = true; while (waiting.length) waiting.shift()(''); });
+  const nextLine = () => (lines.length ? Promise.resolve(lines.shift()) : closed ? Promise.resolve('') : new Promise((r) => waiting.push(r)));
+  const ask = async (q) => { process.stdout.write(q); return (await nextLine()).trim().replace(/^["']|["']$/g, ''); };
+  // Typed characters are not shown (for the wallet key). Falls back to visible input if unsupported.
+  const askHidden = async (q) => { process.stdout.write(q); const w = rl._writeToOutput; rl._writeToOutput = () => {}; try { return (await nextLine()).trim(); } finally { rl._writeToOutput = w; process.stdout.write('\n'); } };
+  try {
+    if (argv.includes('--paper')) {
+      set('DRY_RUN', 'true');
+      if (/live/i.test(get('ENGINE_STATE_FILE'))) set('ENGINE_STATE_FILE', 'engine-paper.json');
+      save();
+      console.log('Switched to PAPER mode (pretend trades). Restart the bot for it to take effect.');
+      return;
+    }
+    if (argv.includes('--live')) {
+      console.log('\n=== Switch to REAL trades ===');
+      console.log('Only do this after 3+ days of paper results that were profitable (node copybot.mjs status).');
+      console.log('Use a NEW wallet that holds only money you can afford to lose. Never your main wallet.\n');
+      if ((await ask('Type LIVE to continue: ')) !== 'LIVE') { console.log('Cancelled. Nothing changed.'); return; }
+      const key = await askHidden('Paste the trading wallet private key (it will not show while you paste), then press Enter: ');
+      let kp;
+      try { kp = loadKeypair(key); } catch (e) { console.log(`That is not a valid Solana private key (${e.message}). Nothing changed.`); return; }
+      if ((await ask(`Wallet address: ${kp.publicKey}\nDoes this match the address in your wallet app? (yes/no): `)).toLowerCase() !== 'yes') { console.log('Cancelled. Nothing changed.'); return; }
+      set('PRIVATE_KEY', key);
+      set('DRY_RUN', 'false');
+      if (/paper|demo/i.test(get('ENGINE_STATE_FILE'))) set('ENGINE_STATE_FILE', 'engine-live.json');
+      if (!(Number(get('DAILY_CAP_SOL')) <= 0.2)) set('DAILY_CAP_SOL', '0.2');
+      if (get('DASHBOARD_TOKEN').length < 24) set('DASHBOARD_TOKEN', crypto.randomBytes(24).toString('hex'));
+      save();
+      console.log('\nLIVE settings saved. First day is limited to 0.2 SOL of buys (DAILY_CAP_SOL); raise it in .env later.');
+      console.log('Now running the go-live check. It builds and tests a real buy but does NOT send it.\n');
+    } else {
+      console.log('\n=== Decu copy bot setup (pretend trades, no real money) ===\n');
+      const h = get('HELIUS_API_KEY');
+      const hk = await ask(h ? `Helius key is saved (ends ${h.slice(-4)}). Press Enter to keep it, or paste a new one: ` : 'Paste your Helius API key (dashboard.helius.dev), then press Enter: ');
+      if (hk) set('HELIUS_API_KEY', hk.match(/api-key=([\w-]+)/)?.[1] || hk);
+      const s = get('SOLSCAN_API_KEY');
+      const sk = await ask(s ? `Solscan key is saved (ends ${s.slice(-4)}). Press Enter to keep it, or paste a new one: ` : 'Paste your Solscan API key, or just press Enter to skip for now: ');
+      if (sk) set('SOLSCAN_API_KEY', sk);
+      if (!get('DASHBOARD_TOKEN')) set('DASHBOARD_TOKEN', crypto.randomBytes(24).toString('hex'));
+      if (!get('NTFY_TOPIC')) set('NTFY_TOPIC', `decu-${crypto.randomBytes(10).toString('hex')}`);
+      save();
+      console.log(`\nSaved. Write these two down:`);
+      console.log(`  Dashboard password:  ${get('DASHBOARD_TOKEN')}`);
+      console.log(`  Phone alert topic:   ${get('NTFY_TOPIC')}   (subscribe to it in the ntfy app)`);
+      console.log(`  Mode: ${get('DRY_RUN') === 'false' ? 'LIVE (real money)' : 'PAPER (pretend trades)'}\n`);
+      if (!get('HELIUS_API_KEY')) { console.log('No Helius key yet: run setup again once you have one.'); return; }
+      console.log('Now checking the connections...\n');
+    }
+  } finally {
+    rl.close();
+  }
+  if (!argv.includes('--no-check')) {
+    const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'check'], { stdio: 'inherit', cwd: process.cwd() });
+    process.exitCode = r.status ?? 1;
+  }
+}
+
+// ===== supervisor.js =====
+// node copybot.mjs start [demo]: runs the bot as a child process and restarts it if it crashes.
+// Restarting is safe: every signed transaction is saved before it is sent and re-checked on start.
+// Stops for good after 5 failures within a minute of starting (a setting is wrong; read the error).
+// On a Mac it also keeps the computer awake while it runs (set ALLOW_SLEEP=true to turn that off).
+async function runSupervisor(argv = process.argv) {
+  const mode = argv.includes('demo') ? 'demo' : 'run';
+  const backoffMs = num('SUPERVISOR_BACKOFF_MS', 5000);
+  let stopping = false, child = null, wake = null, fastFails = 0, restarts = 0;
+  const stop = (sig) => { stopping = true; child?.kill(sig); wake?.(); };
+  process.on('SIGINT', () => stop('SIGINT'));
+  process.on('SIGTERM', () => stop('SIGTERM'));
+  let awake = null;
+  if (process.platform === 'darwin' && !bool('ALLOW_SLEEP', false)) {
+    awake = spawn('caffeinate', ['-ims', '-w', String(process.pid)], { stdio: 'ignore' });
+    awake.on('error', () => console.log('[supervisor] could not keep the Mac awake; turn off sleep in System Settings'));
+  }
+  while (!stopping) {
+    const started = Date.now();
+    child = spawn(process.execPath, [fileURLToPath(import.meta.url), mode], { stdio: 'inherit' });
+    console.log(`[supervisor] bot started (pid ${child.pid}). Close this window or press Ctrl+C to stop it.`);
+    const { code, signal } = await new Promise((resolve) => child.once('exit', (c, s) => resolve({ code: c, signal: s })));
+    if (stopping || code === 0) break;
+    fastFails = Date.now() - started < 60_000 ? fastFails + 1 : 0;
+    restarts++;
+    if (fastFails >= 5) {
+      console.error('\n[supervisor] The bot stopped 5 times right after starting. Read the error above, fix it, then start again.');
+      if (mode === 'run') await notify({ title: 'Copy bot STOPPED', body: 'It failed 5 times right after starting. Check the computer.', priority: 5, tags: ['rotating_light'] });
+      process.exitCode = 1;
+      break;
+    }
+    const wait = Math.min(backoffMs * 2 ** Math.max(0, fastFails - 1), 60_000);
+    console.error(`[supervisor] bot stopped unexpectedly (${signal || `exit code ${code}`}). Restarting in ${Math.round(wait / 1000)} s.`);
+    if (mode === 'run') notify({ title: `Copy bot crashed, restarting (#${restarts})`, body: `${signal || `exit code ${code}`}. It resumes from its saved state.`, priority: 4, tags: ['warning'] });
+    await new Promise((r) => { wake = r; setTimeout(r, wait); });
+    wake = null;
+  }
+  awake?.kill();
+}
+
+/** Any error nothing else caught: record it and exit, so the supervisor restarts a clean process. */
+function installCrashHandlers() {
+  const crash = (kind) => (err) => {
+    const message = redact(String(err?.stack || err?.message || err)).slice(0, 2000);
+    console.error(`FATAL ${kind}: ${message}`);
+    try { fs.appendFileSync(config.logFile, JSON.stringify({ time: new Date().toISOString(), type: 'crash', kind, message }) + '\n', { mode: 0o600 }); } catch { /* disk unavailable */ }
+    process.exit(1);
+  };
+  process.on('uncaughtException', crash('uncaught exception'));
+  process.on('unhandledRejection', crash('unhandled rejection'));
 }
 
 /** One entry point: node copybot.mjs [run|check|backtest|export|report] [--flags] */
 async function main(argv = process.argv) {
+  if (Number(process.versions.node.split('.')[0]) < 22) {
+    console.error(`Node.js 22 or newer is needed (this computer has ${process.version}). Install the LTS version from https://nodejs.org and try again.`);
+    process.exit(2);
+  }
   const cmd = argv[2] && !argv[2].startsWith('--') ? argv[2] : argv.includes('--check') ? 'check' : 'run';
+  if (cmd === 'setup') return runSetup(argv);
+  if (cmd === 'start') return runSupervisor(argv);
+  if (cmd === 'run' || cmd === 'demo') installCrashHandlers();
   if (cmd === 'check') return runBot({ check: true });
   if (cmd === 'backtest') return runBacktestCmd(argv);
   if (cmd === 'export') return runExportCmd(argv);
@@ -2440,11 +2611,11 @@ async function main(argv = process.argv) {
   if (['alerts', 'paper', 'pause', 'resume', 'status'].includes(cmd)) return runControlCmd(argv).catch((e) => { console.error(e.message); process.exitCode = 1; });
   if (cmd === 'run') return runBot();
   if (cmd === 'demo') return runBot({demo:true});
-  console.error(`Unknown command "${cmd}". Use: run | check | diagnose | demo | alerts on|off | paper on|off | pause | resume | status | backtest | export | report`);
+  console.error(`Unknown command "${cmd}". Use: setup | start | run | check | diagnose | demo | alerts on|off | paper on|off | pause | resume | status | backtest | export | report`);
   process.exit(1);
 }
 
 
 // ===== entry =====
-export {config,setFetch,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
+export {config,setFetch,rpc,relevantLogs,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);

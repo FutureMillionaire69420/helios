@@ -1,0 +1,130 @@
+# Start here: get the bot running (simple version)
+
+**What this is:** a robot that watches one trader (Decu). When he buys a pump.fun coin, the robot buys
+the same coin. It runs on your computer, and your phone gets a message when something happens.
+
+**Two modes:**
+- **PAPER** = pretend money. The robot acts as if it bought, so you can see if it *would* have made
+  money. **Start here. No real money is used.**
+- **LIVE** = real money. Only after paper mode has made money for several days.
+
+> Honest warning: the test runs so far **lost** money (see TEST-RESULTS.md). Paper mode is how you
+> find out whether it works before risking anything. Never use money you can't afford to lose.
+
+---
+
+## What you need (shopping list)
+
+| Thing | Why | Cost |
+|---|---|---|
+| A Mac or Windows computer that can stay **on and plugged in** | the robot lives here | — |
+| **Node.js** | the engine the robot runs on | free |
+| **Helius** API key | the robot's eyes on the blockchain | free to start |
+| **Solscan** API key | a second pair of eyes (optional at first) | paid plan |
+| **ntfy** app on your phone | messages from the robot | free |
+
+---
+
+## Part 1: Set up pretend trading (about 20 minutes)
+
+### Step 1. Install Node.js
+1. Go to **https://nodejs.org**
+2. Click the big **LTS** download button (version 22 or newer).
+3. Open the downloaded file and click **Next / Continue** until it's done.
+
+### Step 2. Put the robot on your computer
+1. Download the zip file I sent you (`decu-bot.zip`).
+2. Double-click it. You get a folder called **decu-bot**. Move it to your **Desktop**.
+3. Open **decu-bot**, then open the **computer** folder inside it. All the buttons are in there.
+
+### Step 3. Get your Helius key
+1. Go to **https://dashboard.helius.dev** and sign up.
+2. Find **API Keys** and copy your key (it looks like `1a2b3c4d-....`).
+
+### Step 4. (Optional now) Get your Solscan key
+Go to **https://solscan.io/apis**, pick a plan, and copy your API key. You can skip this and add it
+later by running setup again.
+
+### Step 5. Run setup
+- **Mac:** right-click **setup-mac.command** → **Open** → **Open**.
+  (If there's no Open button: System Settings → Privacy & Security → scroll down → **Open Anyway**.)
+- **Windows:** double-click **setup-windows.bat**. If a blue box says "Windows protected your PC",
+  click **More info** → **Run anyway**.
+
+A black window opens and asks questions:
+1. Paste your **Helius key**, press **Enter**.
+2. Paste your **Solscan key** or just press **Enter** to skip.
+3. It shows a **Dashboard password** and a **Phone alert topic**. **Write both down.**
+4. It checks everything. Lines say **OK** or **FAIL**. In paper mode, "SKIP wallet checks" is normal.
+
+### Step 6. Phone messages
+1. Install the **ntfy** app (App Store / Google Play).
+2. Tap **+**, type your **Phone alert topic** exactly, tap **Subscribe**.
+
+### Step 7. Start the robot
+- **Mac:** double-click **start-mac.command** (right-click → Open the first time).
+- **Windows:** double-click **start-windows.bat**.
+
+**Leave that window open.** Closing it stops the robot. If the robot crashes, it restarts itself
+and your phone gets a message.
+
+**Keep the computer awake:**
+- **Mac:** keep it plugged in with the lid open. The robot stops the Mac from sleeping while it runs.
+- **Windows:** Settings → System → Power → "When plugged in, put my device to sleep after" → **Never**.
+
+### Step 8. Watch it
+- On the same computer, open a web browser and go to **http://localhost:3000**. Paste your
+  **Dashboard password** and press **Connect**.
+- To see the score: double-click **status-mac.command** / **status-windows.bat**.
+
+### Step 9. Wait at least 3 days, then read the score
+Double-click **status**. You'll see lines like:
+
+```
+his-sell+10s   120 trades   45 wins   -0.0800 SOL
+```
+
+- **his-sell+10s** = "if I sold 10 seconds after Decu sold". That's realistic for selling by hand.
+- The last number is the pretend profit. **Minus = it lost money. Then don't go live.**
+- Go live **only** if that number is **plus**, over **100 or more trades**.
+
+---
+
+## Part 2: Real money (only if Step 9 was profitable)
+
+1. **Make a brand-new wallet.** In Phantom: tap your account → **Add / Connect Wallet** →
+   **Create new account**. Never use your main wallet.
+2. **Put a little SOL in it:** about **0.3 SOL** for day one (two copies of 0.1 SOL, plus fees).
+3. **Copy its private key:** Phantom → Settings → Manage Accounts → (the new account) →
+   **Show Private Key**. **Never show this to anyone. Never paste it in a chat (including this one).**
+4. **Stop the robot** (close its window).
+5. Double-click **go-live-mac.command** / **go-live-windows.bat**:
+   - type **LIVE**, press Enter
+   - paste the private key (you won't see it while pasting, that's normal), press Enter
+   - check the wallet address it shows matches Phantom, type **yes**
+   - it runs the go-live check. **The last line must say READY FOR LIVE.** It tests a real buy but
+     does **not** send it.
+6. Double-click **start** again. Day one is limited to **0.2 SOL** of buys.
+7. When your phone says **"Decu SOLD a coin you hold"**: open Phantom (or import the same key into
+   Axiom) and **sell that coin by hand**. The robot never sells by itself.
+8. Want to stop using real money? Double-click **back-to-paper**, then start again.
+
+---
+
+## If something goes wrong
+
+| You see | Do this |
+|---|---|
+| "Node.js is not installed yet" | Do Step 1, then try again. |
+| Mac: "cannot be opened" / "permission denied" | Right-click → Open. Still stuck: open **Terminal** and paste `chmod +x ~/Desktop/decu-bot/computer/*.command` then Enter. |
+| "The bot stopped 5 times right after starting" | Read the red line just above it. Usually a missing or wrong key: run **setup** again. |
+| Dashboard shows lots of "Too Many Requests" | Your Helius plan is too small. Upgrade it on dashboard.helius.dev. |
+| No phone messages | Check the topic in the ntfy app is exactly the one setup showed. |
+| Dashboard page won't load | The robot isn't running: double-click **start**. |
+| "Trade outcome UNKNOWN" message | Do nothing and don't restart in a panic. The robot keeps checking and never buys twice. Look at the transaction link. |
+
+## Safety rules
+1. Only the **new** wallet goes in the robot. Never your main wallet.
+2. Never share or screenshot your private key or the `.env` file.
+3. Run **one** robot at a time.
+4. Never delete `engine-live.json`. It's the robot's memory of real trades.

@@ -39,6 +39,10 @@ It also profiles him: coins per hour, wins, and the median seconds between his f
 `MIN_LEADER_BUY_USD` and his first sell (your whole window). Report saved to `diagnose-<date>.json`.
 
 ## 4. Preflight: must print "READY FOR LIVE"
+Easiest: double-click `go-live-mac.command` / `go-live-windows.bat` (or `node copybot.mjs setup --live`).
+It asks for the wallet key without showing it, sets DRY_RUN=false, a 0.2 SOL first-day cap and the
+live state file, then runs the check below. `setup --paper` switches back.
+
 ```
 node copybot.mjs check
 ```

@@ -24,6 +24,7 @@ export class Engine {
       this.d = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (this.d.version !== 2 || this.d.mode !== config.mode) throw new Error('state version/mode mismatch; use separate state files');
       if (config.mode==='live' && this.d.wallet!==config.wallet) throw new Error('state belongs to a different trading wallet');
+      this.prune();
     }
   }
   day() { return new Intl.DateTimeFormat('en-CA', {timeZone: this.c.timezone, year:'numeric', month:'2-digit', day:'2-digit'}).format(new Date()); }
@@ -139,6 +140,13 @@ export class Engine {
       }
       for (const mint of Object.keys(this.d.queues)) this.schedule(mint);
     } finally { this.reconciling = false; }
+  }
+  // Forget duplicate-protection keys older than 2 days. Older signals are refused as stale anyway,
+  // and without this the state file (rewritten on every event) grows by ~1,500 keys a day.
+  prune(maxAgeMs = 2*86400e3) {
+    const cut = Date.now()-maxAgeMs; let n = 0;
+    for (const [k,t] of Object.entries(this.d.seen)) if (!(t >= cut)) { delete this.d.seen[k]; n++; }
+    return n;
   }
   pause(value) { this.d.paused=value; this.event(value ? 'paused' : 'resumed'); }
   // Phone alerts on/off. Saved in the state file, so it survives restarts.

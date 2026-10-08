@@ -10,3 +10,4 @@ paper.json
 trades.log
 diagnose-*.json
 *.log
+trades.log.*

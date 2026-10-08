@@ -1,5 +1,8 @@
 # Decu copybot v2 — start here
 
+> **Simplest path:** see `START-HERE.md` in the folder above. Double-click `setup-…`, then `start-…`.
+> `start` now restarts the bot automatically after a crash and keeps a Mac awake while it runs.
+
 This version has durable recovery, a mobile dashboard, phone alerts and a strict safety check on every real trade. It defaults to PAPER mode (no wallet secret needed).
 
 **Defaults now follow your rules:** fixed 0.1 SOL per copy (`SIZING_MODE=fixed`), 1 SOL per day, pump.fun only, his buys of $50+, first buy per coin, and **AUTO_SELL=false**: the bot never sells; you get a priority "Decu SOLD a coin you hold" alert and sell by hand. Proportional sizing and mirrored auto-sells are still available but not recommended (see GO-LIVE.md for why).

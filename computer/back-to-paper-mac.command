@@ -6,6 +6,6 @@ if ! command -v node >/dev/null 2>&1; then
   echo "Node.js is not installed yet. Go to https://nodejs.org, install the LTS version, then double-click me again."
   read -p "Press Enter to close"; exit 1
 fi
-echo "Step 2: start the bot (auto-restarts if it crashes)"
-node copybot.mjs start
+echo "Switch back to pretend trades"
+node copybot.mjs setup --paper
 read -p "Press Enter to close"

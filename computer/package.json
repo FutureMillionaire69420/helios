@@ -7,7 +7,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "start": "node copybot.mjs",
+    "start": "node copybot.mjs start",
+    "setup": "node copybot.mjs setup",
     "check": "node copybot.mjs check",
     "diagnose": "node copybot.mjs diagnose",
     "alerts:on": "node copybot.mjs alerts on",
@@ -17,7 +18,7 @@
     "status": "node copybot.mjs status",
     "backtest": "node copybot.mjs backtest",
     "export": "node copybot.mjs export",
-    "test": "node --test engine.test.mjs solscan.test.mjs",
+    "test": "node --test engine.test.mjs solscan.test.mjs stability.test.mjs",
     "smoke": "node smoke.mjs",
     "demo": "node copybot.mjs demo",
     "report": "node copybot.mjs report"
