@@ -2395,6 +2395,40 @@ async function runReportCmd(argv = process.argv) {
   }
 }
 
+// ===== control.js =====
+// Switch a RUNNING bot from the command line (same as the dashboard buttons):
+//   node copybot.mjs alerts on|off     phone alerts (saved across restarts)
+//   node copybot.mjs paper on|off      paper mode only: off = no new paper buys or paper alerts
+//   node copybot.mjs pause | resume    stop / allow new buys in any mode
+//   node copybot.mjs status            mode, buys, alerts
+// Paper vs live is never switched here: that stays DRY_RUN in .env plus a restart.
+const CONTROL = { 'alerts on': '/api/alerts/on', 'alerts off': '/api/alerts/off', 'paper on': '/api/resume', 'paper off': '/api/pause', pause: '/api/pause', resume: '/api/resume', status: null };
+
+async function runControlCmd(argv = process.argv) {
+  const action = [argv[2], argv[3]].filter((x) => x && !x.startsWith('--')).join(' ').trim();
+  const key = action in CONTROL ? action : argv[2];
+  if (!(key in CONTROL)) throw new Error(`Use: alerts on|off, paper on|off, pause, resume, status`);
+  const host = env('DASHBOARD_HOST', '127.0.0.1');
+  const base = env('BOT_URL') || `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${env('PORT', '3000')}`;
+  const token = env('DASHBOARD_TOKEN');
+  const call = async (route, method = 'GET') => {
+    let r;
+    try {
+      r = await fetch(base + route, { method, headers: token ? { Authorization: `Bearer ${token}` } : {}, signal: AbortSignal.timeout(5000) });
+    } catch {
+      throw new Error(`bot not reachable at ${base}. Start it first (npm start), or set BOT_URL.`);
+    }
+    if (r.status === 401 || r.status === 403) throw new Error('dashboard refused the request: DASHBOARD_TOKEN in .env must match the running bot');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return method === 'GET' ? r.json() : null;
+  };
+  const before = await call('/api/status');
+  if (key.startsWith('paper') && before.mode !== 'paper') throw new Error(`the bot is in ${before.mode.toUpperCase()} mode. "paper on|off" only works in paper mode; use pause / resume instead`);
+  if (CONTROL[key]) await call(CONTROL[key], 'POST');
+  const s = await call('/api/status');
+  console.log(`Mode: ${s.mode.toUpperCase()} | New buys: ${s.paused ? 'PAUSED' : 'on'} | Alerts: ${s.alertsOff ? 'OFF' : 'on'}${s.alertsOff && s.mode === 'live' ? ' (unknown-outcome live trades still alert)' : ''}`);
+}
+
 /** One entry point: node copybot.mjs [run|check|backtest|export|report] [--flags] */
 async function main(argv = process.argv) {
   const cmd = argv[2] && !argv[2].startsWith('--') ? argv[2] : argv.includes('--check') ? 'check' : 'run';
@@ -2403,13 +2437,14 @@ async function main(argv = process.argv) {
   if (cmd === 'export') return runExportCmd(argv);
   if (cmd === 'report') return runReportCmd(argv);
   if (cmd === 'diagnose') return runDiagnoseCmd(argv);
+  if (['alerts', 'paper', 'pause', 'resume', 'status'].includes(cmd)) return runControlCmd(argv).catch((e) => { console.error(e.message); process.exitCode = 1; });
   if (cmd === 'run') return runBot();
   if (cmd === 'demo') return runBot({demo:true});
-  console.error(`Unknown command "${cmd}". Use: run | check | diagnose | demo | backtest | export | report`);
+  console.error(`Unknown command "${cmd}". Use: run | check | diagnose | demo | alerts on|off | paper on|off | pause | resume | status | backtest | export | report`);
   process.exit(1);
 }
 
 
 // ===== entry =====
-export {config,setFetch,diagnose,solscan,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
+export {config,setFetch,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);

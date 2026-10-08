@@ -76,6 +76,7 @@ export function alertFor(e, mode, leaderLabel='Decu') {
   if (e.type==='unresolved') return {title:`${tag}Trade outcome UNKNOWN`, body:`${e.message||''}\nThe bot keeps checking and will not double-trade.\nTx: ${e.signature||'?'}`, priority:5, tags:['warning'], click:e.signature?tx(e.signature):undefined};
   if (e.type==='unsupported' && e.kind==='paid-with-pump') return {title:`${tag}${leaderLabel} bought with PUMP tokens (not copied)`, body:`He paid with PUMP tokens he held, not SOL. This bot buys with SOL only, so it skipped this one.\nToken: ${e.mint}`, priority:2, tags:['eyes'], click:pump(e.mint)};
   if (e.type==='provider-gap') return {title:`${tag}Helius missed a ${leaderLabel} trade`, body:`Solscan caught it and the bot processed it late.\nTx: ${e.leaderSignature}`, priority:3, tags:['satellite'], click:tx(e.leaderSignature)};
+  if (e.type==='alerts-on') return {title:`${tag}Alerts ON`, body:'Phone alerts resumed.', priority:2, tags:['bell']};
   if (e.type==='paused' || e.type==='resumed') return {title:`${tag}Bot ${e.type==='paused'?'PAUSED (no new buys)':'RESUMED'}`, body:'Changed from the dashboard.', priority:3, tags:['pause_button']};
   if (e.type==='started') return {title:`${tag}Copy bot started (${mode.toUpperCase()})`, body:e.note||'', priority:2, tags:['robot']};
   return null;
@@ -99,7 +100,9 @@ export async function startRuntime(k, {demo=false}={}) {
   const clean = v => { let s=JSON.stringify(v); for(const secret of secrets) s=s.split(secret).join('[REDACTED]'); return JSON.parse(k.redact(s)); };
   const log = e => {
     e=clean(e); console.log(JSON.stringify(e)); fs.appendFileSync(k.config.logFile,JSON.stringify(e)+'\n',{mode:0o600});
-    const a = !demo && k.notify ? alertFor(e,c.mode,k.config.leaderLabel) : null;
+    // Alerts off mutes everything except a LIVE trade whose outcome is unknown (real money at risk).
+    const muted = engine?.d.alertsOff && !(c.mode==='live' && e.type==='unresolved');
+    const a = !demo && k.notify && !muted ? alertFor(e,c.mode,k.config.leaderLabel) : null;
     if (a) {
       // Name the coin from Solscan when available; never delay an alert by more than 1.5 s for it.
       const label = e.mint && k.tokenLabel ? Promise.race([k.tokenLabel(e.mint).catch(()=>null), new Promise(r=>setTimeout(()=>r(null),1500))]) : Promise.resolve(null);
@@ -116,7 +119,7 @@ export async function startRuntime(k, {demo=false}={}) {
       const st=engine.d.paperStats?.[mint]; if(!st) return;
       const sol=await k.quoteSell(mint,Number(st.raw));
       st.exits[label]= sol==null||!Number.isFinite(sol) ? null : sol*0.995-fee; engine.save();
-      if (label===`buy+${QUICK.at(-1)}s` && k.notify && k.config.notifyPaper!==false) {
+      if (label===`buy+${QUICK.at(-1)}s` && k.notify && k.config.notifyPaper!==false && !engine.d.alertsOff) {
         const v=st.exits[label], s=paperSummary(engine.d.paperStats).find(x=>x.exit===label);
         Promise.resolve(k.notify({title:`[PAPER] ${v==null?'no price':`${v-st.cost>=0?'+':''}${((v/st.cost-1)*100).toFixed(0)}%`} selling ${QUICK.at(-1)}s after buy`,body:`${mint}\nRunning total (${label}): ${s?`${s.pnlSol>=0?'+':''}${s.pnlSol.toFixed(4)} SOL over ${s.trades} trades, ${s.wins} wins`:'-'}\nNo real money used.`,priority:2,tags:['test_tube']})).catch(()=>{});
       }
@@ -269,6 +272,9 @@ export async function startRuntime(k, {demo=false}={}) {
       if(url.pathname==='/api/status' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean({...engine.snapshot(),paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status})));}
       if(req.method==='POST' && ['/api/pause','/api/resume'].includes(url.pathname)) {
         engine.pause(url.pathname==='/api/pause');res.writeHead(200);return res.end('OK');
+      }
+      if(req.method==='POST' && ['/api/alerts/on','/api/alerts/off'].includes(url.pathname)) {
+        engine.mute(url.pathname==='/api/alerts/off');res.writeHead(200);return res.end('OK');
       }
       res.writeHead(404);return res.end('Not found');
     }

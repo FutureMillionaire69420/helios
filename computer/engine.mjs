@@ -141,9 +141,11 @@ export class Engine {
     } finally { this.reconciling = false; }
   }
   pause(value) { this.d.paused=value; this.event(value ? 'paused' : 'resumed'); }
+  // Phone alerts on/off. Saved in the state file, so it survives restarts.
+  mute(value) { this.d.alertsOff=value; this.event(value ? 'alerts-off' : 'alerts-on'); }
   snapshot() {
     const jobs = Object.values(this.d.jobs).map(({mint,side,phase,signature,sol,raw}) => ({mint,side,phase,signature,sol,raw}));
-    return {mode:this.c.mode,autoSell:this.c.autoSell,paused:this.d.paused,balance:this.c.mode === 'live' ? null : this.d.paperBalance,spent:this.d.daily[this.day()] || 0,cap:this.c.dailyCap,reserved:this.reserved(),positions:this.d.positions,jobs,events:this.d.events.slice(-100)};
+    return {mode:this.c.mode,autoSell:this.c.autoSell,paused:this.d.paused,alertsOff:!!this.d.alertsOff,balance:this.c.mode === 'live' ? null : this.d.paperBalance,spent:this.d.daily[this.day()] || 0,cap:this.c.dailyCap,reserved:this.reserved(),positions:this.d.positions,jobs,events:this.d.events.slice(-100)};
   }
   async idle() { await this.serial; while(this.tasks.size) await Promise.all([...this.tasks.values()]); }
 }

@@ -12,3 +12,11 @@ npm test               # 39 tests, no network
 node copybot.mjs diagnose   # Helius vs Solscan health, parser cross-check, leader profile
 node copybot.mjs check      # go-live preflight (never sends)
 ```
+
+Control a running bot (same as the dashboard buttons; uses DASHBOARD_TOKEN from .env):
+```
+node copybot.mjs alerts on|off   # phone alerts; LIVE unknown-outcome trades always alert
+node copybot.mjs paper on|off    # paper mode only: off = no new paper buys
+node copybot.mjs pause | resume  # new buys, any mode
+node copybot.mjs status
+```
