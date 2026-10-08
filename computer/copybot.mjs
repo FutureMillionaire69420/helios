@@ -243,8 +243,11 @@ const config = {
   leader: env('LEADER_WALLET', '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9'),
   leaderLabel: env('LEADER_LABEL', 'Decu'),
 
-  // Your dedicated burner wallet's private key (base58 export from Phantom/Solflare, or a [..64 numbers] JSON array).
-  privateKey: env('PRIVATE_KEY'),
+  // Your dedicated burner wallet signer. For unattended execution, use a Solana private key
+  // exported from the burner account in Phantom (base58 or a [..64 numbers] JSON array).
+  // PHANTOM_PRIVATE_KEY is an explicit alias; PRIVATE_KEY remains backwards-compatible.
+  privateKey: env('PHANTOM_PRIVATE_KEY') || env('PRIVATE_KEY'),
+  phantomWalletAddress: env('PHANTOM_WALLET_ADDRESS'),
 
   // SAFETY: starts in dry-run (alerts only, no trades) until you set DRY_RUN=false.
   dryRun: bool('DRY_RUN', true),
@@ -303,7 +306,8 @@ const config = {
 function validateConfig(c = config) {
   const errors = [];
   if (!isValidPubkey(c.leader)) errors.push('LEADER_WALLET is not a valid Solana address');
-  if (!c.dryRun && !c.privateKey) errors.push('PRIVATE_KEY is required when DRY_RUN=false');
+  if (!c.dryRun && !c.privateKey) errors.push('PHANTOM_PRIVATE_KEY/PRIVATE_KEY is required when DRY_RUN=false');
+  if (c.phantomWalletAddress && !isValidPubkey(c.phantomWalletAddress)) errors.push('PHANTOM_WALLET_ADDRESS is not a valid Solana public key');
   if (!(c.buySol > 0)) errors.push('BUY_SOL must be > 0');
   if (!(c.dailyCapSol >= c.buySol)) errors.push('DAILY_CAP_SOL must be >= BUY_SOL');
   if (!(c.slippagePct > 0 && c.slippagePct <= 50)) errors.push('SLIPPAGE_PCT must be between 0 and 50');
@@ -2326,6 +2330,12 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
   const errors = validateConfig();
   if (errors.length && !demo) throw new Error(errors.join('; '));
   let kp = config.privateKey ? loadKeypair(config.privateKey) : null;
+  if (kp && config.phantomWalletAddress && kp.publicKey !== config.phantomWalletAddress) {
+    throw new Error(`PHANTOM_WALLET_ADDRESS does not match the configured signer (${kp.publicKey})`);
+  }
+  if (kp && config.dryRun === false && !config.phantomWalletAddress) {
+    console.log(`[wallet] Autonomous signer loaded: ${kp.publicKey}`);
+  }
   if (checkOnly) {
     let failed = 0;
     const step = async (name, fn) => { try { console.log('OK '+name+': '+await fn()); } catch(e) { failed++; console.error('FAIL '+name+': '+redact(e.message)); } };
@@ -2508,7 +2518,9 @@ async function runSetup(argv = process.argv) {
       let kp;
       try { kp = loadKeypair(key); } catch (e) { console.log(`That is not a valid Solana private key (${e.message}). Nothing changed.`); return; }
       if ((await ask(`Wallet address: ${kp.publicKey}\nDoes this match the address in your wallet app? (yes/no): `)).toLowerCase() !== 'yes') { console.log('Cancelled. Nothing changed.'); return; }
-      set('PRIVATE_KEY', key);
+      set('PHANTOM_PRIVATE_KEY', key);
+      set('PRIVATE_KEY', '');
+      set('PHANTOM_WALLET_ADDRESS', kp.publicKey);
       set('DRY_RUN', 'false');
       if (/paper|demo/i.test(get('ENGINE_STATE_FILE'))) set('ENGINE_STATE_FILE', 'engine-live.json');
       if (!(Number(get('DAILY_CAP_SOL')) <= 0.2)) set('DAILY_CAP_SOL', '0.2');
@@ -2541,6 +2553,24 @@ async function runSetup(argv = process.argv) {
     const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'check'], { stdio: 'inherit', cwd: process.cwd() });
     process.exitCode = r.status ?? 1;
   }
+}
+
+// ===== wallet.js CLI =====
+// Read-only wallet diagnostics. Never prints the private key.
+async function runWalletCmd(argv = process.argv) {
+  let kp = null;
+  try {
+    kp = config.privateKey ? loadKeypair(config.privateKey) : null;
+  } catch (e) {
+    console.error(`Wallet key is invalid: ${redact(e.message)}`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`Signer mode: ${config.privateKey ? 'local-ed25519 (autonomous)' : 'not configured'}`);
+  console.log(`Public address: ${kp?.publicKey || '—'}`);
+  if (config.phantomWalletAddress) console.log(`Phantom address: ${config.phantomWalletAddress}`);
+  if (kp && config.phantomWalletAddress) console.log(`Address match: ${kp.publicKey === config.phantomWalletAddress ? 'YES' : 'NO'}`);
+  if (!kp) console.log('No signer is configured. In live mode the bot will refuse to start.');
 }
 
 // ===== supervisor.js =====
@@ -2610,10 +2640,11 @@ async function main(argv = process.argv) {
   if (cmd === 'export') return runExportCmd(argv);
   if (cmd === 'report') return runReportCmd(argv);
   if (cmd === 'diagnose') return runDiagnoseCmd(argv);
+  if (cmd === 'wallet') return runWalletCmd(argv);
   if (['alerts', 'paper', 'pause', 'resume', 'status'].includes(cmd)) return runControlCmd(argv).catch((e) => { console.error(e.message); process.exitCode = 1; });
   if (cmd === 'run') return runBot();
   if (cmd === 'demo') return runBot({demo:true});
-  console.error(`Unknown command "${cmd}". Use: setup | start | run | check | diagnose | demo | alerts on|off | paper on|off | pause | resume | status | backtest | export | report`);
+  console.error(`Unknown command "${cmd}". Use: setup | start | run | check | diagnose | wallet | demo | alerts on|off | paper on|off | pause | resume | status | backtest | export | report`);
   process.exit(1);
 }
 

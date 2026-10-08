@@ -81,3 +81,17 @@ Also:
 Result: 47/47 tests (8 new: supervisor crash-restart and give-up, setup wizard, RPC retry, pruning,
 spam filtering, error throttling), both demo runs pass, live paper run clean.
 Not tested here: the double-click files on real macOS/Windows (Linux sandbox), Windows sleep settings.
+
+
+## Phantom/autonomous execution upgrade (Oct 8, Claude)
+
+Added: explicit `PHANTOM_PRIVATE_KEY` alias for an unattended burner signer, optional `PHANTOM_WALLET_ADDRESS` safety check, a read-only `node copybot.mjs wallet` diagnostic, authenticated `/api/wallet`, and a dashboard **Connect Phantom** button that verifies the browser wallet address without receiving or displaying secrets. The existing live executor already builds, locally signs, simulates, broadcasts and confirms PumpPortal transactions; this upgrade makes the Phantom/burner setup explicit without attempting to bypass Phantom's user approval model.
+
+Result: **49/49 tests pass** and both smoke runs pass. Live chain execution was intentionally not triggered during verification.
+
+## Merge of the Phantom/auto-copy upload (Oct 9, Claude)
+Merged the uploaded auto-copy switch and Phantom wallet checks onto the current code, keeping the
+fix for the check after setup. Two fixes to the upload: auto copy defaulted to OFF, which skipped
+every buy (paper mode recorded nothing); and state files saved before the switch existed also read
+as OFF. `AUTO_COPY` now defaults to true; old state takes the configured value.
+Wallet 3mFW…TX1P is a valid address with 0 SOL (Helius, Oct 9). Result: 51/51 tests.

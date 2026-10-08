@@ -105,8 +105,10 @@ his-sell+10s   120 trades   45 wins   -0.0800 SOL
    - it runs the go-live check. **The last line must say READY FOR LIVE.** It tests a real buy but
      does **not** send it.
 6. Double-click **start** again. Day one is limited to **0.2 SOL** of buys.
-7. When your phone says **"Decu SOLD a coin you hold"**: open Phantom (or import the same key into
-   Axiom) and **sell that coin by hand**. The robot never sells by itself.
+7. In the dashboard, turn **Decu auto copy ON** when you are ready. That single toggle arms both
+   autonomous buys and proportional sells for positions the bot copied. A Decu sell is acted on immediately
+   through the same live execution path; exact same-block timing is not guaranteed because your transaction
+   must still be built, signed, broadcast, and confirmed separately.
 8. Want to stop using real money? Double-click **back-to-paper**, then start again.
 
 ---
@@ -128,3 +130,7 @@ his-sell+10s   120 trades   45 wins   -0.0800 SOL
 2. Never share or screenshot your private key or the `.env` file.
 3. Run **one** robot at a time.
 4. Never delete `engine-live.json`. It's the robot's memory of real trades.
+
+### Phantom note
+
+For true unattended execution, Phantom itself cannot silently approve each server-side transaction. The bot therefore uses the burner account's Solana private key locally for autonomous signing, while the dashboard's **Connect Phantom** button verifies that the browser-connected Phantom account matches the configured burner address. Phantom documents `signAndSendTransaction` as a wallet-approved flow, and warns never to share a private key or recovery phrase.

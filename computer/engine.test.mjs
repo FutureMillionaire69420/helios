@@ -6,7 +6,7 @@ import path from 'node:path';
 import {Engine,sizeBuy,fractionRaw} from './engine.mjs';
 import {normalize,runtimeConfig,startRuntime} from './runtime.mjs';
 import {detectBuy,detectSell,config,setFetch,validateTrade,PROGRAMS,associatedTokenAddress,b58encode,b58decode,loadKeypair,signTransaction,parseTransaction,addTransferInstruction,TIP_ACCOUNTS} from './copybot.mjs';
-const cfg={mode:'paper',timezone:'UTC',sizing:'proportional',multiplier:1,buySol:0.1,maxBuy:0.05,minBuy:0.005,reserve:0.02,feeBudget:0.0065,slippage:20,dailyCap:1,minLeaderUsd:50,maxAge:30,maxSellAge:300,pumpOnly:true,oneBuy:true,autoSell:true,paperBalance:0.5};
+const cfg={mode:'paper',timezone:'UTC',sizing:'proportional',multiplier:1,buySol:0.1,maxBuy:0.05,minBuy:0.005,reserve:0.02,feeBudget:0.0065,slippage:20,dailyCap:1,minLeaderUsd:50,maxAge:30,maxSellAge:300,pumpOnly:true,oneBuy:true,autoSell:true,autoCopy:true,paperBalance:0.5};
 const buy=(mint='coin',sig='buy')=>({mint,sig,side:'buy',time:Date.now()/1000,pump:true,usd:300,sol:2,leaderBalanceSol:100,decimals:6});
 const sell=(sold='250',before='1000',sig='sell')=>({...buy(),side:'sell',sig,soldRaw:sold,beforeRaw:before});
 function fixture(t, overrides={}, conf={}){
@@ -37,7 +37,11 @@ test('dashboard authenticates API and exposes no signed transaction bytes',async
   const r=await startRuntime({config:{...config,logFile:path.join(dir,'log')},redact:x=>x},{demo:true});t.after(()=>{r.stop();for(const key of Object.keys(process.env))if(!(key in saved))delete process.env[key];Object.assign(process.env,saved);});
   const base='http://127.0.0.1:'+r.server.address().port;
   assert.equal((await fetch(base+'/api/status')).status,401);
-  const headers={Authorization:'Bearer '+process.env.DASHBOARD_TOKEN};const data=await (await fetch(base+'/api/status',{headers})).json();assert.equal(data.mode,'demo');assert.equal(JSON.stringify(data).includes('bytes'),false);
+  const headers={Authorization:'Bearer '+process.env.DASHBOARD_TOKEN};const data=await (await fetch(base+'/api/status',{headers})).json();assert.equal(data.mode,'demo');assert.equal(JSON.stringify(data).includes('bytes'),false);assert.equal(data.wallet.phantomBrowserVerification,true);
+  const wallet=await (await fetch(base+'/api/wallet',{headers})).json();assert.equal(wallet.phantomBrowserVerification,true);assert.equal(wallet.autonomous,false);
+  assert.equal((await fetch(base+'/api/autocopy/on',{method:'POST',headers})).status,200);assert.equal(r.engine.d.autoCopy,true);
+  const toggled=await (await fetch(base+'/api/status',{headers})).json();assert.equal(toggled.autoCopy,true);
+  assert.equal((await fetch(base+'/api/autocopy/off',{method:'POST',headers})).status,200);assert.equal(r.engine.d.autoCopy,false);
   assert.equal((await fetch(base+'/api/pause',{method:'POST',headers})).status,200);assert.equal(r.engine.d.paused,true);assert.equal((await fetch(base+'/')).status,200);
 });
 
@@ -67,16 +71,23 @@ test('live guard refuses token approval instructions',async()=>{const f=guardFix
 test('live guard refuses simulation that drains extra tokens',async()=>{const f=guardFixture();setFetch(f.mock(0n));try{await assert.rejects(validateTrade(f.build(),f.job,1),/token balance/);}finally{setFetch(null);}});
 
 // ---- added: manual-sell mode, phone alerts, safe defaults ----
-test('AUTO_SELL=false: his sell never sells, but raises a leader-sold event for coins the bot holds',async t=>{
-  let sells=0;const e=fixture(t,{send:async j=>{if(j.side==='sell')sells++;return {status:'confirmed',rawDelta:j.side==='buy'?'1000':(-BigInt(j.raw)).toString(),solDelta:j.side==='buy'?-0.1:0.1};}},{autoSell:false});
+test('Decu auto-copy toggle mirrors buys and proportional sells, and persists across restart',async t=>{
+  const e=fixture(t,{send:async j=>({status:'confirmed',rawDelta:j.side==='buy'?'1000':(-BigInt(j.raw)).toString(),solDelta:j.side==='buy'?-0.1:0.02})},{autoCopy:false,autoSell:false});
+  await e.ingest(buy('off','off-buy')); await e.idle(); assert.equal(e.d.positions.off,undefined);
+  e.autoCopy(true); await e.ingest(buy('coin','on-buy')); await e.idle(); assert.equal(e.d.positions.coin.raw,'1000');
+  await e.ingest(sell('250','1000','on-sell')); await e.idle(); assert.equal(e.d.positions.coin.raw,'750');
+  const restored=new Engine({file:e.file,config:{...cfg,autoCopy:false,autoSell:false},adapter:e.a});
+  assert.equal(restored.d.autoCopy,true);
+  restored.autoCopy(false); await restored.ingest(sell('750','750','off-sell')); await restored.idle(); assert.equal(restored.d.positions.coin.raw,'750');
+});
+test('auto-copy OFF never buys or sells, and reports a leader-sold alert for a held position',async t=>{
+  let sells=0;const e=fixture(t,{send:async j=>{if(j.side==='sell')sells++;return {status:'confirmed',rawDelta:j.side==='buy'?'1000':(-BigInt(j.raw)).toString(),solDelta:j.side==='buy'?-0.1:0.1};}},{autoSell:false,autoCopy:true});
   await e.ingest(buy());await e.idle();assert.equal(e.d.positions.coin.raw,'1000');
-  await e.ingest(sell('1000','1000'));await e.idle();
+  e.autoCopy(false); await e.ingest(sell('1000','1000'));await e.idle();
   assert.equal(sells,0);assert.equal(e.d.positions.coin.raw,'1000');
   assert.ok(e.d.events.some(x=>x.type==='leader-sold'&&x.mint==='coin'));
-  await e.ingest(sell('1000','1000','other-sig-for-unheld')); // same coin again: still no sell
-  await e.ingest({...sell(),mint:'never-bought',sig:'x'});await e.idle();
-  assert.ok(!e.d.events.some(x=>x.type==='leader-sold'&&x.mint==='never-bought')); // only coins we hold
-  assert.equal(sells,0);
+  await e.ingest({...buy('never-bought','x'),side:'sell',soldRaw:'1000',beforeRaw:'1000'});await e.idle();
+  assert.ok(!e.d.events.some(x=>x.type==='leader-sold'&&x.mint==='never-bought'));
 });
 test('phone alerts: SOLD warning, buys, failures, unknown outcomes; paper is labelled',async()=>{
   const {alertFor}=await import('./runtime.mjs');
@@ -99,7 +110,7 @@ test('defaults follow the user rules: fixed 0.1 SOL, auto-sell off, ~$200 paper 
 test('paper mode closes nothing for real but values every position at quick and after-his-sell timings',async t=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'decu-paper-'));
   const saved={...process.env};
-  Object.assign(process.env,{ENGINE_STATE_FILE:path.join(dir,'engine.json'),PORT:'0',DASHBOARD_TOKEN:'',PAPER_QUICK_SELL_SEC:'0.05',PAPER_AFTER_HIS_SELL_SEC:'0',AUTO_SELL:'false',SIZING_MODE:'fixed'});
+  Object.assign(process.env,{ENGINE_STATE_FILE:path.join(dir,'engine.json'),PORT:'0',DASHBOARD_TOKEN:'',PAPER_QUICK_SELL_SEC:'0.05',PAPER_AFTER_HIS_SELL_SEC:'0',AUTO_SELL:'false',AUTO_COPY:'false',SIZING_MODE:'fixed'});
   const alerts=[];let sent=0;
   const k={config:{...config,dryRun:true,buySol:0.1,dailyCapSol:1,logFile:path.join(dir,'log'),tipSol:0.001,priorityFeeSol:0.0005,paperLandMs:0,slippagePct:20},
     notify:async a=>{alerts.push(a);},redact:x=>x,startWatcher:()=>()=>{},
@@ -107,10 +118,11 @@ test('paper mode closes nothing for real but values every position at quick and 
     sendRaw:async()=>{sent++;},getSolUsd:async()=>120};
   const r=await startRuntime(k);
   t.after(()=>{r.stop();fs.rmSync(dir,{recursive:true,force:true});for(const key of Object.keys(process.env))if(!(key in saved))delete process.env[key];Object.assign(process.env,saved);});
-  await r.engine.ingest(buy('P1','b1'));await r.engine.idle();
+  r.engine.autoCopy(true);await r.engine.ingest(buy('P1','b1'));await r.engine.idle();
   assert.equal(r.engine.d.positions.P1.raw,'1000000');
   await new Promise(res=>setTimeout(res,150));
   const st=r.engine.d.paperStats.P1;assert.ok(st.exits['buy+0.05s']>0.12);
+  r.engine.autoCopy(false);
   await r.engine.ingest({...sell('1000000','1000000','s1'),mint:'P1'});await r.engine.idle();
   await new Promise(res=>setTimeout(res,100));
   assert.ok(r.engine.d.paperStats.P1.exits['his-sell+0s']>0.12);

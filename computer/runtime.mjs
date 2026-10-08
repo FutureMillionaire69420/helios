@@ -14,7 +14,7 @@ export function runtimeConfig(c, demo=false) {
     reserve:c.minSolReserve, feeBudget:c.tipSol+c.priorityFeeSol+0.005,
     slippage:c.slippagePct, dailyCap:c.dailyCapSol, minLeaderUsd:c.minLeaderBuyUsd,
     maxAge:c.maxSignalAgeSec, maxSellAge:number('MAX_SELL_SIGNAL_AGE_SEC',300), pumpOnly:c.pumpOnly,
-    oneBuy:c.oneBuyPerMint, autoSell:val('AUTO_SELL',demo?'true':'false')==='true',paperBalance:number('PAPER_BALANCE_SOL',1.65)};
+    oneBuy:c.oneBuyPerMint, autoSell:val('AUTO_SELL',demo?'true':'false')==='true', autoCopy:val('AUTO_COPY','true') === 'true', paperBalance:number('PAPER_BALANCE_SOL',1.65)};
   for (const k of ['multiplier','buySol','maxBuy','minBuy','reserve','feeBudget','slippage','dailyCap','minLeaderUsd','maxAge','maxSellAge','paperBalance'])
     if (!Number.isFinite(out[k]) || out[k]<0) throw new Error('invalid setting '+k);
   if (!['fixed','proportional'].includes(out.sizing) || out.minBuy<=0 || out.minBuy>out.maxBuy || out.maxBuy>out.dailyCap || out.multiplier>1) throw new Error('invalid sizing bounds (multiplier must be 0–1)');
@@ -284,12 +284,23 @@ export async function startRuntime(k, {demo=false}={}) {
     if(url.pathname.startsWith('/api/')) {
       if(token && !authorized()) {res.writeHead(401);return res.end('Unauthorized');}
       if(!token && c.mode==='live') {res.writeHead(403);return res.end('Token required');}
-      if(url.pathname==='/api/status' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean({...engine.snapshot(),paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status})));}
+      if(url.pathname==='/api/status' && req.method==='GET') {
+        const snap={...engine.snapshot(),paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
+          wallet:{publicKey:c.wallet||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true}};
+        res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean(snap)));
+      }
+      if(url.pathname==='/api/wallet' && req.method==='GET') {
+        res.writeHead(200,{'Content-Type':'application/json'});
+        return res.end(JSON.stringify(clean({publicKey:c.wallet||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true})));
+      }
       if(req.method==='POST' && ['/api/pause','/api/resume'].includes(url.pathname)) {
         engine.pause(url.pathname==='/api/pause');res.writeHead(200);return res.end('OK');
       }
       if(req.method==='POST' && ['/api/alerts/on','/api/alerts/off'].includes(url.pathname)) {
         engine.mute(url.pathname==='/api/alerts/off');res.writeHead(200);return res.end('OK');
+      }
+      if(req.method==='POST' && ['/api/autocopy/on','/api/autocopy/off'].includes(url.pathname)) {
+        engine.autoCopy(url.pathname==='/api/autocopy/on');res.writeHead(200);return res.end('OK');
       }
       res.writeHead(404);return res.end('Not found');
     }

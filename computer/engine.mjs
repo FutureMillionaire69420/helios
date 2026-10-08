@@ -19,11 +19,13 @@ export class Engine {
   constructor({file, config, adapter, log = () => {}}) {
     this.file = file; this.c = config; this.a = adapter; this.log = log;
     this.tasks = new Map(); this.serial = Promise.resolve(); this.reconciling = false;
-    this.d = {version: 2, mode: config.mode, wallet:config.wallet || null, paused: false, daily: {}, seen: {}, positions: {}, jobs: {}, queues: {}, events: [], paperBalance: config.paperBalance};
+    this.d = {version: 2, mode: config.mode, wallet:config.wallet || null, paused: false, autoCopy: config.autoCopy ?? config.autoSell ?? false, daily: {}, seen: {}, positions: {}, jobs: {}, queues: {}, events: [], paperBalance: config.paperBalance};
     if (fs.existsSync(file)) {
       this.d = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (this.d.version !== 2 || this.d.mode !== config.mode) throw new Error('state version/mode mismatch; use separate state files');
       if (config.mode==='live' && this.d.wallet!==config.wallet) throw new Error('state belongs to a different trading wallet');
+      // State saved before the auto-copy switch existed: use the configured default, not "off".
+      if (this.d.autoCopy === undefined) this.d.autoCopy = config.autoCopy ?? false;
       this.prune();
     }
   }
@@ -43,13 +45,21 @@ export class Engine {
       this.event('detected', {side:s.side, mint:s.mint, leaderSignature:s.sig});
       let reason;
       if (s.side === 'buy') {
-        if (this.d.paused) reason = 'new buys paused';
+        if (!this.d.autoCopy) reason = 'Decu auto copy is off';
+        else if (this.d.paused) reason = 'new buys paused';
         else if (Date.now()/1000 - s.time > this.c.maxAge) reason = 'stale buy signal';
         else if (!s.pump && this.c.pumpOnly) reason = 'not a pump trade';
         else if (s.usd < this.c.minLeaderUsd) reason = 'leader buy below minimum';
         else if (this.c.oneBuy && (this.d.positions[s.mint] || this.d.jobs[s.mint] || this.d.queues[s.mint]?.some(x=>x.side==='buy'))) reason = 'already copied mint';
-      } else if (!this.d.positions[s.mint] && !this.d.jobs[s.mint] && !this.d.queues[s.mint]?.length) reason = 'no bot position';
-      else if (!this.c.autoSell) {
+      } else if (!this.d.autoCopy) {
+        if (this.d.positions[s.mint] || this.d.jobs[s.mint] || this.d.queues[s.mint]?.length) {
+          this.d.seen[key] = Date.now();
+          this.event('leader-sold', {mint:s.mint, leaderSignature:s.sig, soldRaw:s.soldRaw, beforeRaw:s.beforeRaw, reason:'Decu auto copy is off'});
+        }
+        return;
+      }
+      else if (!this.d.positions[s.mint] && !this.d.jobs[s.mint] && !this.d.queues[s.mint]?.length) reason = 'no bot position';
+      else if (!this.c.autoSell && !this.d.autoCopy) {
         // Manual-sell mode: never sell, but tell the user the moment he sells a coin the bot holds.
         this.d.seen[key] = Date.now();
         this.event('leader-sold', {mint:s.mint, leaderSignature:s.sig, soldRaw:s.soldRaw, beforeRaw:s.beforeRaw});
@@ -149,11 +159,12 @@ export class Engine {
     return n;
   }
   pause(value) { this.d.paused=value; this.event(value ? 'paused' : 'resumed'); }
+  autoCopy(value) { this.d.autoCopy=!!value; this.event(value ? 'auto-copy-on' : 'auto-copy-off'); }
   // Phone alerts on/off. Saved in the state file, so it survives restarts.
   mute(value) { this.d.alertsOff=value; this.event(value ? 'alerts-off' : 'alerts-on'); }
   snapshot() {
     const jobs = Object.values(this.d.jobs).map(({mint,side,phase,signature,sol,raw}) => ({mint,side,phase,signature,sol,raw}));
-    return {mode:this.c.mode,autoSell:this.c.autoSell,paused:this.d.paused,alertsOff:!!this.d.alertsOff,balance:this.c.mode === 'live' ? null : this.d.paperBalance,spent:this.d.daily[this.day()] || 0,cap:this.c.dailyCap,reserved:this.reserved(),positions:this.d.positions,jobs,events:this.d.events.slice(-100)};
+    return {mode:this.c.mode,autoSell:this.c.autoSell,autoCopy:!!this.d.autoCopy,paused:this.d.paused,alertsOff:!!this.d.alertsOff,balance:this.c.mode === 'live' ? null : this.d.paperBalance,spent:this.d.daily[this.day()] || 0,cap:this.c.dailyCap,reserved:this.reserved(),positions:this.d.positions,jobs,events:this.d.events.slice(-100)};
   }
   async idle() { await this.serial; while(this.tasks.size) await Promise.all([...this.tasks.values()]); }
 }

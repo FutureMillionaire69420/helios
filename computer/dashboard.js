@@ -17,10 +17,13 @@ function renderEvents(){const out=$('events');out.replaceChildren();for(const e 
   item(out,new Date(e.time).toLocaleTimeString()+' · '+e.type+(e.side?' '+e.side:''),[e.mint,e.reason||e.message,e.sol!==undefined?'SOL '+fmt(e.sol):''].filter(Boolean).join(' · '),bad,e.signature||e.leaderSignature);
 }if(!out.childNodes.length)out.textContent='No matching events.';}
 async function refresh(){try{
-  latest=await api('/api/status');$('mode').textContent=latest.mode.toUpperCase();$('message').textContent=latest.mode==='demo'?'SYNTHETIC DEMO · generated trades, no blockchain connection.':latest.mode==='paper'?'PAPER · real leader signals, simulated trades. No SOL is spent.':latest.autoSell?'LIVE · real buys and automatic proportional sells.':'LIVE · real buys. You sell by hand from the SOLD alert.';
-  $('balance').textContent=fmt(latest.balance);$('spent').textContent=fmt(latest.spent)+' / '+latest.cap;$('reserved').textContent=fmt(latest.reserved);
+  latest=await api('/api/status');$('mode').textContent=latest.mode.toUpperCase();$('message').textContent=latest.mode==='demo'?'SYNTHETIC DEMO · generated trades, no blockchain connection.':latest.mode==='paper'?'PAPER · real leader signals, simulated trades. No SOL is spent.':latest.autoCopy?'LIVE · Decu auto copy ON: buys + proportional sells.':'LIVE · Decu auto copy OFF.';
+  $('balance').textContent=fmt(latest.balance);
+  const w=latest.wallet||{};
+  $('wallet-state').textContent=w.publicKey?`${w.publicKey} · ${w.autonomous?'autonomous signer ready':'simulated'}`:'No signer configured';
+  $('spent').textContent=fmt(latest.spent)+' / '+latest.cap;$('reserved').textContent=fmt(latest.reserved);
   const entries=Object.entries(latest.positions).filter(([,p])=>BigInt(p.raw)>0n);$('count').textContent=entries.length;
-  $('buy-state').textContent=latest.paused?'Paused; selling and monitoring continue.':'Enabled';$('updated').textContent='Updated '+new Date().toLocaleTimeString();
+  $('copy-state').textContent=latest.autoCopy?'ON · copies Decu buys and proportional sells':'OFF · no automatic Decu buy/sell';$('autocopy-on').disabled=!!latest.autoCopy;$('autocopy-off').disabled=!latest.autoCopy;$('buy-state').textContent=latest.paused?'Paused; auto-copy remains armed, but new buys are paused.':'Enabled';$('updated').textContent='Updated '+new Date().toLocaleTimeString();
   $('connection').textContent=latest.connection.websocket+' · Last poll: '+(latest.connection.lastPoll?new Date(latest.connection.lastPoll).toLocaleTimeString():'—')+' · Errors: '+latest.connection.errors;
   const k=latest.connection,sc=k.solscan,fs=k.firstSeen||{};
   $('providers').textContent='Helius: websocket first '+(fs.ws||0)+' · poll first '+(fs.poll||0)+' | Solscan: '+(!sc?'—':sc.ok===false?(sc.note||sc.error||'error'):sc.ok?'OK '+(sc.latencyMs??'?')+' ms':'starting')+' · gaps caught '+(k.gaps||0)+' | non-SOL trades skipped '+(k.unsupported||0)+' | other wallets filtered '+((k.otherWallets||0)+(k.filteredWs||0))+(k.pollMode?' | Helius poll: '+k.pollMode:'')+(k.lastError?' | last error: '+k.lastError:'');
@@ -31,4 +34,18 @@ async function refresh(){try{
 $('connect').onclick=()=>{token=$('token').value;$('token').value='';refresh();};
 $('pause').onclick=async()=>{try{await api('/api/pause','POST');refresh();}catch(e){$('message').textContent=e.message;}};
 $('resume').onclick=async()=>{try{await api('/api/resume','POST');refresh();}catch(e){$('message').textContent=e.message;}};
+$('autocopy-on').onclick=async()=>{try{await api('/api/autocopy/on','POST');refresh();}catch(e){$('message').textContent=e.message;}};
+$('autocopy-off').onclick=async()=>{try{await api('/api/autocopy/off','POST');refresh();}catch(e){$('message').textContent=e.message;}};
 $('errors').onchange=renderEvents;refresh();setInterval(refresh,2000);
+
+$('phantom-connect').onclick=async()=>{
+  try{
+    const provider=window.phantom?.solana;
+    if(!provider) throw new Error('Phantom extension was not detected. Open this dashboard in a browser with Phantom installed.');
+    const res=await provider.connect();
+    const address=res?.publicKey?.toString?.()||String(res?.publicKey||'');
+    const expected=latest?.wallet?.publicKey||'';
+    if(!expected) throw new Error('The bot has no configured burner signer. Configure PHANTOM_PRIVATE_KEY/PRIVATE_KEY first.');
+    $('wallet-state').textContent=address===expected?`Verified ✓ ${address}`:`Mismatch ✕ Phantom ${address} · bot ${expected}`;
+  }catch(e){$('wallet-state').textContent=e.message;}
+};

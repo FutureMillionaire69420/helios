@@ -125,7 +125,7 @@ test('a dust remainder of a route hop no longer hides a real buy', () => {
 });
 
 test('diagnose: provider health, price spread, coverage gap and PUMP-pair warning (mocked network)', async (t) => {
-  t.after(() => setFetch(null));
+  const wasPublic=config.rpcIsPublic; config.rpcIsPublic=false; t.after(() => { config.rpcIsPublic=wasPublic; setFetch(null); });
   const json = (body) => ({ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body)});
   const allSigs = rows.map((a) => a.trans_id), missing = allSigs[3];
   setFetch(async (url, init) => {

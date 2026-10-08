@@ -20,6 +20,12 @@ services:
         sync: false
       - key: SOLSCAN_API_KEY
         sync: false
+      - key: PHANTOM_WALLET_ADDRESS
+        sync: false
+      - key: PHANTOM_PRIVATE_KEY
+        sync: false
+      - key: AUTO_COPY
+        value: "true"
       - key: DASHBOARD_TOKEN
         generateValue: true
       - key: DASHBOARD_HOST

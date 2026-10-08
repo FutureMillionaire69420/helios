@@ -1,6 +1,6 @@
 {
   "name": "decu-copybot",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -18,7 +18,7 @@
     "status": "node copybot.mjs status",
     "backtest": "node copybot.mjs backtest",
     "export": "node copybot.mjs export",
-    "test": "node --test engine.test.mjs solscan.test.mjs stability.test.mjs",
+    "test": "node --test engine.test.mjs solscan.test.mjs stability.test.mjs phantom.test.mjs",
     "smoke": "node smoke.mjs",
     "demo": "node copybot.mjs demo",
     "report": "node copybot.mjs report"

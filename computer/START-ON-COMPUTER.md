@@ -89,3 +89,22 @@ https://pumpportal.fun/local-trading-api/trading-api/
 https://www.helius.dev/docs/sending-transactions/sender
 https://render.com/docs/disks
 https://support.apple.com/guide/iphone/bookmark-a-website-iph42ab2f3a7/ios
+
+
+## Phantom burner wallet (autonomous mode)
+
+For unattended trading, the server cannot rely on the Phantom browser popup: Phantom's documented browser integration asks the user/wallet to approve signing/sending. Use a dedicated burner Solana account and place only that account's private key in `.env` on this computer. The dashboard's **Connect Phantom** button is only an address verification step. See Phantom's current guidance on exporting an individual Solana private key and its warning not to share private keys.
+
+Recommended setup:
+
+```text
+node copybot.mjs setup --live
+```
+
+The wizard now records the derived `PHANTOM_WALLET_ADDRESS` alongside the key and refuses to start if they do not match. You can verify without exposing the key with:
+
+```text
+node copybot.mjs wallet
+```
+
+Live execution still requires `DRY_RUN=false`; the bot signs locally and sends through the configured Solana/PumpPortal path.
