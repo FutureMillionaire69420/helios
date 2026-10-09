@@ -9,6 +9,9 @@
 //   PCAT                 profit if you had bought at Decu's own first-buy price and sold when he
 //                        first sold (or at the 15 s mark if he hadn't sold yet)
 //   entry gap            how much more the bot paid per token than Decu did
+//   BAND                 the same trade sized at BAND_PCT (10%) of what Decu spent instead of a fixed
+//                        0.1 SOL. Uses the same % moves; a bigger buy moves the price more, so real
+//                        BAND results would be somewhat worse than shown.
 // Read-only: a study never signs or sends anything.
 
 import fs from 'node:fs';
@@ -39,7 +42,8 @@ export function summarize(records, { buySol = 0.1 } = {}) {
   if (!n) return out;
   const score = (rule) => {
     const vals = rs.map((r) => ruleExit(r.curve, rule)).filter((v) => v != null);
-    return { pnlSol: vals.reduce((a, v) => a + v * buySol, 0), wins: vals.filter((v) => v > 0).length, trades: vals.length, avg: vals.length ? vals.reduce((a, v) => a + v, 0) / vals.length : null };
+    const band = rs.map((r) => [ruleExit(r.curve, rule), r.bandSol]).filter(([v, b]) => v != null && b > 0);
+    return { bandPnlSol: band.reduce((a, [v, b]) => a + v * b, 0), pnlSol: vals.reduce((a, v) => a + v * buySol, 0), wins: vals.filter((v) => v > 0).length, trades: vals.length, avg: vals.length ? vals.reduce((a, v) => a + v, 0) / vals.length : null };
   };
   const len = Math.max(...rs.map((r) => r.curve.length));
   out.bySecond = Array.from({ length: len }, (_, s) => ({ sec: s, ...score({ at: s }) }));
@@ -57,6 +61,7 @@ export function summarize(records, { buySol = 0.1 } = {}) {
   out.medianEntryGap = median(rs.map((r) => r.entryGap));
   out.medianDelaySec = median(rs.map((r) => r.delaySec));
   const p = rs.map((r) => r.pcat).filter(Number.isFinite);
+  out.bandSpentSol = rs.reduce((a, r) => a + (r.bandSol > 0 ? r.bandSol : 0), 0);
   out.pcat = { pnlSol: p.reduce((a, v) => a + v * buySol, 0), wins: p.filter((v) => v > 0).length, trades: p.length };
   return out;
 }
@@ -71,6 +76,7 @@ export function summaryText(sm) {
     `Best take-profit: sell at ${pct(t.tp)} else at 15s → ${sol(t.pnlSol)} SOL (${t.wins}/${t.trades})`,
     `Best TP+stop: ${pct(ts.tp)} / ${pct(ts.sl)} → ${sol(ts.pnlSol)} SOL (${ts.wins}/${ts.trades})`,
     `3CAT ${sol(sm.cat['3CAT'].pnlSol)} | 5CAT ${sol(sm.cat['5CAT'].pnlSol)} | 10CAT ${sol(sm.cat['10CAT'].pnlSol)} SOL`,
+    `BAND (10% of his size, ${sm.bandSpentSol.toFixed(2)} SOL spent): best second ${sol(b.bandPnlSol)} | best TP ${sol(t.bandPnlSol)} | 5CAT ${sol(sm.cat['5CAT'].bandPnlSol)} SOL`,
     `PCAT (his price) ${sol(sm.pcat.pnlSol)} SOL | median BTSAB ${sm.medianBtsab ?? '—'}s, peak ${pct(sm.medianPeak)}, entry gap ${pct(sm.medianEntryGap)}`,
   ].join('\n');
 }
@@ -79,7 +85,7 @@ export function summaryText(sm) {
  * createStudy({file, quoteSell, notify, meta, ...}).start({...}) after each confirmed bot buy.
  * leaderSell(mint, {time, sol, soldRaw}) records his first sell during the window.
  */
-export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', log = () => {} }) {
+export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, log = () => {} }) {
   const records = [];
   try {
     for (const line of fs.readFileSync(file, 'utf8').split('\n')) if (line.trim()) records.push(JSON.parse(line));
@@ -107,7 +113,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
       time: new Date(st.startedAt).toISOString(), mint: st.mint, symbol: m?.symbol || null, mode,
       hisSol: st.his.sol, hisUsd: st.his.usd, delaySec: st.his.time ? Math.round((st.startedAt / 1000 - st.his.time) * 10) / 10 : null,
       entryGap: hisPrice ? botPrice / hisPrice - 1 : null, cost: st.cost, curve, btsab, peak, worst, worstAt, pcat, pcatExit,
-      hisSoldAtSec: st.hisSell?.atSec ?? null,
+      hisSoldAtSec: st.hisSell?.atSec ?? null, bandSol: st.his.sol > 0 ? st.his.sol * bandPct : null,
       coin: m ? { holders: m.holders ?? null, marketCapUsd: m.marketCapUsd ?? null, ageSec: m.createdTime ? Math.round(st.startedAt / 1000 - m.createdTime) : null } : null,
     };
     records.push(rec);
@@ -121,6 +127,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
         `3CAT ${at(3)} | 5CAT ${at(5)} | 10CAT ${at(10)}`,
         `BTSAB ${btsab ?? '—'}s → ${pct(peak)} (${sol(peak == null ? null : peak * buySol)} SOL) · worst ${pct(worst)} at ${worstAt ?? '—'}s`,
         `PCAT ${pct(pcat)} (bought at his price, sold at ${pcatExit ?? '—'})`,
+        rec.bandSol ? `BAND ${rec.bandSol.toFixed(3)} SOL (${Math.round(bandPct * 100)}% of his buy): 3CAT ${sol(curve[3] == null ? null : curve[3] * rec.bandSol)} | 5CAT ${sol(curve[5] == null ? null : curve[5] * rec.bandSol)} | 10CAT ${sol(curve[10] == null ? null : curve[10] * rec.bandSol)} | BTSAB ${sol(peak == null ? null : peak * rec.bandSol)} SOL` : null,
         `Every second: ${curve.map((v, s) => `${s}:${v == null ? '—' : (v * 100).toFixed(0)}`).join(' ')}`,
         rec.coin ? `Coin: ${rec.coin.holders ?? '?'} holders, mcap ${rec.coin.marketCapUsd ? `$${Math.round(rec.coin.marketCapUsd).toLocaleString('en-US')}` : '?'}, age ${rec.coin.ageSec != null ? `${Math.round(rec.coin.ageSec / 60)} min` : '?'}` : null,
         '',

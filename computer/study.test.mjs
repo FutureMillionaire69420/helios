@@ -26,6 +26,8 @@ test('one coin: priced every step for exactly 15 s, then never again; CAT/BTSAB/
   assert.equal(rec.coin.holders, 120);
   const a = alerts[0];
   assert.match(a.title, /\$TEST BTSAB 7s \+30\.0% \| 5CAT \+15\.0%/);
+  assert.ok(Math.abs(rec.bandSol - 0.2) < 1e-9);
+  assert.ok(a.body.includes('BAND 0.200 SOL (10% of his buy): 3CAT +0.0160 | 5CAT +0.0300 | 10CAT +0.0200 | BTSAB +0.0600 SOL'), a.body);
   for (const w of ['3CAT +8.0%', '5CAT +15.0%', '10CAT +10.0%', 'PCAT', 'entry +25.0% vs his price', 'Every second:', 'Best fixed sell', 'Best take-profit']) assert.ok(a.body.includes(w), w);
   assert.equal(fs.readFileSync(file, 'utf8').trim().split('\n').length, 1, 'journaled');
 });
@@ -57,7 +59,9 @@ test('limits: one study per coin, at most 5 at once, bad inputs ignored', async 
 test('the rule finder picks the best sell second, take-profit and TP+stop over all trades', () => {
   const up = [0, 0.05, 0.18, 0.25, 0.1, 0, -0.1, -0.2, -0.3, -0.3, -0.3, -0.3, -0.3, -0.3, -0.3, -0.3];
   const down = [0, -0.05, -0.2, -0.4, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5];
-  const sm = summarize([{curve: up, peak: 0.25, btsab: 3}, {curve: up, peak: 0.25, btsab: 3}, {curve: down, peak: 0, btsab: 0}], {buySol: 0.1});
+  const sm = summarize([{curve: up, peak: 0.25, btsab: 3, bandSol: 0.2}, {curve: up, peak: 0.25, btsab: 3, bandSol: 0.4}, {curve: down, peak: 0, btsab: 0, bandSol: 0.1}], {buySol: 0.1});
+  assert.ok(Math.abs(sm.bestSecond.bandPnlSol - (0.18 * 0.2 + 0.18 * 0.4 - 0.2 * 0.1)) < 1e-9, 'BAND sizes each trade by his buy');
+  assert.ok(Math.abs(sm.bandSpentSol - 0.7) < 1e-9);
   assert.equal(sm.trades, 3);
   assert.equal(sm.bestSecond.sec, 2); assert.ok(Math.abs(sm.bestSecond.pnlSol - 0.016) < 1e-9);
   assert.equal(sm.bestTpSl.tp, 0.2); assert.equal(sm.bestTpSl.sl, -0.05);

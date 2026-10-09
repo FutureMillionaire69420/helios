@@ -87,6 +87,7 @@ touching that coin) and sends one alert:
 | **BTSAB** | best time to sell after buying: the best second (0–15) and its profit |
 | **PCAT** | profit if you'd bought at Decu's own price and sold when he sold |
 | **entry … vs his price** | how much more the robot paid than Decu |
+| **BAND** | the same trade if each buy were 10% of what Decu spent (he buys 2 SOL → 0.2 SOL) |
 | **Every second** | profit % at each second, 0 to 15 |
 | **Best fixed sell / take-profit / TP+stop** | the selling rule that would have made the most so far |
 

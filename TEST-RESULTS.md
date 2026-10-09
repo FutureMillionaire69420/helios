@@ -109,3 +109,7 @@ and the best fixed-second, take-profit and TP+stop rules over all studied trades
 `node copybot.mjs study` reads the journal offline. Solscan watcher polls every 5 s.
 Safety: price calls time out at 2.5 s, max 5 coins studied at once, read-only.
 Verified live: 16 Helius price reads in 15.1 s on a real pump.fun coin, then stopped. 58/58 tests.
+
+## BAND (Oct 9, Claude)
+Study alerts and totals add BAND: each trade sized at BAND_PCT (10%) of Decu's SOL spend, using the
+same % curve (bigger buys move the price more, so real results would be somewhat worse). 58/58 tests.
