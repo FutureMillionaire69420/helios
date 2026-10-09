@@ -36,6 +36,8 @@ services:
         value: /var/data/state.json
       - key: LOG_FILE
         value: /var/data/trades.log
+      - key: STUDY_FILE
+        value: /var/data/study-paper.jsonl
       - key: SIZING_MODE
         value: fixed
       - key: AUTO_SELL
