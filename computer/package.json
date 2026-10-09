@@ -19,9 +19,10 @@
     "paper:on": "node copybot.mjs paper on",
     "paper:off": "node copybot.mjs paper off",
     "status": "node copybot.mjs status",
+    "study": "node copybot.mjs study",
     "backtest": "node copybot.mjs backtest",
     "export": "node copybot.mjs export",
-    "test": "node --test engine.test.mjs solscan.test.mjs stability.test.mjs phantom.test.mjs",
+    "test": "node --test engine.test.mjs solscan.test.mjs stability.test.mjs phantom.test.mjs study.test.mjs",
     "smoke": "node smoke.mjs",
     "demo": "node copybot.mjs demo",
     "report": "node copybot.mjs report"

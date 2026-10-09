@@ -11,3 +11,4 @@ trades.log
 diagnose-*.json
 *.log
 trades.log.*
+study-*.jsonl

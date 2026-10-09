@@ -100,3 +100,12 @@ Wallet 3mFW…TX1P is a valid address with 0 SOL (Helius, Oct 9). Result: 51/51 
 Auto copy OFF used to stop buying entirely. Now the dashboard has two exclusive toggles:
 "Auto buy + auto sell" and "Auto buy + manual sell" (SOLD alert, sell in Phantom); both OFF = no new
 buys, held coins keep their selling style. CLI: `style auto|manual|off`. 52/52 tests; checked live on a demo bot.
+
+## Trade study (Oct 9, Claude)
+Each bot buy (paper or live) is re-priced every second for exactly 15 s (Helius bonding-curve read,
+Jupiter after graduation), then never again. Saved to study-<mode>.jsonl; one alert per coin with
+3CAT/5CAT/10CAT, BTSAB, PCAT, entry gap vs Decu, every-second curve, coin holders/mcap/age (Solscan),
+and the best fixed-second, take-profit and TP+stop rules over all studied trades.
+`node copybot.mjs study` reads the journal offline. Solscan watcher polls every 5 s.
+Safety: price calls time out at 2.5 s, max 5 coins studied at once, read-only.
+Verified live: 16 Helius price reads in 15.1 s on a real pump.fun coin, then stopped. 58/58 tests.

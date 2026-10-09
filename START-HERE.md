@@ -77,6 +77,23 @@ and your phone gets a message.
   **Dashboard password** and press **Connect**.
 - To see the score: double-click **status-mac.command** / **status-windows.bat**.
 
+### Step 8b. Read the trade-study alerts
+After every coin the robot buys, it watches the price **every second for 15 seconds** (then stops
+touching that coin) and sends one alert:
+
+| In the alert | Means |
+|---|---|
+| **3CAT / 5CAT / 10CAT** | profit if it sold 3 / 5 / 10 seconds after buying |
+| **BTSAB** | best time to sell after buying: the best second (0–15) and its profit |
+| **PCAT** | profit if you'd bought at Decu's own price and sold when he sold |
+| **entry … vs his price** | how much more the robot paid than Decu |
+| **Every second** | profit % at each second, 0 to 15 |
+| **Best fixed sell / take-profit / TP+stop** | the selling rule that would have made the most so far |
+
+All of it is saved. Double-click **study** (or run `node copybot.mjs study`) any time, even with the
+robot stopped, to see the full table: profit for every sell second, the top selling rules, and the
+last 10 trades. After 3 days this tells you which selling rule to use.
+
 ### Step 9. Wait at least 3 days, then read the score
 Double-click **status**. You'll see lines like:
 

@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import {Engine} from './engine.mjs';
 import {PUMP_TOKEN,QUOTES} from './solscan.mjs';
+import {createStudy,summaryText} from './study.mjs';
 
 const val = (key, fallback) => process.env[key]?.trim() || fallback;
 const number = (key, fallback) => Number(val(key,String(fallback)));
@@ -35,10 +36,10 @@ export function normalize(tx, leader, detectBuy, detectSell) {
   const common = {sig:tx.transaction.signatures[0],time:tx.blockTime || Date.now()/1000,leaderBalanceSol:tx.meta.preBalances[index]/1e9};
   const buy = detectBuy(tx,leader), sell = detectSell(tx,leader), result=[];
   // A transaction may both buy and sell. Preserve both sides instead of buy || sell.
-  if (sell) for(const x of sell.sold) result.push({...common,side:'sell',mint:x.mint,soldRaw:((pre.get(x.mint)||0n)-(post.get(x.mint)||0n)).toString(),beforeRaw:(pre.get(x.mint)||0n).toString(),decimals:decimals.get(x.mint)});
+  if (sell) for(const x of sell.sold) result.push({...common,side:'sell',mint:x.mint,sol:sell.sold.length===1?sell.receivedSol:null,soldRaw:((pre.get(x.mint)||0n)-(post.get(x.mint)||0n)).toString(),beforeRaw:(pre.get(x.mint)||0n).toString(),decimals:decimals.get(x.mint)});
   if (buy) {
     // Multi-mint trade allocation cannot be inferred from aggregate SOL spend.
-    if (buy.bought.length===1 && buy.spentStableUsd===0) result.push({...common,side:'buy',mint:buy.bought[0].mint,sol:buy.spentSol,pump:buy.pump,decimals:decimals.get(buy.bought[0].mint)});
+    if (buy.bought.length===1 && buy.spentStableUsd===0) result.push({...common,side:'buy',mint:buy.bought[0].mint,sol:buy.spentSol,raw:((post.get(buy.bought[0].mint)||0n)-(pre.get(buy.bought[0].mint)||0n)).toString(),pump:buy.pump,decimals:decimals.get(buy.bought[0].mint)});
   }
   return result;
 }
@@ -111,6 +112,8 @@ export async function startRuntime(k, {demo=false}={}) {
       label.then(l=>{ if(l){ a.title=a.title.replace(e.mint.slice(0,6)+'…',l); a.body=l+'\n'+a.body; } return k.notify(a); }).catch(()=>{});
     }
     if (c.mode==='paper') paperExits(e);
+    // Every bot buy (paper or live) gets a 15 s study: re-priced each second, then one detailed alert.
+    if (study && e.type==='confirmed' && e.side==='buy') study.start({mint:e.mint,cost:-e.solDelta,raw:e.rawDelta,his:leaderBuys.get(e.mint)||{}});
   };
   // PAPER ONLY: value each paper position at several sell timings (never sends anything).
   const QUICK=String(val('PAPER_QUICK_SELL_SEC','4,5')).split(',').map(Number).filter(x=>x>0);
@@ -121,7 +124,7 @@ export async function startRuntime(k, {demo=false}={}) {
       const st=engine.d.paperStats?.[mint]; if(!st) return;
       const sol=await k.quoteSell(mint,Number(st.raw));
       st.exits[label]= sol==null||!Number.isFinite(sol) ? null : sol*0.995-fee; engine.save();
-      if (label===`buy+${QUICK.at(-1)}s` && k.notify && k.config.notifyPaper!==false && !engine.d.alertsOff) {
+      if (!study && label===`buy+${QUICK.at(-1)}s` && k.notify && k.config.notifyPaper!==false && !engine.d.alertsOff) {
         const v=st.exits[label], s=paperSummary(engine.d.paperStats).find(x=>x.exit===label);
         Promise.resolve(k.notify({title:`[PAPER] ${v==null?'no price':`${v-st.cost>=0?'+':''}${((v/st.cost-1)*100).toFixed(0)}%`} selling ${QUICK.at(-1)}s after buy`,body:`${mint}\nRunning total (${label}): ${s?`${s.pnlSol>=0?'+':''}${s.pnlSol.toFixed(4)} SOL over ${s.trades} trades, ${s.wins} wins`:'-'}\nNo real money used.`,priority:2,tags:['test_tube']})).catch(()=>{});
       }
@@ -135,6 +138,12 @@ export async function startRuntime(k, {demo=false}={}) {
     if(e.type==='leader-sold'&&engine.d.paperStats?.[e.mint]) for(const s of AFTER) valueAt(e.mint,`his-sell+${s}s`,s*1000);
   };
   let engine;
+  // Decu's FIRST buy of each coin (for PCAT and the entry gap). Bounded.
+  const leaderBuys=new Map();
+  const study = demo || val('STUDY','true')==='false' || !k.quoteSell ? null : createStudy({
+    file:val('STUDY_FILE',path.resolve(`study-${c.mode}.jsonl`)), quoteSell:k.quoteSell, mode:c.mode, buySol:c.buySol,
+    feeSol:k.config.tipSol+k.config.priorityFeeSol, windowSec:number('STUDY_WINDOW_SEC',15), label:k.config.leaderLabel,
+    meta:k.tokenMeta||null, notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, log:m=>engine?.event('connection',{message:m})});
   const receipt = async job => {
     const tx = await k.getTransaction(job.signature,2);
     if (!tx) return {status:'unresolved',error:'confirmed receipt not available yet'};
@@ -245,7 +254,8 @@ export async function startRuntime(k, {demo=false}={}) {
         }
       }
       for(const s of signals) {
-        if(s.side==='buy') s.usd=s.sol*await k.getSolUsd();
+        if(s.side==='buy') { s.usd=s.sol*await k.getSolUsd(); if(!leaderBuys.has(s.mint)) { leaderBuys.set(s.mint,{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time}); if(leaderBuys.size>2000) leaderBuys.delete(leaderBuys.keys().next().value); } }
+        else study?.leaderSell(s.mint,s);
         await engine.ingest(s);
       }
       completed.add(sig); status.lastSignal=new Date().toISOString();
@@ -289,6 +299,7 @@ export async function startRuntime(k, {demo=false}={}) {
           wallet:{publicKey:c.wallet||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true}};
         res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean(snap)));
       }
+      if(url.pathname==='/api/study' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?{...study.summary(),text:summaryText(study.summary()),active:[...study.active.keys()]}:{trades:0,text:'Study is off.'}));}
       if(url.pathname==='/api/wallet' && req.method==='GET') {
         res.writeHead(200,{'Content-Type':'application/json'});
         return res.end(JSON.stringify(clean({publicKey:c.wallet||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true})));
@@ -313,5 +324,5 @@ export async function startRuntime(k, {demo=false}={}) {
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});
   engine.event('started',{mode:c.mode,dashboard:`http://${host}:${port}`,note:demo?'SYNTHETIC DEMO; no chain or wallet connection':'confirmed leader signals; paper estimates are not guaranteed fills'});
-  return {engine,server,stop:()=>{stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,stop:()=>{stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }

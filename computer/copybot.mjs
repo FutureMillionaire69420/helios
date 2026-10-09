@@ -281,7 +281,7 @@ const config = {
   heliusKey: helius,
   // Solscan Pro API (v2): independent second watcher, parser cross-check, token names, SOL price.
   solscanKey: env('SOLSCAN_API_KEY'),
-  solscanPollMs: num('SOLSCAN_POLL_MS', 10000), // 0 = no Solscan watcher
+  solscanPollMs: num('SOLSCAN_POLL_MS', 5000), // 0 = no Solscan watcher
 
   ntfyTopic: env('NTFY_TOPIC'),
   ntfyServer: env('NTFY_SERVER', 'https://ntfy.sh'),
@@ -2377,7 +2377,7 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
   if (!config.dryRun && !demo && config.executor!=='pumpportal') throw new Error('v2 live execution supports EXECUTOR=pumpportal only; legacy Jupiter remains for quotes/backtests');
   const solscanWatch = solscan.enabled && config.solscanPollMs > 0 ? (onSignature, opts) => startSolscanWatcher({ client: solscan, leader: config.leader, intervalMs: config.solscanPollMs, horizonSec: Math.max(config.maxSignalAgeSec, num('MAX_SELL_SIGNAL_AGE_SEC', 300)), onSignature, ...opts }) : null;
   const tokenLabel = solscan.enabled ? async (mint) => { const m = await solscan.tokenMeta(mint); return m?.symbol ? `$${m.symbol}` : null; } : null;
-  const r = await startRuntime({config,kp,notify,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,tokenLabel,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  const r = await startRuntime({config,kp,notify,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,tokenLabel,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();process.exit(0);});
 }
 
@@ -2474,6 +2474,8 @@ async function runControlCmd(argv = process.argv) {
     console.log('\nPaper results (pretend money). "buy+5s" = sold 5 s after the bot bought, "his-sell+10s" = sold 10 s after he sold:');
     for (const p of s.paper) console.log(`  ${p.exit.padEnd(13)} ${String(p.trades).padStart(4)} trades  ${String(p.wins).padStart(4)} wins  ${p.pnlSol >= 0 ? '+' : ''}${p.pnlSol.toFixed(4)} SOL`);
   } else if (s.mode === 'paper') console.log('No paper trades yet. They appear after Decu buys a coin the bot copies.');
+  const st = await call('/api/study').catch(() => null);
+  if (st?.text) console.log('\n' + st.text);
 }
 
 // ===== setup.js =====
@@ -2554,6 +2556,25 @@ async function runSetup(argv = process.argv) {
     const r = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'check'], { stdio: 'inherit', cwd: process.cwd() });
     process.exitCode = r.status ?? 1;
   }
+}
+
+// ===== study CLI =====
+// node copybot.mjs study [--live]: read the trade-study journal (works while the bot is stopped).
+async function runStudyCmd(argv = process.argv) {
+  const { summarize, summaryText } = await import('./study.mjs');
+  const file = env('STUDY_FILE', path.resolve(`study-${argv.includes('--live') ? 'live' : 'paper'}.jsonl`));
+  let records = [];
+  try { records = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { console.log(`No study journal yet (${file}).`); return; }
+  const sm = summarize(records, { buySol: config.buySol });
+  console.log(summaryText(sm));
+  if (!sm.trades) return;
+  console.log('\nProfit by sell second (all trades, SOL):');
+  for (const b of sm.bySecond) console.log(`  ${String(b.sec).padStart(2)}s  ${b.pnlSol >= 0 ? '+' : ''}${b.pnlSol.toFixed(4)}  wins ${b.wins}/${b.trades}`);
+  console.log('\nTop 5 take-profit + stop-loss rules:');
+  for (const r of sm.tpSl.slice(0, 5)) console.log(`  TP ${(r.tp * 100).toFixed(0)}% / SL ${(r.sl * 100).toFixed(0)}%  ${r.pnlSol >= 0 ? '+' : ''}${r.pnlSol.toFixed(4)} SOL  wins ${r.wins}/${r.trades}`);
+  console.log(`\nUpper bound (${sm.perfect.note}): ${sm.perfect.pnlSol >= 0 ? '+' : ''}${sm.perfect.pnlSol.toFixed(4)} SOL`);
+  console.log('\nLast 10 trades:');
+  for (const r of records.slice(-10)) console.log(`  ${r.time.slice(5, 19)} ${(r.symbol ? '$' + r.symbol : r.mint.slice(0, 6)).padEnd(12)} 5CAT ${r.curve[5] == null ? '—' : (r.curve[5] * 100).toFixed(0) + '%'}  BTSAB ${r.btsab}s ${r.peak == null ? '—' : (r.peak * 100).toFixed(0) + '%'}  PCAT ${r.pcat == null ? '—' : (r.pcat * 100).toFixed(0) + '%'}  gap ${r.entryGap == null ? '—' : (r.entryGap * 100).toFixed(0) + '%'}`);
 }
 
 // ===== wallet.js CLI =====
@@ -2642,6 +2663,7 @@ async function main(argv = process.argv) {
   if (cmd === 'report') return runReportCmd(argv);
   if (cmd === 'diagnose') return runDiagnoseCmd(argv);
   if (cmd === 'wallet') return runWalletCmd(argv);
+  if (cmd === 'study') return runStudyCmd(argv);
   if (['style', 'alerts', 'paper', 'pause', 'resume', 'status'].includes(cmd)) return runControlCmd(argv).catch((e) => { console.error(e.message); process.exitCode = 1; });
   if (cmd === 'run') return runBot();
   if (cmd === 'demo') return runBot({demo:true});
@@ -2651,5 +2673,5 @@ async function main(argv = process.argv) {
 
 
 // ===== entry =====
-export {config,setFetch,rpc,relevantLogs,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
+export {config,setFetch,rpc,relevantLogs,quoteSell,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);

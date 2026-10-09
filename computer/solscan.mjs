@@ -53,7 +53,7 @@ export function solscanClient({ apiKey, http, base = SOLSCAN_BASE, timeoutMs = 8
     tokenMeta: async (mint) => {
       if (metaCache.has(mint)) return metaCache.get(mint);
       const m = await get('/token/meta', { address: mint });
-      const out = { name: m?.name || null, symbol: m?.symbol || null, holders: m?.holder ?? null, priceUsd: m?.price ?? null };
+      const out = { name: m?.name || null, symbol: m?.symbol || null, holders: m?.holder ?? null, priceUsd: m?.price ?? null, marketCapUsd: m?.market_cap ?? null, createdTime: m?.created_time ?? null };
       metaCache.set(mint, out);
       if (metaCache.size > 500) metaCache.delete(metaCache.keys().next().value);
       return out;
