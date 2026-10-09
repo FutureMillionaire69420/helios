@@ -1,0 +1,30 @@
+{
+  "name": "decu-copybot",
+  "version": "2.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node copybot.mjs start",
+    "setup": "node copybot.mjs setup",
+    "check": "node copybot.mjs check",
+    "diagnose": "node copybot.mjs diagnose",
+    "style:auto": "node copybot.mjs style auto",
+    "style:manual": "node copybot.mjs style manual",
+    "style:off": "node copybot.mjs style off",
+    "alerts:on": "node copybot.mjs alerts on",
+    "alerts:off": "node copybot.mjs alerts off",
+    "paper:on": "node copybot.mjs paper on",
+    "paper:off": "node copybot.mjs paper off",
+    "status": "node copybot.mjs status",
+    "study": "node copybot.mjs study",
+    "backtest": "node copybot.mjs backtest",
+    "export": "node copybot.mjs export",
+    "test": "node --test engine.test.mjs solscan.test.mjs stability.test.mjs phantom.test.mjs study.test.mjs",
+    "smoke": "node smoke.mjs",
+    "demo": "node copybot.mjs demo",
+    "report": "node copybot.mjs report"
+  }
+}
