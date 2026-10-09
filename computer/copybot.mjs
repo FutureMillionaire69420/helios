@@ -2439,17 +2439,18 @@ async function runReportCmd(argv = process.argv) {
 
 // ===== control.js =====
 // Switch a RUNNING bot from the command line (same as the dashboard buttons):
+//   node copybot.mjs style auto|manual auto sell, or sell by hand in Phantom (both auto buy)
 //   node copybot.mjs alerts on|off     phone alerts (saved across restarts)
 //   node copybot.mjs paper on|off      paper mode only: off = no new paper buys or paper alerts
 //   node copybot.mjs pause | resume    stop / allow new buys in any mode
 //   node copybot.mjs status            mode, buys, alerts
 // Paper vs live is never switched here: that stays DRY_RUN in .env plus a restart.
-const CONTROL = { 'alerts on': '/api/alerts/on', 'alerts off': '/api/alerts/off', 'paper on': '/api/resume', 'paper off': '/api/pause', pause: '/api/pause', resume: '/api/resume', status: null };
+const CONTROL = { 'style auto': '/api/style/auto', 'style manual': '/api/style/manual', 'style off': '/api/style/off', 'alerts on': '/api/alerts/on', 'alerts off': '/api/alerts/off', 'paper on': '/api/resume', 'paper off': '/api/pause', pause: '/api/pause', resume: '/api/resume', status: null };
 
 async function runControlCmd(argv = process.argv) {
   const action = [argv[2], argv[3]].filter((x) => x && !x.startsWith('--')).join(' ').trim();
   const key = action in CONTROL ? action : argv[2];
-  if (!(key in CONTROL)) throw new Error(`Use: alerts on|off, paper on|off, pause, resume, status`);
+  if (!(key in CONTROL)) throw new Error(`Use: style auto|manual|off, alerts on|off, paper on|off, pause, resume, status`);
   const host = env('DASHBOARD_HOST', '127.0.0.1');
   const base = env('BOT_URL') || `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${env('PORT', '3000')}`;
   const token = env('DASHBOARD_TOKEN');
@@ -2468,7 +2469,7 @@ async function runControlCmd(argv = process.argv) {
   if (key.startsWith('paper') && before.mode !== 'paper') throw new Error(`the bot is in ${before.mode.toUpperCase()} mode. "paper on|off" only works in paper mode; use pause / resume instead`);
   if (CONTROL[key]) await call(CONTROL[key], 'POST');
   const s = await call('/api/status');
-  console.log(`Mode: ${s.mode.toUpperCase()} | New buys: ${s.paused ? 'PAUSED' : 'on'} | Alerts: ${s.alertsOff ? 'OFF' : 'on'}${s.alertsOff && s.mode === 'live' ? ' (unknown-outcome live trades still alert)' : ''}`);
+  console.log(`Mode: ${s.mode.toUpperCase()} | Style: ${s.paused ? 'both OFF (no new buys)' : s.autoCopy ? 'auto buy + AUTO sell' : 'auto buy + MANUAL sell (Phantom)'} | New buys: ${s.paused ? 'PAUSED' : 'on'} | Alerts: ${s.alertsOff ? 'OFF' : 'on'}${s.alertsOff && s.mode === 'live' ? ' (unknown-outcome live trades still alert)' : ''}`);
   if (s.paper?.length) {
     console.log('\nPaper results (pretend money). "buy+5s" = sold 5 s after the bot bought, "his-sell+10s" = sold 10 s after he sold:');
     for (const p of s.paper) console.log(`  ${p.exit.padEnd(13)} ${String(p.trades).padStart(4)} trades  ${String(p.wins).padStart(4)} wins  ${p.pnlSol >= 0 ? '+' : ''}${p.pnlSol.toFixed(4)} SOL`);
@@ -2641,7 +2642,7 @@ async function main(argv = process.argv) {
   if (cmd === 'report') return runReportCmd(argv);
   if (cmd === 'diagnose') return runDiagnoseCmd(argv);
   if (cmd === 'wallet') return runWalletCmd(argv);
-  if (['alerts', 'paper', 'pause', 'resume', 'status'].includes(cmd)) return runControlCmd(argv).catch((e) => { console.error(e.message); process.exitCode = 1; });
+  if (['style', 'alerts', 'paper', 'pause', 'resume', 'status'].includes(cmd)) return runControlCmd(argv).catch((e) => { console.error(e.message); process.exitCode = 1; });
   if (cmd === 'run') return runBot();
   if (cmd === 'demo') return runBot({demo:true});
   console.error(`Unknown command "${cmd}". Use: setup | start | run | check | diagnose | wallet | demo | alerts on|off | paper on|off | pause | resume | status | backtest | export | report`);

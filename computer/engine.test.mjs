@@ -71,16 +71,16 @@ test('live guard refuses token approval instructions',async()=>{const f=guardFix
 test('live guard refuses simulation that drains extra tokens',async()=>{const f=guardFixture();setFetch(f.mock(0n));try{await assert.rejects(validateTrade(f.build(),f.job,1),/token balance/);}finally{setFetch(null);}});
 
 // ---- added: manual-sell mode, phone alerts, safe defaults ----
-test('Decu auto-copy toggle mirrors buys and proportional sells, and persists across restart',async t=>{
+test('trading style: both styles auto-buy; auto style sells his share; choice persists across restart',async t=>{
   const e=fixture(t,{send:async j=>({status:'confirmed',rawDelta:j.side==='buy'?'1000':(-BigInt(j.raw)).toString(),solDelta:j.side==='buy'?-0.1:0.02})},{autoCopy:false,autoSell:false});
-  await e.ingest(buy('off','off-buy')); await e.idle(); assert.equal(e.d.positions.off,undefined);
+  await e.ingest(buy('manual','manual-buy')); await e.idle(); assert.equal(e.d.positions.manual.raw,'1000','manual-sell style still buys');
   e.autoCopy(true); await e.ingest(buy('coin','on-buy')); await e.idle(); assert.equal(e.d.positions.coin.raw,'1000');
   await e.ingest(sell('250','1000','on-sell')); await e.idle(); assert.equal(e.d.positions.coin.raw,'750');
   const restored=new Engine({file:e.file,config:{...cfg,autoCopy:false,autoSell:false},adapter:e.a});
   assert.equal(restored.d.autoCopy,true);
   restored.autoCopy(false); await restored.ingest(sell('750','750','off-sell')); await restored.idle(); assert.equal(restored.d.positions.coin.raw,'750');
 });
-test('auto-copy OFF never buys or sells, and reports a leader-sold alert for a held position',async t=>{
+test('manual-sell style never sells, and alerts when he sells a held coin',async t=>{
   let sells=0;const e=fixture(t,{send:async j=>{if(j.side==='sell')sells++;return {status:'confirmed',rawDelta:j.side==='buy'?'1000':(-BigInt(j.raw)).toString(),solDelta:j.side==='buy'?-0.1:0.1};}},{autoSell:false,autoCopy:true});
   await e.ingest(buy());await e.idle();assert.equal(e.d.positions.coin.raw,'1000');
   e.autoCopy(false); await e.ingest(sell('1000','1000'));await e.idle();
@@ -131,4 +131,16 @@ test('paper mode closes nothing for real but values every position at quick and 
   assert.equal(s.length,2);assert.ok(s.every(x=>x.trades===1&&x.wins===1));
   assert.ok(alerts.some(a=>/\[PAPER\] Copied/.test(a.title)));assert.ok(alerts.some(a=>/SOLD a coin you hold/.test(a.title)));
   assert.equal(sent,0); // paper never sends
+});
+
+test('two trading toggles: auto/manual are exclusive, both off stops buys',async t=>{
+  let sells=0;const e=fixture(t,{send:async j=>{if(j.side==='sell')sells++;return {status:'confirmed',rawDelta:j.side==='buy'?'1000':(-BigInt(j.raw)).toString(),solDelta:j.side==='buy'?-0.1:0.02};}});
+  e.style('manual');assert.equal(e.d.autoCopy,false);assert.equal(e.d.paused,false);
+  await e.ingest(buy('a','a1'));await e.idle();assert.equal(e.d.positions.a.raw,'1000');
+  await e.ingest({...sell('1000','1000','a2'),mint:'a'});await e.idle();assert.equal(sells,0);assert.ok(e.d.events.some(x=>x.type==='leader-sold'&&x.mint==='a'));
+  e.style('auto');assert.equal(e.d.autoCopy,true);
+  await e.ingest(buy('b','b1'));await e.idle();await e.ingest({...sell('500','1000','b2'),mint:'b'});await e.idle();assert.equal(e.d.positions.b.raw,'500');
+  e.style('off');assert.equal(e.d.paused,true);
+  await e.ingest(buy('c','c1'));await e.idle();assert.equal(e.d.positions.c,undefined);
+  await e.ingest({...sell('500','500','b3'),mint:'b'});await e.idle();assert.equal(e.d.positions.b.raw,'0','held coins keep their selling style');
 });

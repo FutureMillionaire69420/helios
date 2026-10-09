@@ -95,3 +95,8 @@ fix for the check after setup. Two fixes to the upload: auto copy defaulted to O
 every buy (paper mode recorded nothing); and state files saved before the switch existed also read
 as OFF. `AUTO_COPY` now defaults to true; old state takes the configured value.
 Wallet 3mFW…TX1P is a valid address with 0 SOL (Helius, Oct 9). Result: 51/51 tests.
+
+## Two trading toggles (Oct 9, Claude)
+Auto copy OFF used to stop buying entirely. Now the dashboard has two exclusive toggles:
+"Auto buy + auto sell" and "Auto buy + manual sell" (SOLD alert, sell in Phantom); both OFF = no new
+buys, held coins keep their selling style. CLI: `style auto|manual|off`. 52/52 tests; checked live on a demo bot.

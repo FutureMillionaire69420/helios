@@ -11,7 +11,7 @@ Decu copy bot (pump.fun) with Helius and Solscan as its data providers.
 
 ```
 cd computer
-npm test               # 51 tests, no network
+npm test               # 52 tests, no network
 node copybot.mjs diagnose   # Helius vs Solscan health, parser cross-check, leader profile
 node copybot.mjs check      # go-live preflight (never sends)
 ```

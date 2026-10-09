@@ -69,7 +69,7 @@ export function alertFor(e, mode, leaderLabel='Decu') {
   const tag = mode==='live' ? '' : mode==='paper' ? '[PAPER] ' : '[DEMO] ';
   const short = m => (m||'').slice(0,6)+'…';
   const pump = m => 'https://pump.fun/coin/'+m, tx = s => 'https://solscan.io/tx/'+s;
-  if (e.type==='leader-sold') return {title:`${tag}${leaderLabel} SOLD a coin you hold`, body:`He is selling ${short(e.mint)}. The bot will NOT sell (AUTO_SELL=false).\nSell by hand in Axiom/Phantom if you want out.\nToken: ${e.mint}`, priority:5, tags:['rotating_light'], click:pump(e.mint)};
+  if (e.type==='leader-sold') return {title:`${tag}${leaderLabel} SOLD a coin you hold`, body:`He is selling ${short(e.mint)}. The bot will NOT sell (manual-sell style).\nSell by hand in Phantom if you want out.\nToken: ${e.mint}`, priority:5, tags:['rotating_light'], click:pump(e.mint)};
   if (e.type==='confirmed' && e.side==='buy') return {title:`${tag}Copied ${leaderLabel}: bought ${short(e.mint)}`, body:`Spent ${(-e.solDelta).toFixed(4)} SOL incl. fees\nToken: ${e.mint}`, priority:mode==='live'?5:3, tags:['white_check_mark'], click:mode==='live'?tx(e.signature):pump(e.mint)};
   if (e.type==='confirmed' && e.side==='sell') return {title:`${tag}Sold ${short(e.mint)}`, body:`Received ${Number(e.solDelta).toFixed(4)} SOL after fees\nToken: ${e.mint}`, priority:4, tags:['moneybag'], click:mode==='live'?tx(e.signature):pump(e.mint)};
   if (e.type==='failed') return {title:`${tag}Trade FAILED (${e.side})`, body:`${e.message||'unknown error'}\nToken: ${e.mint}\nNo tokens changed hands.`, priority:4, tags:['x'], click:pump(e.mint)};
@@ -299,6 +299,8 @@ export async function startRuntime(k, {demo=false}={}) {
       if(req.method==='POST' && ['/api/alerts/on','/api/alerts/off'].includes(url.pathname)) {
         engine.mute(url.pathname==='/api/alerts/off');res.writeHead(200);return res.end('OK');
       }
+      const style=url.pathname.match(/^\/api\/style\/(auto|manual|off)$/);
+      if(req.method==='POST' && style) {engine.style(style[1]);res.writeHead(200);return res.end('OK');}
       if(req.method==='POST' && ['/api/autocopy/on','/api/autocopy/off'].includes(url.pathname)) {
         engine.autoCopy(url.pathname==='/api/autocopy/on');res.writeHead(200);return res.end('OK');
       }

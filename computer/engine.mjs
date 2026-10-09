@@ -45,26 +45,22 @@ export class Engine {
       this.event('detected', {side:s.side, mint:s.mint, leaderSignature:s.sig});
       let reason;
       if (s.side === 'buy') {
-        if (!this.d.autoCopy) reason = 'Decu auto copy is off';
-        else if (this.d.paused) reason = 'new buys paused';
+        // Buying happens in both trading styles; only Pause stops it.
+        if (this.d.paused) reason = 'new buys paused';
         else if (Date.now()/1000 - s.time > this.c.maxAge) reason = 'stale buy signal';
         else if (!s.pump && this.c.pumpOnly) reason = 'not a pump trade';
         else if (s.usd < this.c.minLeaderUsd) reason = 'leader buy below minimum';
         else if (this.c.oneBuy && (this.d.positions[s.mint] || this.d.jobs[s.mint] || this.d.queues[s.mint]?.some(x=>x.side==='buy'))) reason = 'already copied mint';
       } else if (!this.d.autoCopy) {
+        // Manual-sell style (auto copy OFF): never sell; alert the moment he sells a coin the bot holds,
+        // so the user can sell by hand in Phantom.
         if (this.d.positions[s.mint] || this.d.jobs[s.mint] || this.d.queues[s.mint]?.length) {
           this.d.seen[key] = Date.now();
-          this.event('leader-sold', {mint:s.mint, leaderSignature:s.sig, soldRaw:s.soldRaw, beforeRaw:s.beforeRaw, reason:'Decu auto copy is off'});
+          this.event('leader-sold', {mint:s.mint, leaderSignature:s.sig, soldRaw:s.soldRaw, beforeRaw:s.beforeRaw});
         }
         return;
       }
       else if (!this.d.positions[s.mint] && !this.d.jobs[s.mint] && !this.d.queues[s.mint]?.length) reason = 'no bot position';
-      else if (!this.c.autoSell && !this.d.autoCopy) {
-        // Manual-sell mode: never sell, but tell the user the moment he sells a coin the bot holds.
-        this.d.seen[key] = Date.now();
-        this.event('leader-sold', {mint:s.mint, leaderSignature:s.sig, soldRaw:s.soldRaw, beforeRaw:s.beforeRaw});
-        return;
-      }
       else if (this.c.maxSellAge > 0 && Date.now()/1000 - s.time > this.c.maxSellAge) reason = 'stale sell signal; inspect position';
       this.d.seen[key] = Date.now();
       if (reason) { this.event('skip', {mint:s.mint, side:s.side, reason}); return; }
@@ -159,6 +155,13 @@ export class Engine {
     return n;
   }
   pause(value) { this.d.paused=value; this.event(value ? 'paused' : 'resumed'); }
+  // Two toggles on the dashboard. 'auto' = auto buy + auto sell, 'manual' = auto buy + manual sell,
+  // 'off' = no new buys (positions already held keep the selling style they had).
+  style(value) {
+    if (value === 'off') { this.d.paused = true; this.event('style', {style:'off', message:'both toggles off: no new buys'}); return; }
+    this.d.autoCopy = value === 'auto'; this.d.paused = false;
+    this.event('style', {style:value, message:value === 'auto' ? 'auto buy + auto sell' : 'auto buy + manual sell'});
+  }
   autoCopy(value) { this.d.autoCopy=!!value; this.event(value ? 'auto-copy-on' : 'auto-copy-off'); }
   // Phone alerts on/off. Saved in the state file, so it survives restarts.
   mute(value) { this.d.alertsOff=value; this.event(value ? 'alerts-off' : 'alerts-on'); }

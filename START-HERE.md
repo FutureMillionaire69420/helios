@@ -105,10 +105,11 @@ his-sell+10s   120 trades   45 wins   -0.0800 SOL
    - it runs the go-live check. **The last line must say READY FOR LIVE.** It tests a real buy but
      does **not** send it.
 6. Double-click **start** again. Day one is limited to **0.2 SOL** of buys.
-7. In the dashboard, turn **Decu auto copy ON** when you are ready. That single toggle arms both
-   autonomous buys and proportional sells for positions the bot copied. A Decu sell is acted on immediately
-   through the same live execution path; exact same-block timing is not guaranteed because your transaction
-   must still be built, signed, broadcast, and confirmed separately.
+7. Pick your trading style in the dashboard (two toggles, only one can be ON):
+   - **Auto buy + auto sell**: the robot buys when Decu buys and sells the same share when he sells.
+   - **Auto buy + manual sell**: the robot buys when Decu buys. When your phone says
+     **"Decu SOLD a coin you hold"**, you sell that coin yourself in Phantom.
+   - Both OFF = no new buys. Same from a terminal: `node copybot.mjs style auto|manual|off`.
 8. Want to stop using real money? Double-click **back-to-paper**, then start again.
 
 ---
