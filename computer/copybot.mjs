@@ -1693,7 +1693,8 @@ function startWatcher(onSignature, { log = console.log, status = {} } = {}) {
     ws.onopen = () => {
       backoff = 1000;
       lastMsg = Date.now();
-      ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'logsSubscribe', params: [{ mentions: [config.leader] }, { commitment: 'confirmed' }] }));
+      // FAST_PATH: 'processed' delivers his trade ~0.4 s after it lands instead of ~1 s later.
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'logsSubscribe', params: [{ mentions: [config.leader] }, { commitment: config.fastPath ? 'processed' : 'confirmed' }] }));
       status.websocket='subscribing';
     };
     ws.onmessage = (ev) => {
@@ -2377,7 +2378,7 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
   if (!config.dryRun && !demo && config.executor!=='pumpportal') throw new Error('v2 live execution supports EXECUTOR=pumpportal only; legacy Jupiter remains for quotes/backtests');
   const solscanWatch = solscan.enabled && config.solscanPollMs > 0 ? (onSignature, opts) => startSolscanWatcher({ client: solscan, leader: config.leader, intervalMs: config.solscanPollMs, horizonSec: Math.max(config.maxSignalAgeSec, num('MAX_SELL_SIGNAL_AGE_SEC', 300)), onSignature, ...opts }) : null;
   const tokenLabel = solscan.enabled ? async (mint) => { const m = await solscan.tokenMeta(mint); return m?.symbol ? `$${m.symbol}` : null; } : null;
-  const r = await startRuntime({config,kp,notify,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,tokenLabel,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  const r = await startRuntime({config,kp,notify,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,tokenLabel,leaderPumpBuys,leaderPumpSells,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();process.exit(0);});
 }
 
@@ -2673,5 +2674,5 @@ async function main(argv = process.argv) {
 
 
 // ===== entry =====
-export {config,setFetch,rpc,relevantLogs,quoteSell,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
+export {config,setFetch,rpc,relevantLogs,quoteSell,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);

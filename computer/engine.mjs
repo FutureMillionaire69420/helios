@@ -121,7 +121,7 @@ export class Engine {
         const nextRaw=BigInt(p.raw)+delta;
         if (nextRaw < 0n) throw new Error('negative position: reconciliation required');
         p.raw = nextRaw.toString();
-        if (job.side === 'buy') p.costSol += -result.solDelta;
+        if (job.side === 'buy') { p.costSol += -result.solDelta; p.boughtAt ||= Date.now(); }
         else p.realizedSol += result.solDelta;
         if (this.c.mode !== 'live') this.d.paperBalance += result.solDelta;
         delete this.d.jobs[job.mint];

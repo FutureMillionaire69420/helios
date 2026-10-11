@@ -113,6 +113,7 @@ export async function startRuntime(k, {demo=false}={}) {
     }
     if (c.mode==='paper') paperExits(e);
     // Every bot buy (paper or live) gets a 15 s study: re-priced each second, then one detailed alert.
+    if (e.type==='confirmed' && e.side==='buy') scheduleMaxHold?.(e.mint, maxHoldMs);
     if (study && e.type==='confirmed' && e.side==='buy') study.start({mint:e.mint,cost:-e.solDelta,raw:e.rawDelta,his:leaderBuys.get(e.mint)||{}});
   };
   // PAPER ONLY: value each paper position at several sell timings (never sends anything).
@@ -137,7 +138,8 @@ export async function startRuntime(k, {demo=false}={}) {
     }
     if(e.type==='leader-sold'&&engine.d.paperStats?.[e.mint]) for(const s of AFTER) valueAt(e.mint,`his-sell+${s}s`,s*1000);
   };
-  let engine;
+  let engine, scheduleMaxHold=null;
+  const maxHoldMs=number('MAX_HOLD_SEC',15)*1000;
   // Decu's FIRST buy of each coin (for PCAT and the entry gap). Bounded.
   const leaderBuys=new Map();
   const study = demo || val('STUDY','true')==='false' || !k.quoteSell ? null : createStudy({
@@ -226,15 +228,47 @@ export async function startRuntime(k, {demo=false}={}) {
     }
   }
   await engine.recover();
-  const inFlight=new Set(), completed=new Set(), delivered=new Set();
+  scheduleMaxHold=(mint,ms)=>{
+    if(!(maxHoldMs>0)) return;
+    setTimeout(()=>{
+      const p=engine.d.positions[mint];
+      if(!engine.d.autoCopy || !p || BigInt(p.raw)<=0n) return; // he sold first, or manual-sell style
+      engine.ingest({sig:`maxhold-${mint}-${p.boughtAt||0}`,side:'sell',mint,soldRaw:'1',beforeRaw:'1',time:Date.now()/1000,decimals:mintDecimals.get(mint)??6})
+        .catch(err=>engine.event('error',{mint,message:'max-hold sell: '+err.message}));
+    },Math.max(0,ms)).unref?.();
+  };
+  for(const [mint,p] of Object.entries(engine.d.positions)) if(BigInt(p.raw||'0')>0n) scheduleMaxHold(mint, p.boughtAt ? p.boughtAt+maxHoldMs-Date.now() : 0);
+  const inFlight=new Set(), completed=new Set(), delivered=new Set(), fastDone=new Set();
+  // Exit rule for the auto-sell style: sell everything at his FIRST sell (SELL_ALL_ON_LEADER_SELL),
+  // and if he has not sold MAX_HOLD_SEC (15) after the bot's buy, sell anyway. 0 = no time limit.
+  const sellAll=val('SELL_ALL_ON_LEADER_SELL','true')==='true', maxHoldSec=number('MAX_HOLD_SEC',15);
+  const mintDecimals=new Map();
+  const remember=(map,key,v)=>{map.set(key,v);if(map.size>2000)map.delete(map.keys().next().value);};
+  const recordLeaderBuy=s=>{ if(!leaderBuys.has(s.mint)) remember(leaderBuys,s.mint,{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time}); };
   let lastErrorEventAt=0, hiddenErrors=0;
-  const onSignature=async(sig,source='poll')=>{
+  const onSignature=async(sig,source='poll',logs)=>{
     // Which provider saw each leader transaction first. Solscan arriving first means both Helius
     // paths (websocket and polling) missed it: count it and alert, then process it normally.
     if(!delivered.has(sig)) {
       delivered.add(sig); if(delivered.size>20000) delivered.delete(delivered.values().next().value);
       status.firstSeen[source]=(status.firstSeen[source]||0)+1;
       if(source==='solscan') {status.gaps++;engine.event('provider-gap',{leaderSignature:sig,message:'Solscan delivered a leader transaction before Helius'});}
+    }
+    // FAST PATH: his pump.fun trade decoded straight from the websocket logs (processed commitment),
+    // before the transaction is confirmed or downloaded. The full path below still runs and is deduplicated.
+    if(source==='ws' && k.config.fastPath!==false && k.leaderPumpBuys && Array.isArray(logs) && !fastDone.has(sig)) {
+      fastDone.add(sig); if(fastDone.size>5000) fastDone.delete(fastDone.values().next().value);
+      try {
+        for(const ev of k.leaderPumpBuys(logs,k.config.leader)) {
+          const s={sig,time:ev.timestamp||Date.now()/1000,side:'buy',mint:ev.mint,sol:ev.solAmount/1e9,raw:String(ev.tokenAmount),pump:true,decimals:6,fast:true};
+          s.usd=s.sol*await k.getSolUsd(); recordLeaderBuy(s); remember(mintDecimals,s.mint,6); status.fastSignals=(status.fastSignals||0)+1;
+          await engine.ingest(s);
+        }
+        if(sellAll && k.leaderPumpSells) for(const ev of k.leaderPumpSells(logs,k.config.leader)) {
+          const s={sig,time:ev.timestamp||Date.now()/1000,side:'sell',mint:ev.mint,sol:ev.solAmount/1e9,soldRaw:'1',beforeRaw:'1',decimals:mintDecimals.get(ev.mint)??6,fast:true};
+          study?.leaderSell(s.mint,s); await engine.ingest(s);
+        }
+      } catch(e) { engine.event('error',{leaderSignature:sig,message:'fast path: '+e.message}); }
     }
     if(completed.has(sig)||inFlight.has(sig)) return;
     inFlight.add(sig);
@@ -254,8 +288,9 @@ export async function startRuntime(k, {demo=false}={}) {
         }
       }
       for(const s of signals) {
-        if(s.side==='buy') { s.usd=s.sol*await k.getSolUsd(); if(!leaderBuys.has(s.mint)) { leaderBuys.set(s.mint,{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time}); if(leaderBuys.size>2000) leaderBuys.delete(leaderBuys.keys().next().value); } }
-        else study?.leaderSell(s.mint,s);
+        if(Number.isInteger(s.decimals)) remember(mintDecimals,s.mint,s.decimals);
+        if(s.side==='buy') { s.usd=s.sol*await k.getSolUsd(); recordLeaderBuy(s); }
+        else { study?.leaderSell(s.mint,s); if(sellAll) { s.soldRaw='1'; s.beforeRaw='1'; } }
         await engine.ingest(s);
       }
       completed.add(sig); status.lastSignal=new Date().toISOString();
@@ -272,6 +307,23 @@ export async function startRuntime(k, {demo=false}={}) {
   const stopSolscan=demo||!k.startSolscanWatcher?()=>{}:k.startSolscanWatcher(onSignature,{log:message=>engine.event('connection',{message}),status});
   if(!demo) status.solscan ||= k.startSolscanWatcher ? {ok:null,note:'starting'} : {ok:false,note:'SOLSCAN_API_KEY not set: Helius only'};
   const timer=setInterval(()=>engine.recover().catch(e=>engine.event('error',{message:e.message})),5000);
+  // WATCHDOG: alert when Helius (websocket) or Solscan stays down, and when it recovers;
+  // plus a "healthy" check-in every HEALTH_ALERT_HOURS (12). Respects the alerts on/off switch.
+  const startedAt=Date.now(); let wsDownSince=null, wsAlerted=false, scDownSince=null, scAlerted=false, lastHealth=Date.now();
+  const say=a=>{ if(!demo && k.notify && !engine.d.alertsOff) Promise.resolve(k.notify(a)).catch(()=>{}); };
+  const tag=c.mode==='live'?'':'[PAPER] ';
+  const watchdog=demo?null:setInterval(()=>{
+    const now=Date.now();
+    if(status.websocket!=='subscribed') { wsDownSince??=now; if(!wsAlerted && now-wsDownSince>120_000) { wsAlerted=true; say({title:`${tag}Helius connection DOWN`,body:`Websocket "${status.websocket}" for ${Math.round((now-wsDownSince)/60000)} min. Solscan backup still watching. Check your Helius key and plan.`,priority:4,tags:['warning']}); } }
+    else { if(wsAlerted) say({title:`${tag}Helius connection back`,body:'Websocket subscribed again.',priority:2,tags:['white_check_mark']}); wsDownSince=null; wsAlerted=false; }
+    if(status.solscan?.ok===false) { scDownSince??=now; if(!scAlerted && now-scDownSince>300_000) { scAlerted=true; say({title:`${tag}Solscan backup DOWN`,body:`${status.solscan.error||'no answer'} for 5+ min. Helius still watching; no gap detection meanwhile.`,priority:3,tags:['warning']}); } }
+    else if(status.solscan?.ok) { if(scAlerted) say({title:`${tag}Solscan backup back`,body:'Polling again.',priority:2,tags:['white_check_mark']}); scDownSince=null; scAlerted=false; }
+    if(now-lastHealth>number('HEALTH_ALERT_HOURS',12)*3600_000) {
+      lastHealth=now; const sm=study?.summary();
+      say({title:`${tag}Bot healthy · up ${Math.round((now-startedAt)/3600_000)} h`,body:[`Helius: ${status.websocket} · fast signals ${status.fastSignals||0} · errors ${status.errors}`,`Solscan: ${status.solscan?.ok?'OK':status.solscan?.ok===false?'failing':'off'} · gaps caught ${status.gaps}`,sm?.trades?`Study: ${sm.trades} trades, FCAT ${sm.fcat.pnlSol>=0?'+':''}${sm.fcat.pnlSol.toFixed(4)} SOL (${sm.fcat.wins}/${sm.fcat.trades} wins)`:'Study: no trades yet'].join('\n'),priority:1,tags:['heartbeat']});
+    }
+  },30_000);
+  watchdog?.unref?.();
   const pruneTimer=setInterval(()=>engine.lock(()=>{if(engine.prune())engine.save();}).catch(()=>{}),600_000);
   const balanceTimer=c.mode==='live'?setInterval(()=>adapter.balance().then(b=>{status.balance=b;}).catch(e=>engine.event('error',{message:e.message})),10000):null;
   let demonstration;
@@ -324,5 +376,5 @@ export async function startRuntime(k, {demo=false}={}) {
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});
   engine.event('started',{mode:c.mode,dashboard:`http://${host}:${port}`,note:demo?'SYNTHETIC DEMO; no chain or wallet connection':'confirmed leader signals; paper estimates are not guaranteed fills'});
-  return {engine,server,study,stop:()=>{stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,stop:()=>{stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }

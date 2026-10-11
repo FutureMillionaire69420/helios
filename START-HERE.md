@@ -83,6 +83,7 @@ touching that coin) and sends one alert:
 
 | In the alert | Means |
 |---|---|
+| **FCAT** (main number) | the bot's own rule: bought as fast as possible, sold when Decu first sold, or at 15 seconds if he hadn't |
 | **3CAT / 5CAT / 10CAT** | profit if it sold 3 / 5 / 10 seconds after buying |
 | **BTSAB** | best time to sell after buying: the best second (0–15) and its profit |
 | **PCAT** | profit if you'd bought at Decu's own price and sold when he sold |
@@ -124,7 +125,8 @@ his-sell+10s   120 trades   45 wins   -0.0800 SOL
      does **not** send it.
 6. Double-click **start** again. Day one is limited to **0.2 SOL** of buys.
 7. Pick your trading style in the dashboard (two toggles, only one can be ON):
-   - **Auto buy + auto sell**: the robot buys when Decu buys and sells the same share when he sells.
+   - **Auto buy + auto sell**: the robot buys when Decu buys and sells **everything** the moment he
+     first sells. If he hasn't sold 15 seconds after the robot's buy, it sells anyway.
    - **Auto buy + manual sell**: the robot buys when Decu buys. When your phone says
      **"Decu SOLD a coin you hold"**, you sell that coin yourself in Phantom.
    - Both OFF = no new buys. Same from a terminal: `node copybot.mjs style auto|manual|off`.

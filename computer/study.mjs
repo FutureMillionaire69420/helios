@@ -8,6 +8,8 @@
 //   BTSAB                best time to sell after buying: the second (0–15) with the highest profit
 //   PCAT                 profit if you had bought at Decu's own first-buy price and sold when he
 //                        first sold (or at the 15 s mark if he hadn't sold yet)
+//   FCAT                 THE BOT'S RULE: buy as fast as possible, sell when Decu first sells, or at
+//                        15 s if he hasn't sold. Uses the bot's real entry price (the headline number)
 //   entry gap            how much more the bot paid per token than Decu did
 //   BAND                 the same trade sized at BAND_PCT (10%) of what Decu spent instead of a fixed
 //                        0.1 SOL. Uses the same % moves; a bigger buy moves the price more, so real
@@ -61,6 +63,8 @@ export function summarize(records, { buySol = 0.1 } = {}) {
   out.medianEntryGap = median(rs.map((r) => r.entryGap));
   out.medianDelaySec = median(rs.map((r) => r.delaySec));
   const p = rs.map((r) => r.pcat).filter(Number.isFinite);
+  const f = rs.filter((r) => Number.isFinite(r.fcat));
+  out.fcat = { pnlSol: f.reduce((a, r) => a + r.fcat * buySol, 0), bandPnlSol: f.reduce((a, r) => a + (r.bandSol > 0 ? r.fcat * r.bandSol : 0), 0), wins: f.filter((r) => r.fcat > 0).length, trades: f.length };
   out.bandSpentSol = rs.reduce((a, r) => a + (r.bandSol > 0 ? r.bandSol : 0), 0);
   out.pcat = { pnlSol: p.reduce((a, v) => a + v * buySol, 0), wins: p.filter((v) => v > 0).length, trades: p.length };
   return out;
@@ -72,6 +76,7 @@ export function summaryText(sm) {
   const b = sm.bestSecond, t = sm.bestTakeProfit, ts = sm.bestTpSl;
   return [
     `Study so far: ${sm.trades} trades of ${sm.buySol} SOL`,
+    `FCAT (bot rule: sell at his sell or 15s): ${sol(sm.fcat.pnlSol)} SOL (${sm.fcat.wins}/${sm.fcat.trades} wins) | BAND ${sol(sm.fcat.bandPnlSol)} SOL`,
     `Best fixed sell: ${b.sec}s after buy → ${sol(b.pnlSol)} SOL total (${b.wins}/${b.trades} wins)`,
     `Best take-profit: sell at ${pct(t.tp)} else at 15s → ${sol(t.pnlSol)} SOL (${t.wins}/${t.trades})`,
     `Best TP+stop: ${pct(ts.tp)} / ${pct(ts.sl)} → ${sol(ts.pnlSol)} SOL (${ts.wins}/${ts.trades})`,
@@ -108,11 +113,15 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
       const exitPrice = hs && hs.sol > 0 && hs.soldRaw > 0 ? hs.sol / hs.soldRaw : st.values.findLast((v) => v != null) / st.raw;
       if (Number.isFinite(exitPrice)) { pcat = exitPrice / hisPrice - 1 - (2 * feeSol) / buySol; pcatExit = hs ? `his sell at ${hs.atSec}s` : '15s mark'; }
     }
+    // FCAT: exit at the first full second after his first sell inside the window, else at the end.
+    const lastKnown = (from) => { for (let s = Math.min(from, curve.length - 1); s >= 0; s--) if (curve[s] != null) return curve[s]; return null; };
+    const hs = st.hisSell, fcatSec = hs && hs.atSec <= windowSec ? Math.max(0, Math.min(windowSec, Math.ceil(hs.atSec))) : windowSec;
+    const fcat = lastKnown(fcatSec), fcatExit = hs && hs.atSec <= windowSec ? `his sell at ${hs.atSec}s` : `${windowSec}s limit`;
     const m = await (meta ? timed(meta(st.mint).catch(() => null)) : null);
     const rec = {
       time: new Date(st.startedAt).toISOString(), mint: st.mint, symbol: m?.symbol || null, mode,
       hisSol: st.his.sol, hisUsd: st.his.usd, delaySec: st.his.time ? Math.round((st.startedAt / 1000 - st.his.time) * 10) / 10 : null,
-      entryGap: hisPrice ? botPrice / hisPrice - 1 : null, cost: st.cost, curve, btsab, peak, worst, worstAt, pcat, pcatExit,
+      entryGap: hisPrice ? botPrice / hisPrice - 1 : null, cost: st.cost, curve, fcat, fcatSec, fcatExit, btsab, peak, worst, worstAt, pcat, pcatExit,
       hisSoldAtSec: st.hisSell?.atSec ?? null, bandSol: st.his.sol > 0 ? st.his.sol * bandPct : null,
       coin: m ? { holders: m.holders ?? null, marketCapUsd: m.marketCapUsd ?? null, ageSec: m.createdTime ? Math.round(st.startedAt / 1000 - m.createdTime) : null } : null,
     };
@@ -124,6 +133,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
       const at = (s) => (curve[s] == null ? '—' : pct(curve[s]));
       const body = [
         `${label} bought ${st.his.sol?.toFixed(3) ?? '?'} SOL${st.his.usd ? ` ($${Math.round(st.his.usd)})` : ''} · bot landed ${rec.delaySec ?? '?'}s later, entry ${pct(rec.entryGap)} vs his price`,
+        `FCAT ${pct(fcat)} (${sol(fcat == null ? null : fcat * buySol)} SOL) · sold at ${fcatExit}${rec.bandSol ? ` · BAND ${sol(fcat == null ? null : fcat * rec.bandSol)} SOL` : ''}`,
         `3CAT ${at(3)} | 5CAT ${at(5)} | 10CAT ${at(10)}`,
         `BTSAB ${btsab ?? '—'}s → ${pct(peak)} (${sol(peak == null ? null : peak * buySol)} SOL) · worst ${pct(worst)} at ${worstAt ?? '—'}s`,
         `PCAT ${pct(pcat)} (bought at his price, sold at ${pcatExit ?? '—'})`,
@@ -135,7 +145,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
         mode === 'live' ? '' : 'No real money used.',
         `Token: ${st.mint}`,
       ].filter((x) => x != null).join('\n');
-      Promise.resolve(notify({ title: `${tag}${name} BTSAB ${btsab ?? '—'}s ${pct(peak)} | 5CAT ${at(5)}`, body, priority: 3, tags: ['bar_chart'], click: `https://pump.fun/coin/${st.mint}` })).catch(() => {});
+      Promise.resolve(notify({ title: `${tag}${name} FCAT ${pct(fcat)} | BTSAB ${btsab ?? '—'}s ${pct(peak)}`, body, priority: 3, tags: ['bar_chart'], click: `https://pump.fun/coin/${st.mint}` })).catch(() => {});
     }
     return rec;
   }

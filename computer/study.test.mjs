@@ -25,7 +25,9 @@ test('one coin: priced every step for exactly 15 s, then never again; CAT/BTSAB/
   assert.ok(Math.abs(rec.entryGap - 0.25) < 1e-9); assert.ok(Math.abs(rec.pcat - (0.085e-6 / 8e-8 - 1)) < 1e-9);
   assert.equal(rec.coin.holders, 120);
   const a = alerts[0];
-  assert.match(a.title, /\$TEST BTSAB 7s \+30\.0% \| 5CAT \+15\.0%/);
+  assert.match(a.title, /\$TEST FCAT -15\.0% \| BTSAB 7s \+30\.0%/);
+  assert.ok(Math.abs(rec.fcat + 0.15) < 1e-9); assert.equal(rec.fcatExit, '15s limit');
+  assert.ok(a.body.includes('FCAT -15.0% (-0.0150 SOL) · sold at 15s limit'), a.body);
   assert.ok(Math.abs(rec.bandSol - 0.2) < 1e-9);
   assert.ok(a.body.includes('BAND 0.200 SOL (10% of his buy): 3CAT +0.0160 | 5CAT +0.0300 | 10CAT +0.0200 | BTSAB +0.0600 SOL'), a.body);
   for (const w of ['3CAT +8.0%', '5CAT +15.0%', '10CAT +10.0%', 'PCAT', 'entry +25.0% vs his price', 'Every second:', 'Best fixed sell', 'Best take-profit']) assert.ok(a.body.includes(w), w);
@@ -38,6 +40,7 @@ test('his sell inside the window is the PCAT exit', async (t) => {
   s.leaderSell('M', {time: Date.now() / 1000 + 4, sol: 1.5, soldRaw: 20000});
   const rec = await p;
   assert.ok(Math.abs(rec.pcat - 0.5) < 1e-9); assert.match(rec.pcatExit, /his sell at/);
+  assert.equal(rec.fcatSec, 4, 'FCAT exits at his sell second'); assert.match(rec.fcatExit, /his sell at 4/);
 });
 
 test('slow or failing price API never stretches the 15 s window', async (t) => {

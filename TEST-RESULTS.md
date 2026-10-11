@@ -113,3 +113,17 @@ Verified live: 16 Helius price reads in 15.1 s on a real pump.fun coin, then sto
 ## BAND (Oct 9, Claude)
 Study alerts and totals add BAND: each trade sized at BAND_PCT (10%) of Decu's SOL spend, using the
 same % curve (bigger buys move the price more, so real results would be somewhat worse). 58/58 tests.
+
+## Fastest buy, FCAT exit rule, watchdog (Oct 11, Claude)
+- Fast path: the websocket subscribes at "processed" and the bot buys straight from Decu's pump.fun
+  trade event in the logs, without waiting for confirmation or downloading the transaction
+  (~0.5-1.5 s sooner). Decoder verified on his real trades of 2026-10-11 (token amounts match Solscan).
+  The full path still runs and is deduplicated.
+- Auto-sell style: sell 100% at his first sell (also from the fast path); if he hasn't sold 15 s after
+  the bot's buy, sell anyway (MAX_HOLD_SEC). Resumes after restart. Manual-sell style unchanged.
+- FCAT = that rule, measured on the bot's real entry; now the headline of every study alert and summary.
+- Watchdog: phone alert if the Helius websocket is down 2+ min or Solscan 5+ min, and when they recover;
+  "bot healthy" check-in every 12 h.
+- Render check (Oct 11): Solscan backup polled ~3,000 times in 4.5 h with 3 transient 504s; Decu made no
+  trades after the deploy (his last was 07:19 UTC), so no live copy yet.
+Result: 64/64 tests (6 new, from his real logs), both demo runs pass.
