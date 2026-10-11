@@ -51,7 +51,7 @@ export class Engine {
         else if (!s.pump && this.c.pumpOnly) reason = 'not a pump trade';
         else if (s.usd < this.c.minLeaderUsd) reason = 'leader buy below minimum';
         else if (this.c.oneBuy && (this.d.positions[s.mint] || this.d.jobs[s.mint] || this.d.queues[s.mint]?.some(x=>x.side==='buy'))) reason = 'already copied mint';
-      } else if (!this.d.autoCopy) {
+      } else if (!this.d.autoCopy && !s.force) {
         // Manual-sell style (auto copy OFF): never sell; alert the moment he sells a coin the bot holds,
         // so the user can sell by hand in Phantom.
         if (this.d.positions[s.mint] || this.d.jobs[s.mint] || this.d.queues[s.mint]?.length) {

@@ -23,13 +23,13 @@ test('decoder reads his real pump.fun buy and sell from the logs', () => {
   assert.equal(leaderPumpBuys(fx.buy.logs, 'Someone1111111111111111111111111111111111111').length, 0, 'only his trades');
 });
 
-async function bot(t, env = {}) {
+async function bot(t, env = {}, quote = async () => 0.11) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-fast-')), saved = {...process.env};
   Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: 'fastpath-test-token-24-characters', STUDY: 'false', ...env});
   let ws; const fetches = [];
   const k = {config: {...config, dryRun: true, minLeaderBuyUsd: 1, logFile: path.join(dir, 'log'), paperLandMs: 0, tipSol: 0.001, priorityFeeSol: 0.0005, slippagePct: 20}, redact: (x) => x,
     detectBuy, detectSell, leaderPumpBuys, leaderPumpSells, getSolUsd: async () => 116,
-    quoteBuy: async () => ({raw: 1_000_000}), quoteSell: async () => 0.11,
+    quoteBuy: async () => ({raw: 1_000_000}), quoteSell: (...a) => quote(...a),
     getTransaction: async (sig) => { fetches.push(sig); return null; }, // full path unavailable: proves the fast path alone trades
     startWatcher: (cb) => { ws = cb; return () => {}; }};
   const r = await startRuntime(k);
@@ -57,18 +57,49 @@ test('auto-sell style: sells EVERYTHING the moment he first sells', async (t) =>
   assert.equal(r.engine.d.positions[MINT].raw, '0', 'fully sold at his first sell');
 });
 
-test('auto-sell style: if he has not sold after MAX_HOLD_SEC, the bot sells anyway', async (t) => {
-  const {r, ws} = await bot(t, {MAX_HOLD_SEC: '0.2'});
+test('auto-sell style: reached +15% within the window -> sells at the 15 s mark', async (t) => {
+  const {r, ws} = await bot(t, {MAX_HOLD_SEC: '0.2', MONITOR_MS: '20'}, async () => 0.13); // ~+26%
   r.engine.style('auto');
   await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
   assert.equal(r.engine.d.positions[MINT].raw, '1000000');
   await sleep(400); await r.engine.idle();
   assert.equal(r.engine.d.positions[MINT].raw, '0', 'sold at the time limit');
-  assert.ok(r.engine.d.events.some((e) => e.type === 'detected' && e.side === 'sell' && e.leaderSignature.startsWith('maxhold-')));
+  assert.ok(r.engine.d.events.some((e) => e.type === 'exit-rule' && e.rule === 'gain-target'));
+});
+
+test('auto-sell style: never reached +15% -> keeps holding until Decu sells', async (t) => {
+  const {r, ws} = await bot(t, {MAX_HOLD_SEC: '0.1', MONITOR_MS: '20'}, async () => 0.11); // ~+6%
+  r.engine.style('auto');
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  await sleep(300); await r.engine.idle();
+  assert.equal(r.engine.d.positions[MINT].raw, '1000000', 'still held after the window');
+  assert.ok(r.engine.d.events.some((e) => e.type === 'exit-rule' && e.rule === 'hold-until-his-sell'));
+  await ws(fx.sell.signature, 'ws', fx.sell.logs); await r.engine.idle();
+  assert.equal(r.engine.d.positions[MINT].raw, '0', 'sold at his sell');
+});
+
+test('stop-loss: down 15% -> sells everything at once, in both styles', async (t) => {
+  for (const style of ['auto', 'manual']) {
+    const {r, ws} = await bot(t, {MAX_HOLD_SEC: '15', MONITOR_MS: '20'}, async () => 0.08); // ~-23%
+    r.engine.style(style);
+    await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+    await sleep(150); await r.engine.idle();
+    assert.equal(r.engine.d.positions[MINT].raw, '0', `${style}: stop-loss sold`);
+    assert.ok(r.engine.d.events.some((e) => e.type === 'exit-rule' && e.rule === 'stoploss'));
+    r.stop();
+  }
+});
+
+test('stop-loss can be limited to the auto style', async (t) => {
+  const {r, ws} = await bot(t, {MONITOR_MS: '20', STOP_LOSS_MANUAL: 'false'}, async () => 0.08);
+  r.engine.style('manual');
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  await sleep(150); await r.engine.idle();
+  assert.equal(r.engine.d.positions[MINT].raw, '1000000');
 });
 
 test('manual-sell style: no automatic sell, only the SOLD alert', async (t) => {
-  const {r, ws} = await bot(t, {MAX_HOLD_SEC: '0.1'});
+  const {r, ws} = await bot(t, {MAX_HOLD_SEC: '0.1', MONITOR_MS: '20'});
   r.engine.style('manual');
   await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
   await ws(fx.sell.signature, 'ws', fx.sell.logs); await sleep(250); await r.engine.idle();
@@ -76,13 +107,16 @@ test('manual-sell style: no automatic sell, only the SOLD alert', async (t) => {
   assert.ok(r.engine.d.events.some((e) => e.type === 'leader-sold' && e.mint === MINT));
 });
 
-test('after a restart, a position past the time limit is sold right away', async (t) => {
-  const first = await bot(t, {MAX_HOLD_SEC: '0'});
+test('after a restart, held coins are watched again: stop-loss still protects them', async (t) => {
+  let price = 0.11;
+  const first = await bot(t, {MAX_HOLD_SEC: '0', MONITOR_MS: '20'}, async () => price);
   first.r.engine.style('auto');
   await first.ws(fx.buy.signature, 'ws', fx.buy.logs); await first.r.engine.idle();
   first.r.engine.d.positions[MINT].boughtAt = Date.now() - 60_000; first.r.engine.save();
   const file = process.env.ENGINE_STATE_FILE; first.r.stop();
-  const again = await bot(t, {MAX_HOLD_SEC: '15', ENGINE_STATE_FILE: file});
-  await sleep(100); await again.r.engine.idle();
-  assert.equal(again.r.engine.d.positions[MINT].raw, '0');
+  const again = await bot(t, {MAX_HOLD_SEC: '15', MONITOR_MS: '20', ENGINE_STATE_FILE: file}, async () => price);
+  await sleep(120); await again.r.engine.idle();
+  assert.equal(again.r.engine.d.positions[MINT].raw, '1000000', 'past 15 s without a known +15%: held for his sell');
+  price = 0.08; await sleep(150); await again.r.engine.idle();
+  assert.equal(again.r.engine.d.positions[MINT].raw, '0', 'stop-loss sold it');
 });

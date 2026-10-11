@@ -143,3 +143,9 @@ Result: 64/64 tests (6 new, from his real logs), both demo runs pass.
 - `node copybot.mjs check` (with PRIVATE_KEY) now builds a local buy with your wallet and fully
   simulates it on-chain without sending: it must say OK before going live.
 Result: 69/69 tests (5 new), both demo runs pass. Local building only runs in LIVE mode.
+
+## Exit rules: stop-loss and +15% gate (Oct 11, Claude)
+Every held coin is priced once a second. Down 15% at any moment -> sell everything (both styles).
+Auto-sell style at 15 s: reached +15% by then -> sell; never reached it -> hold until Decu sells,
+with a 10-minute limit. His sell always exits at once. Coins still held after a restart are watched
+again. Phone alert for each rule. 72/72 tests (exit rules tested on his real logs), demo runs pass.

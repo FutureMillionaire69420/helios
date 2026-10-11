@@ -77,6 +77,11 @@ export function alertFor(e, mode, leaderLabel='Decu') {
   if (e.type==='failed') return {title:`${tag}Trade FAILED (${e.side})`, body:`${e.message||'unknown error'}\nToken: ${e.mint}\nNo tokens changed hands.`, priority:4, tags:['x'], click:pump(e.mint)};
   if (e.type==='unresolved') return {title:`${tag}Trade outcome UNKNOWN`, body:`${e.message||''}\nThe bot keeps checking and will not double-trade.\nTx: ${e.signature||'?'}`, priority:5, tags:['warning'], click:e.signature?tx(e.signature):undefined};
   if (e.type==='unsupported' && e.kind==='paid-with-pump') return {title:`${tag}${leaderLabel} bought with PUMP tokens (not copied)`, body:`He paid with PUMP tokens he held, not SOL. This bot buys with SOL only, so it skipped this one.\nToken: ${e.mint}`, priority:2, tags:['eyes'], click:pump(e.mint)};
+  if (e.type==='exit-rule') {
+    const p=e.pnl==null?'':` (${e.pnl>=0?'+':''}${(e.pnl*100).toFixed(1)}%)`;
+    const t={stoploss:[`Stop-loss: selling ${short(e.mint)}${p}`,'Down 15% or more: selling everything now.',4,'stop_sign'],'gain-target':[`+15% reached: selling ${short(e.mint)}${p}`,'It hit +15% within 15 s: selling at the 15 s mark.',3,'moneybag'],'hold-until-his-sell':[`Holding ${short(e.mint)} until ${leaderLabel} sells${p}`,'Never reached +15% in the first 15 s, so the bot waits for his sell (stop-loss still on).',2,'hourglass'],'hold-limit':[`Time limit: selling ${short(e.mint)}${p}`,'Held 10 minutes without his sell: selling everything.',3,'alarm_clock']}[e.rule];
+    if (t) return {title:`${tag}${t[0]}`, body:`${t[1]}\nToken: ${e.mint}`, priority:t[2], tags:[t[3]], click:pump(e.mint)};
+  }
   if (e.type==='provider-gap') return {title:`${tag}Helius missed a ${leaderLabel} trade`, body:`Solscan caught it and the bot processed it late.\nTx: ${e.leaderSignature}`, priority:3, tags:['satellite'], click:tx(e.leaderSignature)};
   if (e.type==='alerts-on') return {title:`${tag}Alerts ON`, body:'Phone alerts resumed.', priority:2, tags:['bell']};
   if (e.type==='paused' || e.type==='resumed') return {title:`${tag}Bot ${e.type==='paused'?'PAUSED (no new buys)':'RESUMED'}`, body:'Changed from the dashboard.', priority:3, tags:['pause_button']};
@@ -114,7 +119,7 @@ export async function startRuntime(k, {demo=false}={}) {
     }
     if (c.mode==='paper') paperExits(e);
     // Every bot buy (paper or live) gets a 15 s study: re-priced each second, then one detailed alert.
-    if (e.type==='confirmed' && e.side==='buy') scheduleMaxHold?.(e.mint, maxHoldMs);
+    if (e.type==='confirmed' && e.side==='buy') scheduleMaxHold?.(e.mint);
     if (study && e.type==='confirmed' && e.side==='buy') study.start({mint:e.mint,cost:-e.solDelta,raw:e.rawDelta,his:leaderBuys.get(e.mint)||{}});
   };
   // PAPER ONLY: value each paper position at several sell timings (never sends anything).
@@ -256,16 +261,50 @@ export async function startRuntime(k, {demo=false}={}) {
     }
   }
   await engine.recover();
-  scheduleMaxHold=(mint,ms)=>{
-    if(!(maxHoldMs>0)) return;
-    setTimeout(()=>{
-      const p=engine.d.positions[mint];
-      if(!engine.d.autoCopy || !p || BigInt(p.raw)<=0n) return; // he sold first, or manual-sell style
-      engine.ingest({sig:`maxhold-${mint}-${p.boughtAt||0}`,side:'sell',mint,soldRaw:'1',beforeRaw:'1',time:Date.now()/1000,decimals:mintDecimals.get(mint)??6})
-        .catch(err=>engine.event('error',{mint,message:'max-hold sell: '+err.message}));
-    },Math.max(0,ms)).unref?.();
+  // EXIT RULES: every held coin is priced once a second (Helius curve read) until it is sold.
+  //  1. STOP_LOSS_PCT (15): down this much at any moment -> sell everything. Both styles
+  //     (STOP_LOSS_MANUAL=false keeps manual-sell style hands-off).
+  //  2. Auto-sell style, at MAX_HOLD_SEC (15) after the bot's buy: if the trade reached
+  //     +GAIN_GATE_PCT (15) at any point by then -> sell everything; if it never did -> keep
+  //     holding until Decu sells (the stop-loss still applies).
+  //  3. Auto-sell style, HOLD_LIMIT_SEC (600): sell whatever happens, in case his sell is missed.
+  //  His sell always exits at once in auto-sell style (SELL_ALL_ON_LEADER_SELL).
+  const stopLoss=number('STOP_LOSS_PCT',15)/100, gainGate=number('GAIN_GATE_PCT',15)/100;
+  const holdLimitMs=number('HOLD_LIMIT_SEC',600)*1000, stopLossManual=val('STOP_LOSS_MANUAL','true')==='true';
+  const exitFee=k.config.tipSol+k.config.priorityFeeSol, monitors=new Map();
+  const exitNow=(mint,p,rule,pnl)=>{
+    monitors.delete(mint);
+    engine.event('exit-rule',{mint,rule,pnl});
+    return engine.ingest({sig:`${rule}-${mint}-${p.boughtAt||0}`,side:'sell',mint,soldRaw:'1',beforeRaw:'1',time:Date.now()/1000,decimals:mintDecimals.get(mint)??6,force:true})
+      .catch(err=>engine.event('error',{mint,message:`${rule} sell: ${err.message}`}));
   };
-  for(const [mint,p] of Object.entries(engine.d.positions)) if(BigInt(p.raw||'0')>0n) scheduleMaxHold(mint, p.boughtAt ? p.boughtAt+maxHoldMs-Date.now() : 0);
+  scheduleMaxHold=(mint)=>{
+    if(monitors.has(mint) || !k.quoteSell) return;
+    const m={peak:-Infinity,decided:false}; monitors.set(mint,m);
+    const tick=async()=>{
+      if(monitors.get(mint)!==m) return;
+      const p=engine.d.positions[mint];
+      if(!p || BigInt(p.raw)<=0n) { monitors.delete(mint); return; }
+      const auto=engine.d.autoCopy, age=Date.now()-(p.boughtAt||Date.now());
+      let pnl=null;
+      try {
+        const v=await Promise.race([k.quoteSell(mint,Number(p.raw)),new Promise(r=>setTimeout(()=>r(null),2500).unref?.())]);
+        if(Number.isFinite(v) && p.costSol>0) pnl=(v*0.995-exitFee-p.costSol)/p.costSol;
+      } catch {}
+      if(pnl!=null) { m.peak=Math.max(m.peak,pnl); m.last=pnl; }
+      if(pnl!=null && stopLoss>0 && pnl<=-stopLoss && (auto||stopLossManual)) return exitNow(mint,p,'stoploss',pnl);
+      if(auto && maxHoldMs>0 && age>=maxHoldMs && !m.decided) {
+        m.decided=true;
+        if(m.peak>=gainGate) return exitNow(mint,p,'gain-target',pnl);
+        engine.event('exit-rule',{mint,rule:'hold-until-his-sell',pnl,peak:Number.isFinite(m.peak)?m.peak:null});
+      }
+      if(auto && holdLimitMs>0 && age>=holdLimitMs) return exitNow(mint,p,'hold-limit',pnl);
+      setTimeout(tick,number('MONITOR_MS',1000)).unref?.();
+    };
+    tick();
+  };
+  // after a restart, keep watching coins still held (peak unknown: treated as never reached +15%)
+  for(const [mint,p] of Object.entries(engine.d.positions)) if(BigInt(p.raw||'0')>0n) scheduleMaxHold(mint);
   const inFlight=new Set(), completed=new Set(), delivered=new Set(), fastDone=new Set();
   // Exit rule for the auto-sell style: sell everything at his FIRST sell (SELL_ALL_ON_LEADER_SELL),
   // and if he has not sold MAX_HOLD_SEC (15) after the bot's buy, sell anyway. 0 = no time limit.
@@ -406,5 +445,5 @@ export async function startRuntime(k, {demo=false}={}) {
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});
   engine.event('started',{mode:c.mode,dashboard:`http://${host}:${port}`,note:demo?'SYNTHETIC DEMO; no chain or wallet connection':'confirmed leader signals; paper estimates are not guaranteed fills'});
-  return {engine,server,study,stop:()=>{stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,stop:()=>{monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }
