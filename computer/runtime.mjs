@@ -5,6 +5,7 @@ import http from 'node:http';
 import {Engine} from './engine.mjs';
 import {PUMP_TOKEN,QUOTES} from './solscan.mjs';
 import {createStudy,summaryText} from './study.mjs';
+import {buyContextFromLogs,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache} from './pumpbuild.mjs';
 
 const val = (key, fallback) => process.env[key]?.trim() || fallback;
 const number = (key, fallback) => Number(val(key,String(fallback)));
@@ -170,8 +171,19 @@ export async function startRuntime(k, {demo=false}={}) {
     if(sol===null || !Number.isFinite(sol)) return {status:'failed',error:'no paper sell quote'};
     return {status:'confirmed',rawDelta:(-BigInt(job.raw)).toString(),solDelta:sol*0.995-fee};
   };
+  let cachedBalance=null;
+  const buyCtx=new Map();
+  const local = c.mode==='live' && val('LOCAL_BUILD','true')!=='false' && k.findProgramAddress ? {
+    helpers:{findProgramAddress:k.findProgramAddress,ata:k.ata,b58decode:k.b58decode,b58encode:k.b58encode},
+    blockhash:startBlockhashCache(k.rpc,{log:m=>status.lastError=m}), global:null,
+  } : null;
+  const refreshGlobal=()=>local && readGlobal(k.rpc,local.helpers).then(g=>{local.global=g;}).catch(e=>{status.lastError='pump.fun global: '+e.message;});
+  refreshGlobal();
+  const globalTimer=local?setInterval(refreshGlobal,600_000):null; globalTimer?.unref?.();
   const adapter = {
-    balance:()=>k.getBalanceSol(k.kp.publicKey),
+    // Wallet balance is refreshed every 10 s in the background; sizing uses it if under 15 s old.
+    // The full simulation before every send still checks the real balance.
+    balance:async()=>(cachedBalance && Date.now()-cachedBalance.at<15_000 ? cachedBalance.sol : (cachedBalance={sol:await k.getBalanceSol(k.kp.publicKey),at:Date.now()}).sol),
     tokens: async mint => {
       const r=await k.rpc('getTokenAccountsByOwner',[k.kp.publicKey,{mint},{encoding:'jsonParsed',commitment:'confirmed'}]);
       return r.value.reduce((a,x)=>a+BigInt(x.account.data.parsed.info.tokenAmount.amount),0n).toString();
@@ -182,8 +194,24 @@ export async function startRuntime(k, {demo=false}={}) {
         if(job.side==='buy' && !demo) {const q=await k.quoteBuy(job.mint,job.sol*0.995);if(!q?.raw)throw new Error('no paper build quote');quoteRaw=q.raw;}
         return {signature:'paper-'+crypto.randomUUID(),quoteRaw};
       }
-      const balance=await k.getBalanceSol(k.kp.publicKey);
+      const balance=job.side==='buy' ? await adapter.balance() : await k.getBalanceSol(k.kp.publicKey);
       if(job.side==='buy' && balance-job.reserveSol<c.reserve) throw new Error('fresh balance insufficient for fees/reserve');
+      // FASTEST: build the buy locally from his trade event (no PumpPortal round trip, no waiting
+      // for a blockhash). Same safety check and full simulation as every other trade.
+      if(job.side==='buy' && local) {
+        const ctx=buyCtx.get(job.mint), blockhash=local.blockhash.get();
+        if(ctx && blockhash && local.global) {
+          try {
+            const t0=Date.now();
+            const tip=k.config.tipSol>0 ? k.TIP_ACCOUNTS[Math.floor(Math.random()*k.TIP_ACCOUNTS.length)] : null;
+            const {bytes}=buildBuyTransaction({user:k.kp.publicKey,ctx:{...ctx,feeRecipient:pickFeeRecipient(local.global,ctx.mayhem),buybackRecipient:pickBuybackRecipient(local.global)},lamports:Math.floor(job.sol*1e9),slippagePct:k.config.slippagePct,blockhash,priorityLamports:Math.round(k.config.priorityFeeSol*1e9),tipAccount:tip,tipLamports:Math.round(k.config.tipSol*1e9)},local.helpers);
+            const signed=k.signTransaction(bytes,k.kp);
+            await k.validateTrade(signed.bytes,job,balance);
+            status.localBuilds=(status.localBuilds||0)+1; status.lastLocalBuildMs=Date.now()-t0;
+            return {signature:signed.signature,bytes:signed.bytes.toString('base64'),blockhash,built:'local'};
+          } catch(e) { engine.event('connection',{message:'local build failed, using PumpPortal: '+e.message}); }
+        }
+      }
       if(job.side==='sell' && balance<c.reserve+k.config.tipSol+k.config.priorityFeeSol) throw new Error('insufficient SOL for sell fees');
       const decimals=job.decimals;
       if (job.side==='sell' && (!Number.isInteger(decimals) || decimals<0 || decimals>18)) throw new Error('unknown token decimals');
@@ -259,6 +287,7 @@ export async function startRuntime(k, {demo=false}={}) {
     if(source==='ws' && k.config.fastPath!==false && k.leaderPumpBuys && Array.isArray(logs) && !fastDone.has(sig)) {
       fastDone.add(sig); if(fastDone.size>5000) fastDone.delete(fastDone.values().next().value);
       try {
+        if(local) { const ctx=buyContextFromLogs(logs,k.config.leader,k.b58encode); if(ctx) remember(buyCtx,ctx.mint,ctx); }
         for(const ev of k.leaderPumpBuys(logs,k.config.leader)) {
           const s={sig,time:ev.timestamp||Date.now()/1000,side:'buy',mint:ev.mint,sol:ev.solAmount/1e9,raw:String(ev.tokenAmount),pump:true,decimals:6,fast:true};
           s.usd=s.sol*await k.getSolUsd(); recordLeaderBuy(s); remember(mintDecimals,s.mint,6); status.fastSignals=(status.fastSignals||0)+1;
@@ -276,6 +305,7 @@ export async function startRuntime(k, {demo=false}={}) {
       const tx=await k.getTransaction(sig);
       if(!tx) throw new Error('transaction not available yet; will retry');
       const signals=normalize(tx,k.config.leader,k.detectBuy,k.detectSell);
+      if(local && tx.meta?.logMessages && signals.some(s=>s.side==='buy')) { const ctx=buyContextFromLogs(tx.meta.logMessages,k.config.leader,k.b58encode); if(ctx && !buyCtx.has(ctx.mint)) remember(buyCtx,ctx.mint,ctx); }
       if(!signals.length) {
         const u=classifyUnsupported(tx,k.config.leader);
         if(u) {status.unsupported++;engine.event('unsupported',{leaderSignature:sig,mint:u.mint,kind:u.kind,reason:u.kind==='token-swap'?'token-to-token swap':'paid or received PUMP tokens instead of SOL; bot trades with SOL only'});}
@@ -325,7 +355,7 @@ export async function startRuntime(k, {demo=false}={}) {
   },30_000);
   watchdog?.unref?.();
   const pruneTimer=setInterval(()=>engine.lock(()=>{if(engine.prune())engine.save();}).catch(()=>{}),600_000);
-  const balanceTimer=c.mode==='live'?setInterval(()=>adapter.balance().then(b=>{status.balance=b;}).catch(e=>engine.event('error',{message:e.message})),10000):null;
+  const balanceTimer=c.mode==='live'?setInterval(()=>k.getBalanceSol(k.kp.publicKey).then(b=>{status.balance=b;cachedBalance={sol:b,at:Date.now()};}).catch(e=>engine.event('error',{message:e.message})),10000):null;
   let demonstration;
   if(demo) {
     status.websocket='synthetic demo (no chain connection)';
@@ -376,5 +406,5 @@ export async function startRuntime(k, {demo=false}={}) {
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});
   engine.event('started',{mode:c.mode,dashboard:`http://${host}:${port}`,note:demo?'SYNTHETIC DEMO; no chain or wallet connection':'confirmed leader signals; paper estimates are not guaranteed fills'});
-  return {engine,server,study,stop:()=>{stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,stop:()=>{stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }

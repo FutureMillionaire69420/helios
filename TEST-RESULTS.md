@@ -127,3 +127,19 @@ same % curve (bigger buys move the price more, so real results would be somewhat
 - Render check (Oct 11): Solscan backup polled ~3,000 times in 4.5 h with 3 transient 504s; Decu made no
   trades after the deploy (his last was 07:19 UTC), so no live copy yet.
 Result: 64/64 tests (6 new, from his real logs), both demo runs pass.
+
+## Local fast-buy builder (Oct 11, Claude)
+- Live buys are built inside the bot (pumpbuild.mjs) from Decu's own trade event: no PumpPortal round
+  trip, blockhash and wallet balance kept fresh in the background, so the buy waits only for the safety
+  simulation. Falls back to PumpPortal automatically (graduated coins, missing data, any error).
+- Instruction: pump.fun `buy_exact_sol_in` from pump.fun's on-chain IDL, plus two newer accounts the IDL
+  lacks (bonding-curve-v2 PDA, buyback fee recipient), matched against real successful transactions.
+  Simulated against live coins: accounts, token-account creation and the buy instruction all accepted up
+  to the buyback requirement, which is now included; the final simulation is the `check` step below.
+- Bug fixed in the original code: the associated-token program address had a one-character typo
+  (…qW4x… instead of …qW5x…). Every live buy's safety check derived the wrong token account and
+  would have refused the trade.
+- Price math predicts his real fill to 0.000001%. Full safety check + simulation still run on every buy.
+- `node copybot.mjs check` (with PRIVATE_KEY) now builds a local buy with your wallet and fully
+  simulates it on-chain without sending: it must say OK before going live.
+Result: 69/69 tests (5 new), both demo runs pass. Local building only runs in LIVE mode.

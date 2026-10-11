@@ -126,7 +126,7 @@ const PROGRAMS = {
   PUMP_AMM: 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA',
   TOKEN: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
   TOKEN_2022: 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',
-  ATA: 'ATokenGPvbdGVxr1b2hvZbsiqW4xWH25efTNsLJA8knL',
+  ATA: 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
   METAPLEX: 'metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bmuk5f8mm',
   SYSTEM: '11111111111111111111111111111111',
 };
@@ -2370,6 +2370,22 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
         await validateTrade(signed.bytes,{side:'buy',mint,sol:config.buySol},await getBalanceSol(kp.publicKey));
         return `passed every safety check (${signed.bytes.length} bytes). Transaction discarded, nothing sent.`;
       });
+      await step('LOCAL fast buy: build + sign + full simulation with YOUR wallet (NOT sent)',async()=>{
+        const P=await import('./pumpbuild.mjs');
+        const h={findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode};
+        const g=await P.readGlobal(rpc,h);
+        // a fresh bonding-curve buy by anyone gives a real, current curve state to build against
+        const sigs=await rpc('getSignaturesForAddress',[PROGRAMS.PUMP,{limit:60}]);
+        let ctx=null;
+        for(const s of sigs){ if(s.err) continue; const tx=await rpc('getTransaction',[s.signature,{encoding:'json',commitment:'confirmed',maxSupportedTransactionVersion:MAX_TX_VERSION}]).catch(()=>null); for(const l of tx?.meta?.logMessages||[]){ if(!l.startsWith('Program data: '))continue; const ev=P.decodeFullTradeEvent(l.slice(14),b58encode); if(ev?.isBuy&&ev.realTok>0n){ctx={...ev,tokenProgram:P.tokenProgramFromLogs(tx.meta.logMessages)};break;} } if(ctx)break; }
+        if(!ctx) throw new Error('no recent pump.fun buy found to build against; run check again');
+        const bh=(await rpc('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;
+        const t0=Date.now();
+        const {bytes}=P.buildBuyTransaction({user:kp.publicKey,ctx:{...ctx,feeRecipient:P.pickFeeRecipient(g,ctx.mayhem),buybackRecipient:P.pickBuybackRecipient(g)},lamports:Math.floor(config.buySol*1e9),slippagePct:config.slippagePct,blockhash:bh,priorityLamports:Math.round(config.priorityFeeSol*1e9),tipAccount:config.tipSol>0?TIP_ACCOUNTS[0]:null,tipLamports:Math.round(config.tipSol*1e9)},h);
+        const signed=signTransaction(bytes,kp); const ms=Date.now()-t0;
+        await validateTrade(signed.bytes,{side:'buy',mint:ctx.mint,sol:config.buySol},await getBalanceSol(kp.publicKey));
+        return `pump.fun accepted it in simulation (coin ${ctx.mint.slice(0,6)}…, built+signed in ${ms} ms, ${signed.bytes.length} bytes). Discarded, nothing sent.`;
+      });
       if(config.tipSol>0) await step('Helius Sender reachable',async()=>{const t0=Date.now();const r=await fetch(senderUrl().replace(/\/fast(\?|$)/,'/ping$1'),{signal:AbortSignal.timeout(5000)});if(!r.ok)throw new Error(`HTTP ${r.status} (blocked or bad SENDER_URL)`);return `HTTP ${r.status} in ${Date.now()-t0} ms`;});
     } else console.log('SKIP wallet checks: no PRIVATE_KEY (fine for paper mode)');
     console.log(failed?`\n${failed} check(s) FAILED: fix these before going live.`:`\nAll checks passed.${config.dryRun?' (DRY_RUN=true: paper mode)':' READY FOR LIVE.'}`);
@@ -2378,7 +2394,7 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
   if (!config.dryRun && !demo && config.executor!=='pumpportal') throw new Error('v2 live execution supports EXECUTOR=pumpportal only; legacy Jupiter remains for quotes/backtests');
   const solscanWatch = solscan.enabled && config.solscanPollMs > 0 ? (onSignature, opts) => startSolscanWatcher({ client: solscan, leader: config.leader, intervalMs: config.solscanPollMs, horizonSec: Math.max(config.maxSignalAgeSec, num('MAX_SELL_SIGNAL_AGE_SEC', 300)), onSignature, ...opts }) : null;
   const tokenLabel = solscan.enabled ? async (mint) => { const m = await solscan.tokenMeta(mint); return m?.symbol ? `$${m.symbol}` : null; } : null;
-  const r = await startRuntime({config,kp,notify,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,tokenLabel,leaderPumpBuys,leaderPumpSells,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  const r = await startRuntime({config,kp,notify,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();process.exit(0);});
 }
 
@@ -2674,5 +2690,5 @@ async function main(argv = process.argv) {
 
 
 // ===== entry =====
-export {config,setFetch,rpc,relevantLogs,quoteSell,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
+export {config,setFetch,rpc,relevantLogs,quoteSell,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,findProgramAddress,associatedTokenAddress as ata,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);
