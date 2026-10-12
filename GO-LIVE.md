@@ -27,7 +27,7 @@ Do these in order. Don't skip a step because an earlier one passed.
 | `HELIUS_API_KEY` | your key | fast detection + Helius Sender |
 | `SOLSCAN_API_KEY` | your key | second watcher, gap alerts, coin names |
 | `NTFY_TOPIC` | your topic | buy / SOLD / failure alerts |
-| `SIZING_MODE` / `BUY_SOL` / `DAILY_CAP_SOL` | `fixed` / `0.1` / `1` | your rules |
+| `SIZING_MODE` / `BUY_SOL` / `DAILY_CAP_SOL` | `fixed` / `0.1` / `0` | `0` = no daily spending cap: only the wallet balance limits buys |
 | `AUTO_SELL` | `false` | you sell by hand from the SOLD alert |
 | `SLIPPAGE_PCT` | `20` | 10% failed often on his coins |
 | `MAX_PAY_ABOVE_DECU_PCT` | `60` | skip buys already 60%+ above Decu's price (his last 25 trades: every buy more than ~75% above him lost). Check the brain's latest advisor line first |
@@ -41,7 +41,7 @@ It also profiles him: coins per hour, wins, and the median seconds between his f
 
 ## 4. Preflight: must print "READY FOR LIVE"
 Easiest: double-click `go-live-mac.command` / `go-live-windows.bat` (or `node copybot.mjs setup --live`).
-It asks for the wallet key without showing it, sets DRY_RUN=false, a 0.2 SOL first-day cap and the
+It asks for the wallet key without showing it, sets DRY_RUN=false (no daily spending cap) and the
 live state file, then runs the check below. `setup --paper` switches back.
 
 ```
@@ -53,12 +53,12 @@ RPC, his wallet history, live SOL price, websocket subscription, wallet balance 
 Helius (not public RPC), phone alert, dashboard token, live state file, the full buy path, Helius Sender.
 
 ## 5. First live day: smallest possible
-- Set `DAILY_CAP_SOL=0.2` (2 copies) for day one. Watch every alert and check each transaction on Solscan.
+- There is no daily spending cap: the SOL you put in the wallet is the limit. Fund it with only what you are willing to lose. Watch every alert and check each transaction on Solscan.
 - Raise to 1 SOL only after the real fills match what paper mode predicted.
 
 ## What protects your money
 - Every live transaction is checked before sending: the only SOL that can leave is the buy itself
   (max BUY_SOL + slippage), the tip, and fees. Transfers to any other address, token transfers and
   approvals are refused. One pump.fun trade per transaction, then a full simulation must match.
-- Daily cap, per-coin once rule, wallet reserve, pause button (stops new buys) on the dashboard.
+- Per-coin once rule, wallet reserve (optional DAILY_CAP_SOL), pause button (stops new buys) on the dashboard.
 - Signed transactions are saved before sending; after a crash the bot re-checks them instead of buying twice.

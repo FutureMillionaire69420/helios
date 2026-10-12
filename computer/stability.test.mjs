@@ -79,7 +79,7 @@ test('setup wizard: creates .env, keeps keys on rerun, switches live and back to
   const key = JSON.stringify([...Buffer.alloc(32, 7)]);
   const out = await run(['--live'], `LIVE\n${key}\nyes\n`);
   assert.match(out, /Wallet address: \w{32,44}/);
-  assert.equal(get('PRIVATE_KEY'), ''); assert.equal(get('PHANTOM_PRIVATE_KEY'), key); assert.match(get('PHANTOM_WALLET_ADDRESS'), /^[1-9A-HJ-NP-Za-km-z]{32,44}$/); assert.equal(get('DRY_RUN'), 'false'); assert.equal(get('DAILY_CAP_SOL'), '0.2');
+  assert.equal(get('PRIVATE_KEY'), ''); assert.equal(get('PHANTOM_PRIVATE_KEY'), key); assert.match(get('PHANTOM_WALLET_ADDRESS'), /^[1-9A-HJ-NP-Za-km-z]{32,44}$/); assert.equal(get('DRY_RUN'), 'false'); assert.ok(!(Number(get('DAILY_CAP_SOL')) > 0), 'go-live sets no spending cap');
   assert.equal(out.includes(key), false, 'wallet key is never printed');
 
   await run(['--paper'], '');

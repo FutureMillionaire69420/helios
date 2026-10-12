@@ -155,3 +155,12 @@ test('paper never runs out of budget: every copyable buy is studied (live keeps 
   process.env.PAPER_UNLIMITED='false';
   assert.equal(runtimeConfig({...config,dryRun:true}).paperUnlimited,false);
 });
+test('no daily spending cap by default (paper and live); DAILY_CAP_SOL>0 still caps', async t => {
+  assert.equal(runtimeConfig({...config,dryRun:false,dailyCapSol:0}).dailyCap, Infinity);
+  assert.equal(runtimeConfig({...config,dryRun:true,dailyCapSol:0}).dailyCap, Infinity);
+  assert.equal(runtimeConfig({...config,dryRun:false,dailyCapSol:2}).dailyCap, 2);
+  const e=fixture(t,{},{mode:'live',dailyCap:Infinity,sizing:'fixed',buySol:0.05,maxBuy:0.05});
+  e.a.balance=async()=>100;
+  for(let i=0;i<30;i++) await e.ingest(buy('n'+i,'n'+i));
+  await e.idle(); assert.equal(Object.keys(e.d.positions).length,30,'30 x 0.05 SOL = 1.5 SOL in one day, no cap');
+});

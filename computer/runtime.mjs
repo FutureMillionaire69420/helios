@@ -14,14 +14,14 @@ export function runtimeConfig(c, demo=false) {
     sizing:val('SIZING_MODE','fixed'), multiplier:number('COPY_MULTIPLIER',1),
     buySol:c.buySol, maxBuy:number('MAX_BUY_SOL',c.buySol), minBuy:number('MIN_BUY_SOL',0.005),
     reserve:c.minSolReserve, feeBudget:c.tipSol+c.priorityFeeSol+0.005,
-    slippage:c.slippagePct, dailyCap:c.dailyCapSol, minLeaderUsd:c.minLeaderBuyUsd,
+    slippage:c.slippagePct, dailyCap:c.dailyCapSol>0?c.dailyCapSol:0, minLeaderUsd:c.minLeaderBuyUsd,
     maxAge:c.maxSignalAgeSec, maxSellAge:number('MAX_SELL_SIGNAL_AGE_SEC',300), pumpOnly:c.pumpOnly,
     oneBuy:c.oneBuyPerMint, autoSell:val('AUTO_SELL',demo?'true':'false')==='true', autoCopy:val('AUTO_COPY','true') === 'true', paperBalance:number('PAPER_BALANCE_SOL',1.65)};
   for (const k of ['multiplier','buySol','maxBuy','minBuy','reserve','feeBudget','slippage','dailyCap','minLeaderUsd','maxAge','maxSellAge','paperBalance'])
     if (!Number.isFinite(out[k]) || out[k]<0) throw new Error('invalid setting '+k);
-  // PAPER: the daily cap and the pretend balance are real-money limits. On 2026-10-11 they stopped the
-  // paper study after 10 trades (1 SOL cap) and 13 more Decu buys were never studied. Paper studies
-  // every copyable buy unless PAPER_UNLIMITED=false.
+  // PAPER: the pretend balance never stops a study (on 2026-10-11 a 1 SOL cap stopped it after 10
+  // trades and 14 Decu buys were never studied). PAPER_UNLIMITED=false restores the paper limits.
+  if (out.dailyCap===0) out.dailyCap=Infinity; // DAILY_CAP_SOL=0 (default): no daily spending cap
   if (!['fixed','proportional'].includes(out.sizing) || out.minBuy<=0 || out.minBuy>out.maxBuy || out.maxBuy>out.dailyCap || out.multiplier>1) throw new Error('invalid sizing bounds (multiplier must be 0–1)');
   out.paperUnlimited = out.mode==='paper' && val('PAPER_UNLIMITED','true')==='true';
   return out;

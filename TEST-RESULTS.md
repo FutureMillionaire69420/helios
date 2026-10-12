@@ -74,7 +74,7 @@ Also:
   repeated errors write one event per 30 s. Duplicate keys older than 2 days are pruned from state;
   trades.log over 50 MB rotates at startup.
 - `node copybot.mjs setup` (keys, dashboard password, ntfy topic, then check), `setup --live`
-  (hidden key entry, address confirmation, 0.2 SOL first-day cap), `setup --paper`.
+  (hidden key entry, address confirmation, no daily spending cap), `setup --paper`.
 - Double-click files for Mac and Windows: setup, start, check, status, go-live, back-to-paper.
 - `status` prints paper results per sell timing.
 

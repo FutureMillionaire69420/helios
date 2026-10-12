@@ -256,7 +256,7 @@ const config = {
   minLeaderBuyUsd: num('MIN_LEADER_BUY_USD', 50), // also how small trades (his ~$3 test buys) are ignored
   pumpOnly: bool('PUMP_ONLY', true), // only copy pump.fun coins (bonding curve or PumpSwap); skip xStocks, other launchpads
   oneBuyPerMint: bool('ONE_BUY_PER_MINT', true),
-  dailyCapSol: num('DAILY_CAP_SOL', 1),
+  dailyCapSol: num('DAILY_CAP_SOL', 0), // 0 = no daily spending cap (the default)
   minSolReserve: num('MIN_SOL_RESERVE', 0.02), // never spend below this (fees, rent)
   slippagePct: num('SLIPPAGE_PCT', 20),
   priorityFeeSol: num('PRIORITY_FEE_SOL', 0.0005),
@@ -309,7 +309,7 @@ function validateConfig(c = config) {
   if (!c.dryRun && !c.privateKey) errors.push('PHANTOM_PRIVATE_KEY/PRIVATE_KEY is required when DRY_RUN=false');
   if (c.phantomWalletAddress && !isValidPubkey(c.phantomWalletAddress)) errors.push('PHANTOM_WALLET_ADDRESS is not a valid Solana public key');
   if (!(c.buySol > 0)) errors.push('BUY_SOL must be > 0');
-  if (!(c.dailyCapSol >= c.buySol)) errors.push('DAILY_CAP_SOL must be >= BUY_SOL');
+  if (c.dailyCapSol > 0 && !(c.dailyCapSol >= c.buySol)) errors.push('DAILY_CAP_SOL must be 0 (no cap) or >= BUY_SOL');
   if (!(c.slippagePct > 0 && c.slippagePct <= 50)) errors.push('SLIPPAGE_PCT must be between 0 and 50');
   if (!(c.tipSol >= 0 && c.tipSol <= 0.01)) errors.push('TIP_SOL must be between 0 and 0.01');
   if (c.tipSol > 0 && c.tipSol < 0.001) errors.push('TIP_SOL below 0.001 is rejected by Helius Sender (use 0 for no tip)');
@@ -1589,7 +1589,7 @@ class Copier {
       if (ageSec > config.maxSignalAgeSec) { await skip(`signal is ${Math.round(ageSec)}s old (max ${config.maxSignalAgeSec}s)`); continue; }
       if (config.oneBuyPerMint && this.state.wasCopied(b.mint, dry)) { await skip('already copied this coin (first buy per coin only)'); continue; }
       const spent = this.state.spentToday(dry);
-      if (spent + config.buySol > config.dailyCapSol + 1e-9) {
+      if (config.dailyCapSol > 0 && spent + config.buySol > config.dailyCapSol + 1e-9) {
         const first = !this.state.capNotifiedToday();
         if (first) this.state.markCapNotified();
         await skip(`daily cap reached (${spent.toFixed(2)}/${config.dailyCapSol} SOL)`, first);
@@ -2071,7 +2071,7 @@ async function runBacktest({ date, walletUsd = 100, delays = [0.5, 1.5, 3], solU
         if (mode === 'mirror') {
           for (let i = pending.length - 1; i >= 0; i--) if (pending[i].at <= t.time) cash += pending.splice(i, 1)[0].sol;
         }
-        if (spentToday + config.buySol > config.dailyCapSol + 1e-9) continue;
+        if (config.dailyCapSol > 0 && spentToday + config.buySol > config.dailyCapSol + 1e-9) continue;
         if (cash - t.cost < config.minSolReserve) continue;
         cash -= t.cost;
         spentToday += config.buySol;
@@ -2571,10 +2571,9 @@ async function runSetup(argv = process.argv) {
       set('PHANTOM_WALLET_ADDRESS', kp.publicKey);
       set('DRY_RUN', 'false');
       if (/paper|demo/i.test(get('ENGINE_STATE_FILE'))) set('ENGINE_STATE_FILE', 'engine-live.json');
-      if (!(Number(get('DAILY_CAP_SOL')) <= 0.2)) set('DAILY_CAP_SOL', '0.2');
       if (get('DASHBOARD_TOKEN').length < 24) set('DASHBOARD_TOKEN', crypto.randomBytes(24).toString('hex'));
       save();
-      console.log('\nLIVE settings saved. First day is limited to 0.2 SOL of buys (DAILY_CAP_SOL); raise it in .env later.');
+      console.log(`\nLIVE settings saved. ${Number(get('DAILY_CAP_SOL')) > 0 ? `Daily spending cap: ${get('DAILY_CAP_SOL')} SOL (DAILY_CAP_SOL).` : 'No daily spending cap: the wallet balance is the only limit.'}`);
       console.log('Now running the go-live check. It builds and tests a real buy but does NOT send it.\n');
     } else {
       console.log('\n=== Decu copy bot setup (pretend trades, no real money) ===\n');

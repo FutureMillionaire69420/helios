@@ -47,7 +47,7 @@ services:
       - key: MAX_BUY_SOL
         value: "0.1"
       - key: DAILY_CAP_SOL
-        value: "1"
+        value: "0"
       - key: SLIPPAGE_PCT
         value: "20"
       - key: NTFY_TOPIC
