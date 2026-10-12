@@ -19,6 +19,25 @@
 import fs from 'node:fs';
 import { DIMENSIONS, createBrain, curveShape, simulateRules } from './learn.mjs';
 
+// CHARTS: a QuickChart.io image URL (rendered on demand, only % numbers are sent) attached to alerts.
+const chartUrl = (cfg) => `https://quickchart.io/chart?w=600&h=320&bkg=white&c=${encodeURIComponent(JSON.stringify(cfg))}`;
+export function tradeChart(rec, gatePct = 15, stopPct = 20) {
+  const c = rec.curve || [], base = c.find((v) => v != null) ?? 0, r = (v) => (v == null ? null : Math.round(v * 1000) / 10);
+  const flat = (v) => c.map(() => v);
+  const ds = [{ label: 'Bot P&L %', data: c.map(r), borderColor: '#1f6feb', fill: false, pointRadius: 3 },
+    { label: `+${gatePct}% gate`, data: flat(gatePct), borderColor: '#2da44e', borderDash: [6, 4], pointRadius: 0, fill: false },
+    { label: `stop (-${stopPct}% from entry)`, data: flat(r((1 + base) * (1 - stopPct / 100) - 1)), borderColor: '#cf222e', borderDash: [6, 4], pointRadius: 0, fill: false }];
+  if (rec.hisSoldAtSec != null) ds.push({ label: 'Decu sold', type: 'bar', data: c.map((_, s) => (s === Math.ceil(rec.hisSoldAtSec) ? r(Math.max(...c.filter((v) => v != null))) : null)), backgroundColor: '#bf8700' });
+  return chartUrl({ type: 'line', data: { labels: c.map((_, s) => `${s}s`), datasets: ds }, options: { title: { display: true, text: `${rec.symbol ? '$' + rec.symbol : rec.mint.slice(0, 6)} FCAT ${pct(rec.fcat)} · paid ${pct(rec.entryGap)} vs Decu` } } });
+}
+export function historyChart(records, n = 30) {
+  const rs = records.filter((r) => Number.isFinite(r.fcat)).slice(-n); let cum = 0;
+  return chartUrl({ type: 'bar', data: { labels: rs.map((r) => r.symbol || r.mint.slice(0, 4)), datasets: [
+    { label: 'FCAT %', data: rs.map((r) => Math.round(r.fcat * 1000) / 10), backgroundColor: rs.map((r) => (r.fcat > 0 ? '#2da44e' : '#cf222e')) },
+    { label: 'Running total (SOL x100)', type: 'line', data: rs.map((r) => Math.round((cum += r.fcat * 0.1) * 1e4) / 100), borderColor: '#1f6feb', fill: false }] },
+    options: { title: { display: true, text: `Last ${rs.length} trades: FCAT per trade and running total` } } });
+}
+
 const pct = (x) => (x == null || !Number.isFinite(x) ? '—' : `${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}%`);
 const sol = (x) => (x == null || !Number.isFinite(x) ? '—' : `${x >= 0 ? '+' : ''}${x.toFixed(4)}`);
 const median = (xs) => { const s = xs.filter(Number.isFinite).sort((a, b) => a - b); return s.length ? (s.length % 2 ? s[s.length >> 1] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2) : null; };
@@ -212,10 +231,10 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
         mode === 'live' ? '' : 'No real money used.',
         `Token: ${st.mint}`,
       ].filter((x) => x != null).join('\n');
-      send({ title: `${tag}${name} FCAT ${pct(fcat)} | BTSAB ${btsab ?? '—'}s ${pct(peak)}`, body, priority: 3, tags: ['bar_chart'], click: `https://pump.fun/coin/${st.mint}` });
+      send({ title: `${tag}${name} FCAT ${pct(fcat)} | BTSAB ${btsab ?? '—'}s ${pct(peak)}`, body, priority: 3, tags: ['bar_chart'], click: `https://pump.fun/coin/${st.mint}`, image: tradeChart(rec, ruleOpts.gainGatePct, ruleOpts.stopLossPct) });
       // What the brain decided is worth its own alert: new / confirmed / faded patterns, streaks,
       // level-ups, the learning report every 10 trades and the daily digest.
-      for (const e of learned.events) send({ title: `${tag}${e.title}`, body: e.body + (mode === 'live' ? '' : '\nNo real money used.'), priority: e.priority, tags: e.tags });
+      for (const e of learned.events) send({ title: `${tag}${e.title}`, body: e.body + (mode === 'live' ? '' : '\nNo real money used.'), priority: e.priority, tags: e.tags, image: ['report', 'level', 'digest', 'streak'].includes(e.kind) ? historyChart(records) : undefined });
     }
     return rec;
   }

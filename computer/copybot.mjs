@@ -808,7 +808,7 @@ function encodeTradeEvent({ mint, solAmount, tokenAmount, isBuy, user, timestamp
 
 const ascii = (s) => String(s).replace(/[^\x20-\x7e]/g, '').slice(0, 200);
 
-async function notify({ title, body, priority = 3, tags = [], click, actions = [] }) {
+async function notify({ title, body, priority = 3, tags = [], click, actions = [], image }) {
   const line = `[${new Date().toISOString()}] ${title} | ${body.replace(/\n/g, ' | ')}`;
   console.log(line);
   if (!config.ntfyTopic) return;
@@ -817,6 +817,8 @@ async function notify({ title, body, priority = 3, tags = [], click, actions = [
   const headers = { Title: ascii(title), Priority: String(priority) };
   if (tags.length) headers.Tags = tags.join(',');
   if (click) headers.Click = click;
+  // A chart image (QuickChart URL) shows as a picture in the ntfy app. CHARTS=false turns it off.
+  if (image && env('CHARTS', 'true') !== 'false') { headers.Attach = image; headers.Filename = 'chart.png'; }
   if (actions.length) headers.Actions = actions.map((a) => `view, ${ascii(a.label)}, ${a.url}`).join('; ');
   try {
     await http(`${config.ntfyServer.replace(/\/$/, '')}/${encodeURIComponent(config.ntfyTopic)}`, { method: 'POST', headers: { ...headers, 'content-type': 'text/plain; charset=utf-8' }, body: body, timeoutMs: 6000 });
