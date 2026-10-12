@@ -30,7 +30,8 @@ Do these in order. Don't skip a step because an earlier one passed.
 | `SIZING_MODE` / `BUY_SOL` / `DAILY_CAP_SOL` | `fixed` / `0.1` / `0` | `0` = no daily spending cap: only the wallet balance limits buys |
 | `AUTO_SELL` | `false` | you sell by hand from the SOLD alert |
 | `SLIPPAGE_PCT` | `20` | 10% failed often on his coins |
-| `MAX_PAY_ABOVE_DECU_PCT` | `60` | skip buys already 60%+ above Decu's price (his last 25 trades: every buy more than ~75% above him lost). Check the brain's latest advisor line first |
+| `MAX_PAY_ABOVE_DECU_PCT` | `60` (the default in live) | entry-premium filter: skip buys already 60%+ above Decu's price. It held up on unseen trades (RESEARCH.md); check the advisor's walk-forward line before changing it |
+| `DAILY_LOSS_LIMIT_SOL` | `0` (off) | optional: stop new buys for the day after losing this much |
 
 ## 3b. Data health: `node copybot.mjs diagnose`
 Read-only. Compares Helius and Solscan: both answer, how far Solscan's index trails, SOL price from

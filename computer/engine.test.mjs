@@ -164,3 +164,13 @@ test('no daily spending cap by default (paper and live); DAILY_CAP_SOL>0 still c
   for(let i=0;i<30;i++) await e.ingest(buy('n'+i,'n'+i));
   await e.idle(); assert.equal(Object.keys(e.d.positions).length,30,'30 x 0.05 SOL = 1.5 SOL in one day, no cap');
 });
+
+test('daily loss limit (off by default): after closed trades lose the limit, no new buys today', async t => {
+  const e=fixture(t,{send:async j=>({status:'confirmed',rawDelta:j.side==='buy'?'1000':(-BigInt(j.raw)).toString(),solDelta:j.side==='buy'?-0.05:0.01})},{dailyLossLimit:0.03,sizing:'fixed',buySol:0.05,maxBuy:0.05});
+  await e.ingest(buy('a','a1')); await e.idle(); await e.ingest({...sell('1000','1000','a2'),mint:'a'}); await e.idle();
+  assert.ok(e.d.dailyPnl[e.day()] < -0.03);
+  await e.ingest(buy('b','b1')); await e.idle();
+  assert.equal(e.d.positions.b, undefined); assert.ok(e.d.events.some(x=>x.type==='skip'&&/daily loss limit/.test(x.reason)));
+  const off=fixture(t,{},{sizing:'fixed',buySol:0.05,maxBuy:0.05}); off.d.dailyPnl={[off.day()]:-99};
+  await off.ingest(buy('c','c1')); await off.idle(); assert.equal(off.d.positions.c.raw,'1000','no limit when DAILY_LOSS_LIMIT_SOL=0');
+});

@@ -158,10 +158,25 @@ test('Solscan gap report: grouped, says what the trade was; LaunchLab / bonk.fun
   assert.match(a.body, /SELL 7pumpC…  ?(0\.300 SOL )?on pump\.fun, \ds late: sell of a coin the bot does not hold/);
 });
 
-test('max-pay guard: paper buy refused when the price is already far above Decu', async (t) => {
-  const {r, ws} = await bot(t, {MAX_PAY_ABOVE_DECU_PCT: '10'});
+test('entry-premium filter in paper only with PAPER_MAX_PAY_PCT; MAX_PAY_ABOVE_DECU_PCT alone never blocks paper', async (t) => {
+  const free = await bot(t, {MAX_PAY_ABOVE_DECU_PCT: '10'});
+  await free.ws(fx.buy.signature, 'ws', fx.buy.logs); await free.r.engine.idle();
+  assert.equal(free.r.engine.d.positions[MINT].raw, '1000000', 'paper studies everything');
+  free.r.stop();
+  const {r, ws} = await bot(t, {PAPER_MAX_PAY_PCT: '10'});
   await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
   // his price 0.2444 SOL / 2.25e12 raw; the paper quote gives only 1e6 raw for 0.1 SOL -> far above him
   assert.equal(r.engine.d.positions[MINT], undefined);
   assert.ok(r.engine.d.events.some((e) => e.type === 'failed' && /above Decu's/.test(e.message)));
+});
+
+test('execution latency: every stage of a paper copy is timed, with the simulated wait shown separately', async (t) => {
+  const {r, ws} = await bot(t, {});
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  const L = r.latency(MINT);
+  assert.ok(L, 'timed'); assert.equal(L.route, 'paper'); assert.equal(L.source, 'websocket (fast path)');
+  for (const k of ['detectMs', 'decodeMs', 'decideMs', 'buildMs', 'landMs', 'botMs']) assert.ok(Number.isFinite(L[k]), k);
+  assert.ok(L.decodeMs >= 0 && L.decodeMs < 1000);
+  assert.equal(L.simulatedMs, Number(process.env.PAPER_LAND_MS || 0) || L.simulatedMs, 'simulated wait recorded');
+  assert.ok(L.landMs >= L.simulatedMs, 'land time includes the simulated wait');
 });

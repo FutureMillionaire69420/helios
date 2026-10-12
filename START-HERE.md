@@ -105,6 +105,14 @@ touching that coin) and sends one alert:
 
 Decu's Raydium LaunchLab / bonk.fun coins are ignored completely: no copy, no study, no alert.
 
+**Two words used everywhere:**
+- **Execution latency**: seconds from Decu's buy to the bot's buy. The alert's *Latency:* line splits it into steps (seen, decode, decide, build, send, land) and shows the part that is only SIMULATED in paper (1 s).
+- **Entry premium**: how much more per token the bot paid than Decu. Live skips buys over **60%** (the entry-premium filter); paper buys everything and each alert says **TAKE** or **SKIP**.
+
+A Decu buy the bot did not take (filtered, paused, too late) still gets an alert marked **SKIPPED** with what it would have done, so the research never hides the trades it missed.
+
+**Dashboard on your iPhone:** open the bot's address in Safari → Share → *Add to Home Screen*. It shows mode, balance, P&L, positions, entry premium, execution latency, why buys were skipped, the brain's level, and two red buttons: **EMERGENCY STOP** (no new buys) and **Sell everything**.
+
 All of it is saved. Double-click **study** (or run `node copybot.mjs study`) any time, even with the
 robot stopped, to see the full table: profit for every sell second, the top selling rules, and the
 last 10 trades. After 3 days this tells you which selling rule to use.

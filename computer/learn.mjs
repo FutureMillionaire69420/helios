@@ -27,8 +27,9 @@ const firstKnown = (c) => (c || []).find((v) => v != null) ?? null;
 // early: known 1 s after the buy. post: only known afterwards (describes, never predicts).
 export const DIMENSIONS = {
   'Decu buy size': { kind: 'pre', f: (r) => r.hisSol == null ? null : r.hisSol < 1 ? '<1 SOL' : r.hisSol < 2.5 ? '1-2.5 SOL' : r.hisSol < 4 ? '2.5-4 SOL' : '4+ SOL' },
-  'bot late by': { kind: 'pre', f: (r) => r.delaySec == null ? null : r.delaySec < 1 ? '<1s' : r.delaySec < 2 ? '1-2s' : r.delaySec < 3 ? '2-3s' : '3s+' },
-  'paid above Decu': { kind: 'pre', f: (r) => r.entryGap == null ? null : r.entryGap < 0.4 ? '<40%' : r.entryGap < 0.7 ? '40-70%' : r.entryGap < 1 ? '70-100%' : '100%+' },
+  'execution latency': { kind: 'pre', f: (r) => r.delaySec == null ? null : r.delaySec < 1 ? '<1s' : r.delaySec < 2 ? '1-2s' : r.delaySec < 3 ? '2-3s' : '3s+' },
+  'blocks after Decu': { kind: 'pre', f: (r) => { const b = r.latency?.blocksAfter; return b == null ? null : b <= 1 ? '0-1' : b <= 3 ? '2-3' : b <= 5 ? '4-5' : '6+'; } },
+  'entry premium': { kind: 'pre', f: (r) => r.entryGap == null ? null : r.entryGap < 0.4 ? '<40%' : r.entryGap < 0.7 ? '40-70%' : r.entryGap < 1 ? '70-100%' : '100%+' },
   'coin age': { kind: 'pre', f: (r) => r.coin?.ageSec == null ? null : r.coin.ageSec < 120 ? '<2 min' : r.coin.ageSec < 600 ? '2-10 min' : '10 min+' },
   'market cap': { kind: 'pre', f: (r) => r.coin?.marketCapUsd == null ? null : r.coin.marketCapUsd < 10e3 ? '<$10k' : r.coin.marketCapUsd < 30e3 ? '$10-30k' : r.coin.marketCapUsd < 100e3 ? '$30-100k' : '$100k+' },
   'holders': { kind: 'pre', f: (r) => r.coin?.holders == null ? null : r.coin.holders < 50 ? '<50' : r.coin.holders < 200 ? '50-200' : '200+' },
@@ -106,26 +107,82 @@ export function readiness(records, opts = {}) {
   return { passed: checks.filter((c) => c.ok).length, of: checks.length, checks, ready: checks.every((c) => c.ok) };
 }
 
-/** What other settings would have done on the same recorded paths (advice only). */
-export function advise(records, { buySol = 0.1, stopLossPct = 20, gainGatePct = 15, gateSec = 15, maxPayPct = 0 } = {}) {
-  const rs = records.filter((r) => Number.isFinite(r.fcat) && Array.isArray(r.curve));
+/**
+ * One exit strategy replayed on a recorded path, using only what was known at each second.
+ * A sell decided at second s fills at the price of second s + lagSec (a sell takes time to land).
+ * strat: {} = your rules · {fixed:N} sell at N s · {trail:X} trailing stop X below the peak ·
+ * {half:true} sell half at +gain gate, the rest by your rules. All keep his sell and the organic stop.
+ */
+export function exitSim(rec, strat = {}, { stopLossPct = 20, gainGatePct = 15, gateSec = 15, lagSec = 1 } = {}) {
+  const c = rec.curve || [];
+  const base = firstKnown(c);
+  if (base == null) return null;
+  const fillAt = (s) => { for (let k = Math.min(c.length - 1, s + lagSec); k >= 0; k--) if (c[k] != null) return c[k]; return null; };
+  const stop = stopLossPct / 100, gate = gainGatePct / 100;
+  const gateAt = Math.max(0, Math.ceil(gateSec - Math.max(0, rec.delaySec ?? 0) - 1e-9));
+  const hisSell = rec.hisSoldAtSec != null ? Math.max(0, Math.ceil(rec.hisSoldAtSec - 1e-9)) : null;
+  let peak = -Infinity, decided = false, half = null, last = null;
+  const fin = (x, how, open = false) => ({ pnl: half != null ? 0.5 * half + 0.5 * x : x, how, open });
+  for (let s = 0; s < c.length; s++) {
+    const v = c[s];
+    if (v == null) continue;
+    last = v; peak = Math.max(peak, v);
+    if (hisSell != null && s >= hisSell) return fin(fillAt(s), 'his sell');
+    if (strat.fixed != null && s >= strat.fixed) return fin(fillAt(s), `${strat.fixed} s`);
+    if (strat.trail != null && s > 0 && (1 + v) / (1 + peak) - 1 <= -strat.trail) return fin(fillAt(s), 'trailing stop');
+    if (stop > 0 && (1 + v) / (1 + base) - 1 <= -stop) return fin(fillAt(s), 'stop');
+    if (strat.half && half == null && v >= gate) half = fillAt(s);
+    if (strat.fixed == null && strat.trail == null && !decided && s >= gateAt) { decided = true; if (peak >= gate) return fin(fillAt(s), 'gain gate'); }
+  }
+  return fin(last, 'holding at 15 s', true);
+}
+export const EXIT_STRATEGIES = [
+  { name: 'your rules', strat: {} }, { name: 'sell at 3 s', strat: { fixed: 3 } }, { name: 'sell at 5 s', strat: { fixed: 5 } },
+  { name: 'sell at 10 s', strat: { fixed: 10 } }, { name: 'trailing 10%', strat: { trail: 0.1 } }, { name: 'trailing 20%', strat: { trail: 0.2 } },
+  { name: 'half at +gate', strat: { half: true } },
+];
+
+/**
+ * What other settings would have done on the same recorded paths (advice only, never applied).
+ * WALK-FORWARD: settings are chosen on the oldest 70% of trades and judged on the newest 30%, which
+ * the choice never saw. A change is "supported" only with 50+ trades and a gain on BOTH parts.
+ */
+export function advise(records, { buySol = 0.1, stopLossPct = 20, gainGatePct = 15, gateSec = 15, maxPayPct = 0, minEvidence = 50 } = {}) {
+  const rs = records.filter((r) => Number.isFinite(r.fcat) && Array.isArray(r.curve)).sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
   const n = rs.length, out = { trades: n };
   if (n < 10) return out;
-  const total = (list, o) => list.reduce((a, r) => { const s = simulateRules(r, { stopLossPct, gainGatePct, gateSec, ...o }); return a + (s ? s.pnl * buySol : 0); }, 0);
+  const ruleOpts = { stopLossPct, gainGatePct, gateSec };
+  const total = (list, o) => list.reduce((a, r) => { const s = simulateRules(r, { ...ruleOpts, ...o }); return a + (s ? s.pnl * buySol : 0); }, 0);
   const current = total(rs, {});
   out.current = { stopLossPct, gainGatePct, pnlSol: current };
-  // Max-pay guard: skip buys priced more than X% above Decu's price.
-  const sweep = [0.2, 0.3, 0.4, 0.5, 0.6, 0.75, 1, 1.5].map((x) => { const kept = rs.filter((r) => r.entryGap == null || r.entryGap <= x); return { pct: Math.round(x * 100), kept: kept.length, pnlSol: total(kept, {}), fcatSol: kept.reduce((a, r) => a + r.fcat * buySol, 0) }; });
+  const cut = Math.max(1, Math.floor(n * 0.7)), train = rs.slice(0, cut), test = rs.slice(cut);
+  out.split = { train: train.length, test: test.length };
+  const verdict = (trainGain, testGain) => (n < minEvidence ? `not enough evidence yet (${n}/${minEvidence} trades)` : trainGain > 0.005 && testGain > 0 ? 'SUPPORTED on unseen trades' : 'not supported (did not hold on unseen trades)');
+  // Entry-premium filter: skip buys priced more than X above Decu's price.
+  const keep = (list, x) => list.filter((r) => r.entryGap == null || x == null || r.entryGap <= x);
+  const grid = [...Array.from({ length: 20 }, (_, i) => (i + 1) * 0.05), 1.25, 1.5];
+  const sweep = grid.map((x) => { const kept = keep(rs, x); return { pct: Math.round(x * 100), kept: kept.length, pnlSol: total(kept, {}), fcatSol: kept.reduce((a, r) => a + r.fcat * buySol, 0) }; });
   out.maxPaySweep = sweep;
   const viable = sweep.filter((s) => s.kept >= Math.max(5, Math.ceil(n * 0.3))).sort((a, b) => b.pnlSol - a.pnlSol);
   const best = viable[0];
   out.maxPay = best && best.pnlSol > current + 0.005 ? { ...best, gainSol: best.pnlSol - current, skipped: n - best.kept } : null;
   out.maxPayCurrent = maxPayPct || 0;
-  // Exit settings grid (inside the 15 s window; holds past it are marked at the window end).
-  const grid = [];
-  for (const g of [5, 10, 15, 20, 30, 50]) for (const s of [10, 15, 20, 30, 50]) grid.push({ gainGatePct: g, stopLossPct: s, pnlSol: total(rs, { gainGatePct: g, stopLossPct: s }) });
-  grid.sort((a, b) => b.pnlSol - a.pnlSol);
-  out.bestRules = grid[0].pnlSol > current + 0.005 ? { ...grid[0], gainSol: grid[0].pnlSol - current } : null;
+  const trainPick = grid.map((x) => ({ x, kept: keep(train, x).length, pnl: total(keep(train, x), {}) })).filter((t) => t.kept >= Math.max(3, Math.ceil(train.length * 0.3))).sort((a, b) => b.pnl - a.pnl)[0];
+  if (trainPick) {
+    const tr0 = total(train, {}), te0 = total(test, {}), te = total(keep(test, trainPick.x), {});
+    out.filterWF = { pct: Math.round(trainPick.x * 100), trainGainSol: trainPick.pnl - tr0, testGainSol: te - te0, testKept: keep(test, trainPick.x).length, testOf: test.length, verdict: verdict(trainPick.pnl - tr0, te - te0) };
+    if (maxPayPct > 0) { const x = maxPayPct / 100; out.filterCurrent = { pct: maxPayPct, trainGainSol: total(keep(train, x), {}) - tr0, testGainSol: total(keep(test, x), {}) - te0 }; }
+  }
+  // Exit strategies (a sell lands 1 s after the decision), walk-forward.
+  const exitTotal = (list, st) => list.reduce((a, r) => { const e = exitSim(r, st, ruleOpts); return a + (e ? e.pnl * buySol : 0); }, 0);
+  out.exits = EXIT_STRATEGIES.map((e) => ({ name: e.name, pnlSol: exitTotal(rs, e.strat), trainSol: exitTotal(train, e.strat), testSol: exitTotal(test, e.strat) }));
+  const base = out.exits[0], bestTrain = [...out.exits].sort((a, b) => b.trainSol - a.trainSol)[0];
+  out.exitWF = bestTrain.name === base.name ? { name: base.name, verdict: 'your rules are the best on older trades' } : { name: bestTrain.name, trainGainSol: bestTrain.trainSol - base.trainSol, testGainSol: bestTrain.testSol - base.testSol, verdict: verdict(bestTrain.trainSol - base.trainSol, bestTrain.testSol - base.testSol) };
+  // Gate / stop grid (inside the 15 s window; holds past it are marked at the window end).
+  const g2 = [];
+  for (const g of [5, 10, 15, 20, 30, 50]) for (const sl of [10, 15, 20, 30, 50]) g2.push({ gainGatePct: g, stopLossPct: sl, pnlSol: total(rs, { gainGatePct: g, stopLossPct: sl }) });
+  g2.sort((a, b) => b.pnlSol - a.pnlSol);
+  out.bestRules = g2[0].pnlSol > current + 0.005 ? { ...g2[0], gainSol: g2[0].pnlSol - current } : null;
   return out;
 }
 
@@ -216,11 +273,13 @@ export function createBrain({ buySol = 0.1, stopLossPct = 20, gainGatePct = 15, 
   function adviceLines(records) {
     const a = advise(records, { buySol, maxPayPct, ...ruleOpts });
     if (!a.current) return [`Advisor: needs 10 trades (has ${a.trades}).`];
-    const lines = [`Your rules on ${a.trades} trades: ${sol(a.current.pnlSol)} SOL (−${stopLossPct}% organic stop, +${gainGatePct}% gate at ${gateSec}s after Decu's buy)`];
-    if (a.maxPay) lines.push(`Max-pay: skipping buys over +${a.maxPay.pct}% above Decu's price would have made ${sol(a.maxPay.pnlSol)} SOL (${sol(a.maxPay.gainSol)} better, ${a.maxPay.skipped} skipped) → MAX_PAY_ABOVE_DECU_PCT=${a.maxPay.pct}${maxPayPct ? ` (now ${maxPayPct})` : ' (now off)'}`);
-    else lines.push(`Max-pay: no limit beats ${maxPayPct ? `your +${maxPayPct}%` : 'no limit'} on this data yet.`);
-    if (a.bestRules) lines.push(`Exit settings: gate +${a.bestRules.gainGatePct}% / stop −${a.bestRules.stopLossPct}% would have made ${sol(a.bestRules.pnlSol)} SOL (${sol(a.bestRules.gainSol)} better). Holds past 15 s are marked at the 15 s price.`);
-    else lines.push('Exit settings: your current gate and stop are the best tested.');
+    const lines = [`Your rules on ${a.trades} trades: ${sol(a.current.pnlSol)} SOL (−${stopLossPct}% organic stop, +${gainGatePct}% gate at ${gateSec}s after Decu's buy). Walk-forward: chosen on the oldest ${a.split.train}, tested on the newest ${a.split.test}.`];
+    const f = a.filterWF;
+    if (f) lines.push(`Entry-premium filter: best on older trades = skip above +${f.pct}% (${sol(f.trainGainSol)} SOL vs no filter); on newer unseen trades ${sol(f.testGainSol)} SOL (${f.testKept}/${f.testOf} kept) → ${f.verdict}.${a.filterCurrent ? ` Your ${a.filterCurrent.pct}%: older ${sol(a.filterCurrent.trainGainSol)}, newer ${sol(a.filterCurrent.testGainSol)} SOL.` : ''}`);
+    lines.push(`Exits (sell lands 1 s after the decision): ${a.exits.map((e) => `${e.name} ${sol(e.pnlSol)}`).join(' · ')} SOL.`);
+    const x = a.exitWF;
+    lines.push(x.trainGainSol == null ? `Best exit on older trades: ${x.name} (${x.verdict}).` : `Best exit on older trades: ${x.name} (${sol(x.trainGainSol)} SOL vs yours); on newer unseen trades ${sol(x.testGainSol)} SOL → ${x.verdict}.`);
+    if (a.bestRules) lines.push(`Gate/stop grid: +${a.bestRules.gainGatePct}% / −${a.bestRules.stopLossPct}% would have made ${sol(a.bestRules.pnlSol)} SOL on all trades (hindsight, not walk-forward).`);
     return lines;
   }
 
@@ -277,8 +336,8 @@ export function createBrain({ buySol = 0.1, stopLossPct = 20, gainGatePct = 15, 
       const think = [];
       for (const c of changes.slice(0, 3)) {
         if (c.kind === 'faded') { think.push(`"${c.st.label}" no longer stands out after ${c.st.n} trades: treat it as luck.`); continue; }
-        if (c.st.dims.includes('paid above Decu') && c.st.dev < 0) think.push(`Overpaying hurts: "${c.st.label}" loses. A max-pay guard would skip these.`);
-        else if (c.st.dims.includes('bot late by') && c.st.dev < 0) think.push(`Being late hurts: "${c.st.label}" loses. Speed (Helius Pro / LaserStream) fixes this, not settings.`);
+        if (c.st.dims.includes('entry premium') && c.st.dev < 0) think.push(`A high entry premium hurts: "${c.st.label}" loses. The entry-premium filter skips these.`);
+        else if ((c.st.dims.includes('execution latency') || c.st.dims.includes('blocks after Decu')) && c.st.dev < 0) think.push(`Execution latency hurts: "${c.st.label}" loses. Faster detection/landing fixes this, not settings.`);
         else if (c.st.dims.includes('first second') && c.st.dev < 0) think.push(`An early warning: when the price is ${c.st.buckets[0]} 1 s after the buy, the trade usually loses. A candidate early-exit rule.`);
         else if (c.st.dev > 0) think.push(`An edge: "${c.st.label}" wins more than the rest. These are the Decu trades worth copying.`);
         else think.push(`A weak spot: "${c.st.label}" loses more than the rest. A candidate for skipping.`);
@@ -290,7 +349,7 @@ export function createBrain({ buySol = 0.1, stopLossPct = 20, gainGatePct = 15, 
       events.push({ kind: 'streak', title: `${dir > 0 ? 'Win' : 'Losing'} streak: ${L} in a row (${sol(sum * buySol)} SOL)`, priority: dir > 0 ? 3 : 4, tags: [dir > 0 ? 'fire' : 'warning'], body: [
         `The last ${L} trades all ${dir > 0 ? 'won' : 'lost'}: ${streak.recs.map((r) => `${r.symbol ? '$' + r.symbol : r.mint.slice(0, 6)} ${pct(r.fcat, 0)}`).join(', ')}`,
         common.length ? `What they had in common: ${common.join('; ')}.` : 'Nothing in common that the bot measures: likely the market, not the setup.',
-        dir < 0 ? `Median entry in this streak: ${pct(median(streak.recs.map((r) => r.entryGap)), 0)} above Decu, landed ${median(streak.recs.map((r) => r.delaySec)) ?? '?'}s after him.` : `Median entry in this streak: ${pct(median(streak.recs.map((r) => r.entryGap)), 0)} above Decu.`,
+        `Median in this streak: entry premium ${pct(median(streak.recs.map((r) => r.entryGap)), 0)}, execution latency ${median(streak.recs.map((r) => r.delaySec)) ?? '?'} s.`,
         journeyLine(records)].join('\n') });
     }
     const levelUp = level > prevLevel, report = reportEvery > 0 && all.n % reportEvery === 0;
@@ -320,7 +379,7 @@ export function createBrain({ buySol = 0.1, stopLossPct = 20, gainGatePct = 15, 
       events.push({ kind: 'digest', title: `Daily digest: ${day.length} trades, FCAT ${sol(f)} SOL`, priority: 3, tags: ['calendar'], body: [
         `Last ${digestHours} h: ${day.length} trades, ${day.filter((r) => r.fcat > 0).length} won. FCAT ${sol(f)} SOL · your exit rules ${sol(rules)} SOL (at ${buySol} SOL a trade).`,
         best ? `Best: ${best.symbol ? '$' + best.symbol : best.mint.slice(0, 6)} ${pct(best.fcat, 0)} · worst: ${worst.symbol ? '$' + worst.symbol : worst.mint.slice(0, 6)} ${pct(worst.fcat, 0)}` : null,
-        `Median: landed ${median(day.map((r) => r.delaySec)) ?? '?'}s after Decu, paid ${pct(median(day.map((r) => r.entryGap)), 0)} above him.`,
+        `Median: execution latency ${median(day.map((r) => r.delaySec)) ?? '?'} s, entry premium ${pct(median(day.map((r) => r.entryGap)), 0)}.`,
         `New patterns today: ${newLessons}.`, journeyLine(records)].filter((x) => x != null).join('\n') });
     }
     return { prediction, matched, events };
@@ -339,7 +398,7 @@ export function createBrain({ buySol = 0.1, stopLossPct = 20, gainGatePct = 15, 
     if (rec.ruleSim) n.push(`Your real exit rules: ${rec.ruleSim.open ? `still holding at ${rec.ruleSim.sec}s for his sell (marked ${pct(rec.ruleSim.pnl)})` : `${rec.ruleSim.how} at ${rec.ruleSim.sec}s → ${pct(rec.ruleSim.pnl)}`}.`);
     if (rec.ctx?.recent10m != null) n.push(rec.ctx.recent10m === 0 ? "Decu's first trade in 10 min." : `Decu's trade #${rec.ctx.recent10m + 1} in 10 min.`);
     const lag = median(records.slice(0, -1).map((r) => r.delaySec));
-    if (rec.delaySec != null && lag != null && Math.abs(rec.delaySec - lag) >= 0.5) n.push(`Landed ${Math.abs(rec.delaySec - lag).toFixed(1)}s ${rec.delaySec > lag ? 'slower' : 'faster'} than usual (median ${lag}s).`);
+    if (rec.delaySec != null && lag != null && Math.abs(rec.delaySec - lag) >= 0.5) n.push(`Execution latency ${Math.abs(rec.delaySec - lag).toFixed(1)} s ${rec.delaySec > lag ? 'slower' : 'faster'} than usual (median ${lag} s).`);
     return n;
   }
 

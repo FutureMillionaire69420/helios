@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {createStudy, summarize, summaryText, memoryBank, memoryInsights, tradeNotes} from './study.mjs';
-import {createBrain, curveShape, simulateRules, advise, readiness} from './learn.mjs';
+import {createBrain, curveShape, simulateRules, advise, readiness, exitSim} from './learn.mjs';
+import {research, latencyLine} from './study.mjs';
 
 const tmp = (t) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-study-')); t.after(() => fs.rmSync(d, {recursive: true, force: true})); return path.join(d, 'study.jsonl'); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -33,7 +34,7 @@ test('one coin: priced every step for exactly 15 s, then never again; CAT/BTSAB/
   assert.ok(a.body.includes('Brain:') && a.body.includes('Journey: L1 Rookie · trade 1'), a.body);
   assert.ok(Math.abs(rec.bandSol - 0.2) < 1e-9);
   assert.ok(a.body.includes('BAND 0.200 SOL (10% of his buy): 3CAT +0.0160 | 5CAT +0.0300 | 10CAT +0.0200 | BTSAB +0.0600 SOL'), a.body);
-  for (const w of ['3CAT +8.0%', '5CAT +15.0%', '10CAT +10.0%', 'PCAT', 'entry +25.0% vs his price', 'Every second:', 'Best fixed sell', 'Best take-profit']) assert.ok(a.body.includes(w), w);
+  for (const w of ['3CAT +8.0%', '5CAT +15.0%', '10CAT +10.0%', 'PCAT', 'entry premium +25.0%', 'Every second:', 'Best fixed sell', 'Best take-profit']) assert.ok(a.body.includes(w), w);
   assert.equal(fs.readFileSync(file, 'utf8').trim().split('\n').length, 1, 'journaled');
 });
 
@@ -90,9 +91,9 @@ test('each trade gets notes; the memory bank groups trades and finds the best an
   const big = bank.find((g) => g.dimension === 'Decu buy size' && g.bucket === '4+ SOL'); assert.equal(big.trades, 6); assert.equal(big.wins, 6);
   const ins = memoryInsights(rs); assert.ok(ins.best[0].avgFcat > 0); assert.ok(ins.worst[0].avgFcat < 0);
   const notes = tradeNotes(rs[11], rs, {stopLossPct: 20, gainGatePct: 15, maxPayPct: 60});
-  assert.ok(notes.some((n) => /Late by 1.7s and paid \+110.0% more/.test(n)), notes.join('|'));
+  assert.ok(notes.some((n) => /Execution latency 1.7 s, entry premium \+110.0%/.test(n)), notes.join('|'));
   assert.ok(notes.some((n) => /Organic -20% stop would sell at 2s/.test(n)), notes.join('|'));
-  assert.ok(notes.some((n) => /max-pay guard of \+60% above Decu would have SKIPPED/.test(n)));
+  assert.ok(notes.some((n) => /60% entry-premium filter would have SKIPPED/.test(n)));
   assert.ok(notes.some((n) => /Memory: Decu buys of 2.5-4 SOL → 0\/6 won/.test(n)));
 });
 
@@ -125,17 +126,17 @@ test('the brain finds a real pattern, confirms it, predicts with it and alerts o
     events.push(...brain.observe(r, recs).events);
   }
   const lessons = brain.lessons();
-  const over = lessons.find((l) => l.label === 'paid above Decu 100%+');
+  const over = lessons.find((l) => l.label === 'entry premium 100%+');
   assert.ok(over && over.status === 'confirmed' && over.dev < 0, JSON.stringify(lessons.map((l) => [l.label, l.status])));
-  assert.ok(lessons.some((l) => l.label === 'paid above Decu <40%' && l.dev > 0));
+  assert.ok(lessons.some((l) => l.label === 'entry premium <40%' && l.dev > 0));
   const pat = events.filter((e) => e.kind === 'pattern');
   assert.ok(pat.length >= 1 && pat.some((e) => /CONFIRMED/.test(e.title)), pat.map((e) => e.title).join('|'));
-  assert.ok(pat.some((e) => /Overpaying hurts/.test(e.body)));
+  assert.ok(pat.some((e) => /A high entry premium hurts/.test(e.body)));
   // Each lesson is announced once per status change, not on every trade.
   assert.ok(pat.length < 15, `${pat.length} pattern alerts`);
   // Predictions: the bot learned that 100%+ entries lose.
   const p = brain.predict(mkRec(99, {entryGap: 1.4}));
-  assert.ok(p && !p.win && p.basis.some((b) => b.label === 'paid above Decu 100%+'));
+  assert.ok(p && !p.win && p.basis.some((b) => b.label === 'entry premium 100%+'));
   assert.ok(brain.accuracy().rate > 0.7, String(brain.accuracy().rate));
   // Reports every 10 trades and level-ups (10 → Learner, 25 → Analyst), never both for one trade.
   assert.deepEqual(events.filter((e) => e.kind === 'report' || e.kind === 'level').map((e) => e.kind), ['level', 'report', 'level', 'report', 'report']);
@@ -156,7 +157,7 @@ test('streak alerts say what the losing trades had in common; a restart replays 
   const brain = createBrain(), recs = []; let ev = [];
   for (let i = 0; i < 3; i++) { const r = mkRec(i, {fcat: -0.1, entryGap: 1.1}); recs.push(r); ev = ev.concat(brain.observe(r, recs).events); }
   const st = ev.find((e) => e.kind === 'streak');
-  assert.match(st.title, /Losing streak: 3 in a row/); assert.match(st.body, /paid above Decu 100%\+/);
+  assert.match(st.title, /Losing streak: 3 in a row/); assert.match(st.body, /entry premium 100%\+/);
   // Journal replay: a new study built on the same file re-learns without sending anything.
   const file = tmp(t);
   fs.writeFileSync(file, Array.from({length: 25}, (_, i) => JSON.stringify(mkRec(i, i % 2 ? {fcat: 0.1, entryGap: 0.2} : {fcat: -0.2, entryGap: 1.2}))).join('\n') + '\n');
@@ -171,4 +172,46 @@ test('daily digest arrives once a day', () => {
   const brain = createBrain({reportEvery: 0}), recs = []; const ev = [];
   for (let i = 0; i < 6; i++) { const r = mkRec(0, {time: new Date(Date.UTC(2026, 9, 12) + i * 6 * 3600e3).toISOString()}); recs.push(r); ev.push(...brain.observe(r, recs).events); }
   assert.equal(ev.filter((e) => e.kind === 'digest').length, 1);
+});
+
+test('a skipped Decu buy is still studied (no trade) and kept out of the bot totals', async (t) => {
+  const alerts = [];
+  const s = createStudy({file: tmp(t), quoteSell: async () => 0.12, notify: (a) => alerts.push(a), stepMs: 1, feeSol: 0, slip: 0});
+  const rec = await s.start({mint: 'Skip1', cost: 0.1, raw: '1000', his: {sol: 2, raw: 25000, time: Date.now() / 1000 - 2}, shadow: 'entry premium 90% above Decu'});
+  assert.equal(rec.taken, false); assert.match(rec.skipReason, /entry premium/);
+  assert.match(alerts[0].title, /SKIPPED/); assert.match(alerts[0].body, /NOT BOUGHT/);
+  const sm = s.summary(); assert.equal(sm.fcat.trades, 0); assert.equal(sm.fcatAll.trades, 1); assert.equal(sm.fcatAll.skipped, 1);
+  const R = s.research(); assert.equal(R.taken, 0); assert.equal(R.skipped, 1); assert.equal(Object.values(R.skipReasons)[0], 1);
+});
+
+test('exit strategies replay with a 1 s sell delay and only past information', () => {
+  const c = [-0.09, 0, 0.1, 0.25, 0.3, 0.12, 0.05, 0, -0.05, -0.1, -0.1, -0.1, -0.1, -0.1, -0.1, -0.1];
+  const r = {curve: c, delaySec: 2};
+  assert.equal(exitSim(r, {fixed: 3}).pnl, 0.3, 'decided at 3 s, filled at 4 s');
+  assert.equal(exitSim(r, {trail: 0.1}).how, 'trailing stop'); assert.equal(exitSim(r, {trail: 0.1}).pnl, 0.05, 'peak 30% -> 12% at 5 s is -14%: fills at 6 s');
+  assert.equal(exitSim(r, {}).how, 'gain gate');
+  const h = exitSim(r, {half: true}); assert.ok(Math.abs(h.pnl - (0.5 * 0.3 + 0.5 * exitSim(r, {}).pnl)) < 1e-9, 'half at +15% (filled 1 s later), rest by your rules');
+});
+
+test('walk-forward advisor: chosen on older trades, judged on newer unseen ones; needs 50+ trades', () => {
+  const mk = (i, gap, fcat, curve) => ({time: new Date(Date.UTC(2026, 9, 12, 0, i)).toISOString(), mint: 'W' + i, entryGap: gap, fcat, delaySec: 2, curve});
+  const good = [-0.09, 0, 0.1, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2], bad = [-0.09, -0.15, -0.3, -0.35];
+  const few = Array.from({length: 20}, (_, i) => (i % 2 ? mk(i, 1.2, -0.3, bad) : mk(i, 0.3, 0.2, good)));
+  const a = advise(few, {buySol: 0.1});
+  assert.equal(a.split.train, 14); assert.equal(a.split.test, 6);
+  assert.ok(a.filterWF.trainGainSol > 0 && a.filterWF.testGainSol > 0); assert.match(a.filterWF.verdict, /not enough evidence/);
+  const many = Array.from({length: 60}, (_, i) => (i % 2 ? mk(i, 1.2, -0.3, bad) : mk(i, 0.3, 0.2, good)));
+  assert.match(advise(many, {buySol: 0.1}).filterWF.verdict, /SUPPORTED/);
+  // a pattern that only worked early is rejected on the unseen part
+  const flip = Array.from({length: 60}, (_, i) => (i < 42 ? (i % 2 ? mk(i, 1.2, -0.3, bad) : mk(i, 0.3, 0.2, good)) : (i % 2 ? mk(i, 1.2, 0.2, good) : mk(i, 0.3, -0.3, bad))));
+  assert.match(advise(flip, {buySol: 0.1}).filterWF.verdict, /not supported/);
+  assert.ok(Array.isArray(advise(many, {buySol: 0.1}).exits) && advise(many, {buySol: 0.1}).exits.length === 7);
+});
+
+test('research summary: latency percentiles, drawdown, profit factor; latency line marks simulated time', () => {
+  const recs = [0.1, -0.2, 0.05].map((f, i) => ({time: new Date(Date.UTC(2026, 9, 12, 0, i)).toISOString(), mint: 'R' + i, fcat: f, entryGap: 0.5 + i * 0.3, delaySec: 1.5 + i, latency: {botMs: 1100 + i * 100, blocksAfter: 4 + i, simulatedMs: 1000}}));
+  const R = research(recs, {buySol: 0.1, filterPct: 60});
+  assert.ok(Math.abs(R.maxDrawdownSol + 0.02) < 1e-9); assert.ok(Math.abs(R.profitFactor - 0.75) < 1e-9);
+  assert.equal(R.latency.blocksMedian, 5); assert.equal(R.latency.botMedianMs, 1200); assert.equal(R.filter.trades, 1, "premiums 50%, 80%, 110%: only one under 60%");
+  assert.match(latencyLine({detectMs: 400, decodeMs: 2, decideMs: 1, buildMs: 150, landMs: 1100, simulatedMs: 1000, botMs: 1260, route: 'paper', blocksAfter: 5, blocksEstimated: true}), /SIMULATED paper wait.*5 blocks after Decu \(≈, paper\)/);
 });

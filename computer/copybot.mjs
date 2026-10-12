@@ -1738,7 +1738,7 @@ function startWatcher(onSignature, { log = console.log, status = {} } = {}) {
       if(m.id===1){ if(m.error){status.websocket='subscription failed';log('subscription failed: '+m.error.message);ws.close();} else {status.websocket='subscribed';log('wallet subscription acknowledged');} }
       const v = m?.params?.result?.value;
       if (m.method === 'logsNotification' && v?.signature && !v.err) {
-        if (relevantLogs(v.logs)) onSignature(v.signature, 'ws', v.logs);
+        if (relevantLogs(v.logs)) onSignature(v.signature, 'ws', v.logs, m.params.result.context?.slot);
         else status.filteredWs = (status.filteredWs || 0) + 1;
       }
     };
@@ -2628,6 +2628,11 @@ async function runStudyCmd(argv = process.argv) {
   const { createStudy } = await import('./study.mjs');
   const st = createStudy({ file, quoteSell: async () => null, buySol: config.buySol, notesOpts: { stopLossPct: Number(env('STOP_LOSS_PCT', '20')), gainGatePct: Number(env('GAIN_GATE_PCT', '15')) }, learnOpts: { gateSec: Number(env('MAX_HOLD_SEC', '15')), maxPayPct: Number(env('MAX_PAY_ABOVE_DECU_PCT', '0')) } });
   const L = st.learning(), j = L.journey;
+  const R = st.research(), Lt = R.latency, pc = (x) => (Number.isFinite(x) ? `${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}%` : '—');
+  console.log(`\nResearch: ${R.taken} bought, ${R.skipped} skipped (still studied) · win rate ${pc(R.winRate)} · profit factor ${Number.isFinite(R.profitFactor) ? R.profitFactor.toFixed(2) : '—'} · max drawdown ${R.maxDrawdownSol.toFixed(4)} SOL`);
+  console.log(`Entry premium: median ${pc(R.medianEntryPremium)} · with the ${R.filter.pct}% filter: ${R.filter.trades} trades, FCAT ${R.filter.fcatSol.toFixed(4)} SOL`);
+  console.log(`Execution latency: median ${Lt.medianSec ?? '—'} s, p95 ${Lt.p95Sec ?? '—'} s from his block · bot part median ${Lt.botMedianMs ?? '—'} ms (incl. ${Lt.simulatedMs ?? 0} ms simulated in paper) · blocks after Decu ${Lt.blocksMedian ?? '—'}`);
+  for (const [k, v] of Object.entries(R.skipReasons)) console.log(`  skipped ${v}×: ${k}`);
   console.log(`\n${st.brain.journeyLine(st.records)}`);
   console.log(`Go-live readiness ${j.readiness.passed}/${j.readiness.of}:`); for (const c of j.readiness.checks) console.log(`  ${c.ok ? 'OK  ' : 'NOT '} ${c.text}`);
   if (L.accuracy) console.log(`Predictions: ${L.accuracy.hits}/${L.accuracy.total} right (${Math.round(L.accuracy.rate * 100)}%), last 20 ${Math.round(L.accuracyLast20.rate * 100)}%; always guessing the usual result: ${Math.round(L.accuracy.baseline * 100)}%`);

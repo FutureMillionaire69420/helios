@@ -21,7 +21,7 @@ async function refresh(){try{
   $('balance').textContent=fmt(latest.balance);
   const w=latest.wallet||{};
   $('wallet-state').textContent=w.publicKey?`${w.publicKey} · ${w.autonomous?'autonomous signer ready':'simulated'}`:'No signer configured';
-  $('spent').textContent=fmt(latest.spent)+' / '+latest.cap;$('reserved').textContent=fmt(latest.reserved);
+  $('spent').textContent=fmt(latest.spent)+(latest.cap?' / '+latest.cap:' (no cap)')+(latest.pnlToday?' · P&L '+(latest.pnlToday>=0?'+':'')+latest.pnlToday.toFixed(4):'');$('reserved').textContent=fmt(latest.reserved);
   const entries=Object.entries(latest.positions).filter(([,p])=>BigInt(p.raw)>0n);$('count').textContent=entries.length;
   const autoOn=!latest.paused&&latest.autoCopy, manualOn=!latest.paused&&!latest.autoCopy;
   $('style-auto-state').textContent=autoOn?'ON · buys when Decu buys, sells the same share when he sells':'OFF';
@@ -34,7 +34,24 @@ async function refresh(){try{
   $('positions').replaceChildren();for(const [mint,p] of entries)item($('positions'),mint,p.raw+' raw tokens · cost '+fmt(p.costSol)+' SOL · realized proceeds '+fmt(p.realizedSol)+' SOL');if(!entries.length)$('positions').textContent='No open positions.';
   $('jobs').replaceChildren();for(const j of latest.jobs)item($('jobs'),j.side+' · '+j.phase,j.mint,j.phase==='unresolved',j.signature);if(!latest.jobs.length)$('jobs').textContent='No pending transactions.';
   $('pause').disabled=latest.paused;$('resume').disabled=!latest.paused;renderEvents();
+  renderResearch(await api('/api/research').catch(()=>null));
 }catch(e){$('message').textContent=e.message;$('mode').textContent='Disconnected';}}
+const pc=x=>Number.isFinite(x)?(x>=0?'+':'')+(x*100).toFixed(1)+'%':'—', sl=x=>Number.isFinite(x)?(x>=0?'+':'')+x.toFixed(4)+' SOL':'—', sec=x=>Number.isFinite(x)?x.toFixed(2)+' s':'—', msf=x=>Number.isFinite(x)?Math.round(x)+' ms':'—';
+function renderResearch(r){
+  const out=$('research'),rec=$('recent');out.replaceChildren();rec.replaceChildren();
+  if(!r||!r.trades){out.textContent='No studied trades yet.';rec.textContent='—';return;}
+  const L=r.latency||{};
+  item(out,'Results (paper/live as shown above)',`FCAT ${sl(r.fcatSol)} · win rate ${pc(r.winRate)} · profit factor ${Number.isFinite(r.profitFactor)?r.profitFactor.toFixed(2):'—'} · max drawdown ${sl(r.maxDrawdownSol)} · bought ${r.taken} / skipped ${r.skipped}`);
+  item(out,`With the ${r.filter.pct}% entry-premium filter`,`${r.filter.trades} trades · FCAT ${sl(r.filter.fcatSol)}`);
+  item(out,'Entry premium',`median ${pc(r.medianEntryPremium)} · average ${pc(r.avgEntryPremium)} over Decu's price`);
+  item(out,'Execution latency',`median ${sec(L.medianSec)} · p95 ${sec(L.p95Sec)} from his block · bot part median ${msf(L.botMedianMs)} (p95 ${msf(L.botP95Ms)}) · build ${msf(L.buildMedianMs)} · land ${msf(L.landMedianMs)}${L.simulatedMs?' (incl. '+msf(L.simulatedMs)+' simulated)':''} · blocks after Decu ${L.blocksMedian??'—'}`);
+  const rs=Object.entries(r.skipReasons||{});if(rs.length)item(out,'Why buys were skipped',rs.map(([k,v])=>`${v}× ${k}`).join(' · '));
+  if(r.brain)item(out,`Brain: L${r.brain.level} ${r.brain.name}`,`${r.brain.trades} trades · go-live ${r.brain.readiness.passed}/${r.brain.readiness.of}${r.brain.accuracy?' · predictions '+Math.round(r.brain.accuracy.rate*100)+'% right':''}`);
+  for(const t of r.recent)item(rec,`${new Date(t.time).toLocaleTimeString()} · ${t.coin} · ${t.taken?'BOUGHT':'SKIPPED'}`,`premium ${pc(t.premium)} · latency ${sec(t.latencySec)}${t.blocks!=null?' · '+t.blocks+' blocks':''} · FCAT ${pc(t.fcat)}${t.reason?' · '+t.reason:''}`,!t.taken);
+  $('research-updated').textContent='Updated '+new Date().toLocaleTimeString();
+}
+$('emergency').onclick=async()=>{if(!confirm('EMERGENCY STOP: no new buys until you turn a style back on. Continue?'))return;try{await api('/api/emergency','POST');refresh();}catch(e){$('message').textContent=e.message;}};
+$('sellall').onclick=async()=>{if(!confirm('Sell EVERY open position now? In LIVE this sends real sells.'))return;if(!confirm('Are you sure? This cannot be undone.'))return;try{await api('/api/sell-all','POST');refresh();}catch(e){$('message').textContent=e.message;}};
 $('connect').onclick=()=>{token=$('token').value;$('token').value='';refresh();};
 $('pause').onclick=async()=>{try{await api('/api/pause','POST');refresh();}catch(e){$('message').textContent=e.message;}};
 $('resume').onclick=async()=>{try{await api('/api/resume','POST');refresh();}catch(e){$('message').textContent=e.message;}};

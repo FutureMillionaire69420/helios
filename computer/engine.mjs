@@ -47,6 +47,8 @@ export class Engine {
       if (s.side === 'buy') {
         // Buying happens in both trading styles; only Pause stops it.
         if (this.d.paused) reason = 'new buys paused';
+        // DAILY_LOSS_LIMIT_SOL (0 = off): closed trades lost this much today -> no new buys until tomorrow.
+        else if (this.c.dailyLossLimit > 0 && (this.d.dailyPnl?.[this.day()] || 0) <= -this.c.dailyLossLimit) reason = 'daily loss limit reached';
         else if (Date.now()/1000 - s.time > this.c.maxAge) reason = 'stale buy signal';
         else if (!s.pump && this.c.pumpOnly) reason = 'not a pump trade';
         else if (s.usd < this.c.minLeaderUsd) reason = 'leader buy below minimum';
@@ -122,7 +124,7 @@ export class Engine {
         if (nextRaw < 0n) throw new Error('negative position: reconciliation required');
         p.raw = nextRaw.toString();
         if (job.side === 'buy') { p.costSol += -result.solDelta; p.boughtAt ||= Date.now(); }
-        else p.realizedSol += result.solDelta;
+        else { p.realizedSol += result.solDelta; if (nextRaw === 0n) { const d = this.day(); (this.d.dailyPnl ||= {})[d] = (this.d.dailyPnl[d] || 0) + p.realizedSol - p.costSol; } }
         if (this.c.mode !== 'live') this.d.paperBalance += result.solDelta;
         delete this.d.jobs[job.mint];
         this.event('confirmed',{mint:job.mint,side:job.side,signature:job.signature,rawDelta:result.rawDelta,solDelta:result.solDelta});
@@ -167,7 +169,7 @@ export class Engine {
   mute(value) { this.d.alertsOff=value; this.event(value ? 'alerts-off' : 'alerts-on'); }
   snapshot() {
     const jobs = Object.values(this.d.jobs).map(({mint,side,phase,signature,sol,raw}) => ({mint,side,phase,signature,sol,raw}));
-    return {mode:this.c.mode,autoSell:this.c.autoSell,autoCopy:!!this.d.autoCopy,paused:this.d.paused,alertsOff:!!this.d.alertsOff,balance:this.c.mode === 'live' ? null : this.d.paperBalance,spent:this.d.daily[this.day()] || 0,cap:this.c.dailyCap,reserved:this.reserved(),positions:this.d.positions,jobs,events:this.d.events.slice(-100)};
+    return {mode:this.c.mode,autoSell:this.c.autoSell,autoCopy:!!this.d.autoCopy,paused:this.d.paused,alertsOff:!!this.d.alertsOff,balance:this.c.mode === 'live' ? null : this.d.paperBalance,spent:this.d.daily[this.day()] || 0,cap:Number.isFinite(this.c.dailyCap)?this.c.dailyCap:null,pnlToday:this.d.dailyPnl?.[this.day()] || 0,lossLimit:this.c.dailyLossLimit || 0,reserved:this.reserved(),positions:this.d.positions,jobs,events:this.d.events.slice(-100)};
   }
   async idle() { await this.serial; while(this.tasks.size) await Promise.all([...this.tasks.values()]); }
 }
