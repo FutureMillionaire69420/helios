@@ -812,6 +812,8 @@ async function notify({ title, body, priority = 3, tags = [], click, actions = [
   const line = `[${new Date().toISOString()}] ${title} | ${body.replace(/\n/g, ' | ')}`;
   console.log(line);
   if (!config.ntfyTopic) return;
+  // ntfy turns messages over 4096 bytes into a file attachment: keep the alert readable instead.
+  if (Buffer.byteLength(body) > 3900) { const tail = '\n…(cut: full report with node copybot.mjs study)'; body = Buffer.from(body).subarray(0, 3900 - tail.length).toString('utf8').replace(/\uFFFD+$/, '') + tail; }
   const headers = { Title: ascii(title), Priority: String(priority) };
   if (tags.length) headers.Tags = tags.join(',');
   if (click) headers.Click = click;
@@ -2621,6 +2623,16 @@ async function runStudyCmd(argv = process.argv) {
     console.log('\nMemory bank (FCAT by group; trust groups with 5+ trades):');
     for (const g of bank) console.log(`  ${g.dimension.padEnd(16)} ${g.bucket.padEnd(10)} ${String(g.trades).padStart(3)} trades  ${String(g.wins).padStart(3)} wins  avg FCAT ${g.avgFcat >= 0 ? '+' : ''}${(g.avgFcat * 100).toFixed(1)}%`);
   }
+  // The brain: journey, patterns it trusts, prediction score and the advisor.
+  const { createStudy } = await import('./study.mjs');
+  const st = createStudy({ file, quoteSell: async () => null, buySol: config.buySol, notesOpts: { stopLossPct: Number(env('STOP_LOSS_PCT', '20')), gainGatePct: Number(env('GAIN_GATE_PCT', '15')) }, learnOpts: { gateSec: Number(env('MAX_HOLD_SEC', '15')), maxPayPct: Number(env('MAX_PAY_ABOVE_DECU_PCT', '0')) } });
+  const L = st.learning(), j = L.journey;
+  console.log(`\n${st.brain.journeyLine(st.records)}`);
+  console.log(`Go-live readiness ${j.readiness.passed}/${j.readiness.of}:`); for (const c of j.readiness.checks) console.log(`  ${c.ok ? 'OK  ' : 'NOT '} ${c.text}`);
+  if (L.accuracy) console.log(`Predictions: ${L.accuracy.hits}/${L.accuracy.total} right (${Math.round(L.accuracy.rate * 100)}%), last 20 ${Math.round(L.accuracyLast20.rate * 100)}%; always guessing the usual result: ${Math.round(L.accuracy.baseline * 100)}%`);
+  console.log(L.lessons.length ? '\nPatterns the bot has learned:' : '\nPatterns: none strong enough yet (they need 5+ trades).');
+  for (const g of L.lessons) console.log(`  ${g.status.padEnd(9)} ${g.avgFcat >= 0 ? 'WIN ' : 'LOSE'} ${g.label}: ${g.wins}/${g.trades} won, avg FCAT ${(g.avgFcat * 100).toFixed(1)}% (z ${g.z.toFixed(1)})`);
+  console.log('\nAdvisor (nothing changes automatically):'); for (const x of st.brain.adviceLines(st.records)) console.log(`  ${x}`);
   console.log(`\nUpper bound (${sm.perfect.note}): ${sm.perfect.pnlSol >= 0 ? '+' : ''}${sm.perfect.pnlSol.toFixed(4)} SOL`);
   console.log('\nLast 10 trades:');
   for (const r of records.slice(-10)) console.log(`  ${r.time.slice(5, 19)} ${(r.symbol ? '$' + r.symbol : r.mint.slice(0, 6)).padEnd(12)} 5CAT ${r.curve[5] == null ? '—' : (r.curve[5] * 100).toFixed(0) + '%'}  BTSAB ${r.btsab}s ${r.peak == null ? '—' : (r.peak * 100).toFixed(0) + '%'}  PCAT ${r.pcat == null ? '—' : (r.pcat * 100).toFixed(0) + '%'}  gap ${r.entryGap == null ? '—' : (r.entryGap * 100).toFixed(0) + '%'}`);

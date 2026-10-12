@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {createStudy, summarize, summaryText, memoryBank, memoryInsights, tradeNotes} from './study.mjs';
+import {createBrain, curveShape, simulateRules, advise, readiness} from './learn.mjs';
 
 const tmp = (t) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-study-')); t.after(() => fs.rmSync(d, {recursive: true, force: true})); return path.join(d, 'study.jsonl'); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -25,9 +26,11 @@ test('one coin: priced every step for exactly 15 s, then never again; CAT/BTSAB/
   assert.ok(Math.abs(rec.entryGap - 0.25) < 1e-9); assert.ok(Math.abs(rec.pcat - (0.085e-6 / 8e-8 - 1)) < 1e-9);
   assert.equal(rec.coin.holders, 120);
   const a = alerts[0];
-  assert.match(a.title, /\$TEST FCAT -15\.0% \| BTSAB 7s \+30\.0%/);
-  assert.ok(Math.abs(rec.fcat + 0.15) < 1e-9); assert.equal(rec.fcatExit, '15s limit');
-  assert.ok(a.body.includes('FCAT -15.0% (-0.0150 SOL) · sold at 15s limit'), a.body);
+  assert.match(a.title, /\$TEST FCAT -12\.0% \| BTSAB 7s \+30\.0%/);
+  // He bought 1.5 s before the bot: 15 s after HIS buy = 13.5 s → the bot's 14 s sample.
+  assert.ok(Math.abs(rec.fcat + 0.12) < 1e-9); assert.equal(rec.fcatSec, 14); assert.match(rec.fcatExit, /15s after his buy \(14s after the bot's\)/);
+  assert.ok(a.body.includes('FCAT -12.0% (-0.0120 SOL) · sold at 15s after his buy'), a.body);
+  assert.ok(a.body.includes('Brain:') && a.body.includes('Journey: L1 Rookie · trade 1'), a.body);
   assert.ok(Math.abs(rec.bandSol - 0.2) < 1e-9);
   assert.ok(a.body.includes('BAND 0.200 SOL (10% of his buy): 3CAT +0.0160 | 5CAT +0.0300 | 10CAT +0.0200 | BTSAB +0.0600 SOL'), a.body);
   for (const w of ['3CAT +8.0%', '5CAT +15.0%', '10CAT +10.0%', 'PCAT', 'entry +25.0% vs his price', 'Every second:', 'Best fixed sell', 'Best take-profit']) assert.ok(a.body.includes(w), w);
@@ -91,4 +94,81 @@ test('each trade gets notes; the memory bank groups trades and finds the best an
   assert.ok(notes.some((n) => /Organic -20% stop would sell at 2s/.test(n)), notes.join('|'));
   assert.ok(notes.some((n) => /max-pay guard of \+60% above Decu would have SKIPPED/.test(n)));
   assert.ok(notes.some((n) => /Memory: Decu buys of 2.5-4 SOL → 0\/6 won/.test(n)));
+});
+
+// ===== the brain (learn.mjs) =====
+const mkRec = (i, o = {}) => ({time: new Date(Date.UTC(2026, 9, 12, 0, i * 3)).toISOString(), mint: 'M' + i, hisSol: 1.5, delaySec: 1.8, entryGap: 0.6, curve: [-0.09, -0.08, -0.1, -0.12, -0.1, -0.1, -0.1, -0.1, -0.1, -0.1, -0.1, -0.1, -0.1, -0.1, -0.1, -0.1], fcat: -0.1, coin: {ageSec: 300, marketCapUsd: 20000, holders: 80}, ctx: {recent10m: 1}, ...o});
+
+test('shapes and the real exit rules replayed on a path (gate counts from Decu\'s buy)', () => {
+  assert.equal(curveShape([0, 0.05, 0.2, 0.1, 0, -0.05, -0.1]), 'quick spike');
+  assert.equal(curveShape([0, -0.05, -0.1, -0.2, -0.3]), 'instant dump');
+  assert.equal(curveShape([0, 0.01, 0.02, 0.03, 0.05, 0.05, 0.06, 0.07, 0.08, 0.09, 0.2, 0.25]), 'late runner');
+  const up = [-0.09, 0, 0.1, 0.2, 0.1, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05];
+  // Bot landed 2 s after him: the 15 s gate is the bot's 13 s sample; peak +20% ≥ +15% → sells there.
+  assert.deepEqual(simulateRules({curve: up, delaySec: 2}, {gainGatePct: 15}), {pnl: 0.05, sec: 13, how: '+15% gate'});
+  // His sell at 4.2 s comes first.
+  assert.equal(simulateRules({curve: up, delaySec: 2, hisSoldAtSec: 4.2}).how, 'his sell');
+  // Organic stop: -20% from the first price (-9%) → (1-0.28)/(1-0.09)-1 = -20.9%.
+  const dn = [-0.09, -0.15, -0.28, -0.3];
+  assert.deepEqual(simulateRules({curve: dn, delaySec: 2}), {pnl: -0.28, sec: 2, how: '-20% stop'});
+  assert.equal(simulateRules({curve: [-0.09, -0.05, -0.1], delaySec: 2}).open, true, 'never +15% → holds for his sell');
+});
+
+test('the brain finds a real pattern, confirms it, predicts with it and alerts once', () => {
+  const brain = createBrain({reportEvery: 10});
+  const recs = [], events = [];
+  // Overpaying (entry gap 100%+) loses; good entries (<40%) win. Mixed otherwise.
+  for (let i = 0; i < 40; i++) {
+    const kind = i % 3;
+    const r = mkRec(i, kind === 0 ? {entryGap: 1.3, fcat: -0.25} : kind === 1 ? {entryGap: 0.2, fcat: 0.12} : {entryGap: 0.55, fcat: i % 2 ? 0.03 : -0.04});
+    recs.push(r);
+    events.push(...brain.observe(r, recs).events);
+  }
+  const lessons = brain.lessons();
+  const over = lessons.find((l) => l.label === 'paid above Decu 100%+');
+  assert.ok(over && over.status === 'confirmed' && over.dev < 0, JSON.stringify(lessons.map((l) => [l.label, l.status])));
+  assert.ok(lessons.some((l) => l.label === 'paid above Decu <40%' && l.dev > 0));
+  const pat = events.filter((e) => e.kind === 'pattern');
+  assert.ok(pat.length >= 1 && pat.some((e) => /CONFIRMED/.test(e.title)), pat.map((e) => e.title).join('|'));
+  assert.ok(pat.some((e) => /Overpaying hurts/.test(e.body)));
+  // Each lesson is announced once per status change, not on every trade.
+  assert.ok(pat.length < 15, `${pat.length} pattern alerts`);
+  // Predictions: the bot learned that 100%+ entries lose.
+  const p = brain.predict(mkRec(99, {entryGap: 1.4}));
+  assert.ok(p && !p.win && p.basis.some((b) => b.label === 'paid above Decu 100%+'));
+  assert.ok(brain.accuracy().rate > 0.7, String(brain.accuracy().rate));
+  // Reports every 10 trades and level-ups (10 → Learner, 25 → Analyst), never both for one trade.
+  assert.deepEqual(events.filter((e) => e.kind === 'report' || e.kind === 'level').map((e) => e.kind), ['level', 'report', 'level', 'report', 'report']);
+  const rep = events.find((e) => e.kind === 'report' && /40 trades/.test(e.title));
+  assert.ok(/Predictions: \d+\/\d+ right/.test(rep.body) && /Go-live readiness \d\/4/.test(rep.body) && /Advisor/.test(rep.body), rep.body);
+});
+
+test('advisor recommends the max-pay guard that the data supports; readiness checklist', () => {
+  const recs = [];
+  for (let i = 0; i < 30; i++) recs.push(mkRec(i, i % 2 ? {entryGap: 1.2, fcat: -0.2, curve: [-0.09, -0.15, -0.3, -0.35]} : {entryGap: 0.3, fcat: 0.1, curve: [-0.09, 0, 0.1, 0.1], hisSoldAtSec: 3}));
+  const a = advise(recs, {buySol: 0.1});
+  assert.equal(a.maxPay.pct, 30); assert.equal(a.maxPay.skipped, 15); assert.ok(a.maxPay.gainSol > 0);
+  const r = readiness(recs);
+  assert.equal(r.of, 4); assert.equal(r.checks[0].ok, false, 'only 30 trades');
+});
+
+test('streak alerts say what the losing trades had in common; a restart replays silently', async (t) => {
+  const brain = createBrain(), recs = []; let ev = [];
+  for (let i = 0; i < 3; i++) { const r = mkRec(i, {fcat: -0.1, entryGap: 1.1}); recs.push(r); ev = ev.concat(brain.observe(r, recs).events); }
+  const st = ev.find((e) => e.kind === 'streak');
+  assert.match(st.title, /Losing streak: 3 in a row/); assert.match(st.body, /paid above Decu 100%\+/);
+  // Journal replay: a new study built on the same file re-learns without sending anything.
+  const file = tmp(t);
+  fs.writeFileSync(file, Array.from({length: 25}, (_, i) => JSON.stringify(mkRec(i, i % 2 ? {fcat: 0.1, entryGap: 0.2} : {fcat: -0.2, entryGap: 1.2}))).join('\n') + '\n');
+  const alerts = [];
+  const s = createStudy({file, quoteSell: async () => 0.1, notify: (a) => alerts.push(a)});
+  assert.equal(alerts.length, 0);
+  assert.equal(s.learning().journey.name, 'Analyst'); assert.equal(s.learning().journey.trades, 25);
+  assert.ok(s.records[3].shape && s.records[3].ruleSim, 'old records are enriched');
+});
+
+test('daily digest arrives once a day', () => {
+  const brain = createBrain({reportEvery: 0}), recs = []; const ev = [];
+  for (let i = 0; i < 6; i++) { const r = mkRec(0, {time: new Date(Date.UTC(2026, 9, 12) + i * 6 * 3600e3).toISOString()}); recs.push(r); ev.push(...brain.observe(r, recs).events); }
+  assert.equal(ev.filter((e) => e.kind === 'digest').length, 1);
 });

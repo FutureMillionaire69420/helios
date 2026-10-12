@@ -57,12 +57,13 @@ test('auto-sell style: sells EVERYTHING the moment he first sells', async (t) =>
   assert.equal(r.engine.d.positions[MINT].raw, '0', 'fully sold at his first sell');
 });
 
-test('auto-sell style: reached +15% within the window -> sells at the 15 s mark', async (t) => {
-  const {r, ws} = await bot(t, {MAX_HOLD_SEC: '0.2', MONITOR_MS: '20'}, async () => 0.13); // ~+26%
+test('auto-sell style: reached +15% -> sells at the gate, counted from DECU\'S buy (his on-chain time)', async (t) => {
+  const {r, ws} = await bot(t, {MAX_HOLD_SEC: '2.5', MONITOR_MS: '20'}, async () => 0.13); // ~+26%
   r.engine.style('auto');
   await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
   assert.equal(r.engine.d.positions[MINT].raw, '1000000');
-  await sleep(400); await r.engine.idle();
+  // his event time is "now" rounded down to the second, so the gate fires 1.5-2.5 s after the bot's buy
+  await sleep(2700); await r.engine.idle();
   assert.equal(r.engine.d.positions[MINT].raw, '0', 'sold at the time limit');
   assert.ok(r.engine.d.events.some((e) => e.type === 'exit-rule' && e.rule === 'gain-target'));
 });
@@ -129,7 +130,7 @@ test('after a restart, held coins are watched again: stop-loss still protects th
   assert.equal(again.r.engine.d.positions[MINT].raw, '0', 'stop-loss sold it');
 });
 
-test('Solscan gap report: grouped, says what the trade was, no false alarm right after start', async (t) => {
+test('Solscan gap report: grouped, says what the trade was; LaunchLab / bonk.fun coins ignored completely', async (t) => {
   const alerts = [];
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-gap-')), saved = {...process.env};
   Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: 'gap-test-token-24-characters-xx', STUDY: 'false', GAP_GRACE_SEC: '0', GAP_ALERT_SEC: '0.05'});
@@ -138,15 +139,23 @@ test('Solscan gap report: grouped, says what the trade was, no false alarm right
   const launchLab = {blockTime: Math.floor(Date.now() / 1000) - 12, slot: 1, transaction: {signatures: ['g'], message: {accountKeys: [{pubkey: LEADER, signer: true}]}},
     meta: {err: null, fee: 5005000, logMessages: ['Program FLASHX8DrLbgeR8FcfNV1F5krxYcYMUdBkrP1EPBtxB9 invoke [1]', 'Program LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj invoke [2]'],
       preBalances: [10e9], postBalances: [10e9 - 265005000], preTokenBalances: [], postTokenBalances: [{owner: LEADER, mint: '5dzSbvLaunchLabCoin1111111111111111111111111', uiTokenAmount: {amount: '2313951000000', decimals: 6, uiAmountString: '2313951'}}]}};
+  const pumpSell = {blockTime: Math.floor(Date.now() / 1000) - 8, slot: 2, transaction: {signatures: ['p'], message: {accountKeys: [{pubkey: LEADER, signer: true}]}},
+    meta: {err: null, fee: 5000, logMessages: ['Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [1]'],
+      preBalances: [10e9], postBalances: [10e9 + 300e6], preTokenBalances: [{owner: LEADER, mint: '7pumpCoin11111111111111111111111111111111pump', uiTokenAmount: {amount: '5000000000', decimals: 6, uiAmountString: '5000'}}], postTokenBalances: [{owner: LEADER, mint: '7pumpCoin11111111111111111111111111111111pump', uiTokenAmount: {amount: '0', decimals: 6, uiAmountString: '0'}}]}};
+  const txs = {lab1: launchLab, lab2: launchLab, sell1: pumpSell, sell2: pumpSell};
   const k = {config: {...config, dryRun: true, logFile: path.join(dir, 'log')}, redact: (x) => x, detectBuy, detectSell, getSolUsd: async () => 116, notify: async (a) => alerts.push(a),
-    venueOf: (await import('./copybot.mjs')).venueOf, getTransaction: async () => launchLab, startWatcher: () => () => {}, startSolscanWatcher: (cb) => { ss = cb; return () => {}; }};
+    venueOf: (await import('./copybot.mjs')).venueOf, getTransaction: async (sig) => txs[sig], startWatcher: () => () => {}, startSolscanWatcher: (cb) => { ss = cb; return () => {}; }};
   const r = await startRuntime(k);
   t.after(() => { r.stop(); fs.rmSync(dir, {recursive: true, force: true}); for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]; Object.assign(process.env, saved); });
-  await ss('gap1', 'solscan'); await ss('gap2', 'solscan');
+  await ss('lab1', 'solscan'); await ss('lab2', 'solscan');
+  await sleep(150);
+  assert.ok(!alerts.some((x) => /Solscan caught/.test(x.title)), 'LaunchLab trades never alert');
+  assert.ok(!r.engine.d.events.some((e) => e.mint === '5dzSbvLaunchLabCoin1111111111111111111111111'), 'and never reach the copy engine');
+  await ss('sell1', 'solscan'); await ss('sell2', 'solscan');
   await sleep(150);
   const a = alerts.find((x) => /Solscan caught 2 Decu trades/.test(x.title));
   assert.ok(a, JSON.stringify(alerts.map((x) => x.title)));
-  assert.match(a.body, /BUY 5dzSbv… 0\.260 SOL on Raydium LaunchLab, 1\ds late: buy on Raydium LaunchLab: skipped \(bot copies pump.fun coins only/);
+  assert.match(a.body, /SELL 7pumpC…  ?(0\.300 SOL )?on pump\.fun, \ds late: sell of a coin the bot does not hold/);
 });
 
 test('max-pay guard: paper buy refused when the price is already far above Decu', async (t) => {

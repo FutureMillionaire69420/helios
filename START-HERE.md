@@ -83,7 +83,7 @@ touching that coin) and sends one alert:
 
 | In the alert | Means |
 |---|---|
-| **FCAT** (main number) | the bot's own rule: bought as fast as possible, sold when Decu first sold, or at 15 seconds if he hadn't |
+| **FCAT** (main number) | the bot's own rule: bought as fast as possible, sold when Decu first sold, or 15 seconds after **Decu's** buy if he hadn't |
 | **3CAT / 5CAT / 10CAT** | profit if it sold 3 / 5 / 10 seconds after buying |
 | **BTSAB** | best time to sell after buying: the best second (0–15) and its profit |
 | **PCAT** | profit if you'd bought at Decu's own price and sold when he sold |
@@ -91,6 +91,19 @@ touching that coin) and sends one alert:
 | **BAND** | the same trade if each buy were 10% of what Decu spent (he buys 2 SOL → 0.2 SOL) |
 | **Every second** | profit % at each second, 0 to 15 |
 | **Best fixed sell / take-profit / TP+stop** | the selling rule that would have made the most so far |
+
+| **Notes** | what happened on this trade: how late, how much more than Decu it paid, what each rule would have done |
+| **Brain** | the robot's own thinking: what it predicted before the result (right or wrong, and its score), which learned pattern the trade matched, the price shape, what your real exit rules did |
+| **Patterns** | what the robot has learned so far (▲ = kind of trade that wins, ▼ = loses) |
+| **Journey** | its level (Rookie → Learner → Analyst → Strategist → Veteran → Master) and the go-live checklist (x/4) |
+
+**The robot also sends its own learning alerts:**
+- **New pattern spotted / Pattern CONFIRMED / Pattern faded**: it noticed a kind of Decu trade that wins or loses more than the rest (for example "paid more than 70% above Decu → loses"), proved it with more trades, or found it was just luck.
+- **Win / Losing streak**: 3 or more in a row, and what those trades had in common.
+- **Learning report** every 10 trades and **Level up**: is it getting better, how often its predictions are right (compared with just guessing), the patterns it trusts, and the **advisor** (which max-pay limit, stop-loss and +gain gate would have made more). It never changes a setting by itself.
+- **Daily digest**: the last 24 hours in one message.
+
+Decu's Raydium LaunchLab / bonk.fun coins are ignored completely: no copy, no study, no alert.
 
 All of it is saved. Double-click **study** (or run `node copybot.mjs study`) any time, even with the
 robot stopped, to see the full table: profit for every sell second, the top selling rules, and the
@@ -126,8 +139,8 @@ his-sell+10s   120 trades   45 wins   -0.0800 SOL
 6. Double-click **start** again. Day one is limited to **0.2 SOL** of buys.
 7. Pick your trading style in the dashboard (two toggles, only one can be ON):
    - **Auto buy + auto sell**: the robot buys when Decu buys and sells **everything** the moment he
-     first sells. At 15 seconds: if the trade reached **+15%** by then it sells; if it never did, it
-     keeps holding until Decu sells (and sells after 10 minutes at most).
+     first sells. **15 seconds after Decu's buy** (not the robot's): if the trade reached **+15%** by
+     then it sells; if it never did, it keeps holding until Decu sells (10 minutes at most).
    - **In both styles: if the coin falls 20% from the robot's entry price (fees ignored), it sells everything at once (stop-loss).**
    - **Auto buy + manual sell**: the robot buys when Decu buys. When your phone says
      **"Decu SOLD a coin you hold"**, you sell that coin yourself in Phantom.

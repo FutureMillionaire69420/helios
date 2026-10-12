@@ -79,7 +79,7 @@ export function alertFor(e, mode, leaderLabel='Decu') {
   if (e.type==='unsupported' && e.kind==='paid-with-pump') return {title:`${tag}${leaderLabel} bought with PUMP tokens (not copied)`, body:`He paid with PUMP tokens he held, not SOL. This bot buys with SOL only, so it skipped this one.\nToken: ${e.mint}`, priority:2, tags:['eyes'], click:pump(e.mint)};
   if (e.type==='exit-rule') {
     const p=e.pnl==null?'':` (${e.pnl>=0?'+':''}${(e.pnl*100).toFixed(1)}% incl. fees)`;
-    const t={stoploss:[`Stop-loss: selling ${short(e.mint)}${p}`,`The coin fell ${e.move!=null?(e.move*100).toFixed(0)+'%':'20%+'} from the bot's entry price: selling everything now.`,4,'stop_sign'],'gain-target':[`+15% reached: selling ${short(e.mint)}${p}`,'It hit +15% within 15 s: selling at the 15 s mark.',3,'moneybag'],'hold-until-his-sell':[`Holding ${short(e.mint)} until ${leaderLabel} sells${p}`,'Never reached +15% in the first 15 s, so the bot waits for his sell (stop-loss still on).',2,'hourglass'],'hold-limit':[`Time limit: selling ${short(e.mint)}${p}`,'Held 10 minutes without his sell: selling everything.',3,'alarm_clock']}[e.rule];
+    const t={stoploss:[`Stop-loss: selling ${short(e.mint)}${p}`,`The coin fell ${e.move!=null?(e.move*100).toFixed(0)+'%':'20%+'} from the bot's entry price: selling everything now.`,4,'stop_sign'],'gain-target':[`+15% reached: selling ${short(e.mint)}${p}`,`It reached +15% within 15 s of ${leaderLabel}'s buy: selling now.`,3,'moneybag'],'hold-until-his-sell':[`Holding ${short(e.mint)} until ${leaderLabel} sells${p}`,`Never reached +15% within 15 s of ${leaderLabel}'s buy, so the bot waits for his sell (stop-loss still on).`,2,'hourglass'],'hold-limit':[`Time limit: selling ${short(e.mint)}${p}`,'Held 10 minutes without his sell: selling everything.',3,'alarm_clock']}[e.rule];
     if (t) return {title:`${tag}${t[0]}`, body:`${t[1]}\nToken: ${e.mint}`, priority:t[2], tags:[t[3]], click:pump(e.mint)};
   }
   if (e.type==='provider-gap' && false) return {title:`${tag}Helius missed a ${leaderLabel} trade`, body:`Solscan caught it and the bot processed it late.\nTx: ${e.leaderSignature}`, priority:3, tags:['satellite'], click:tx(e.leaderSignature)};
@@ -150,7 +150,7 @@ export async function startRuntime(k, {demo=false}={}) {
   const leaderBuys=new Map();
   const study = demo || val('STUDY','true')==='false' || !k.quoteSell ? null : createStudy({
     file:val('STUDY_FILE',path.resolve(`study-${c.mode}.jsonl`)), quoteSell:k.quoteSell, mode:c.mode, buySol:c.buySol,
-    feeSol:k.config.tipSol+k.config.priorityFeeSol, windowSec:number('STUDY_WINDOW_SEC',15), bandPct:number('BAND_PCT',10)/100, notesOpts:{stopLossPct:number('STOP_LOSS_PCT',20),gainGatePct:number('GAIN_GATE_PCT',15),maxPayPct:number('MAX_PAY_ABOVE_DECU_PCT',0)||60}, label:k.config.leaderLabel,
+    feeSol:k.config.tipSol+k.config.priorityFeeSol, windowSec:number('STUDY_WINDOW_SEC',15), bandPct:number('BAND_PCT',10)/100, notesOpts:{stopLossPct:number('STOP_LOSS_PCT',20),gainGatePct:number('GAIN_GATE_PCT',15),maxPayPct:number('MAX_PAY_ABOVE_DECU_PCT',0)||60}, learnOpts:{gateSec:number('MAX_HOLD_SEC',15),maxPayPct:number('MAX_PAY_ABOVE_DECU_PCT',0),reportEvery:number('LEARN_REPORT_EVERY',10),digestHours:number('LEARN_DIGEST_HOURS',24)}, label:k.config.leaderLabel,
     meta:k.tokenMeta||null, notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, log:m=>engine?.event('connection',{message:m})});
   const receipt = async job => {
     const tx = await k.getTransaction(job.signature,2);
@@ -267,9 +267,9 @@ export async function startRuntime(k, {demo=false}={}) {
   }
   await engine.recover();
   // EXIT RULES: every held coin is priced once a second (Helius curve read) until it is sold.
-  //  1. STOP_LOSS_PCT (15): down this much at any moment -> sell everything. Both styles
+  //  1. STOP_LOSS_PCT (20): down this much at any moment -> sell everything. Both styles
   //     (STOP_LOSS_MANUAL=false keeps manual-sell style hands-off).
-  //  2. Auto-sell style, at MAX_HOLD_SEC (15) after the bot's buy: if the trade reached
+  //  2. Auto-sell style, at MAX_HOLD_SEC (15) after DECU'S buy: if the trade reached
   //     +GAIN_GATE_PCT (15) at any point by then -> sell everything; if it never did -> keep
   //     holding until Decu sells (the stop-loss still applies).
   //  3. Auto-sell style, HOLD_LIMIT_SEC (600): sell whatever happens, in case his sell is missed.
@@ -293,6 +293,8 @@ export async function startRuntime(k, {demo=false}={}) {
       const p=engine.d.positions[mint];
       if(!p || BigInt(p.raw)<=0n) { monitors.delete(mint); return; }
       const auto=engine.d.autoCopy, age=Date.now()-(p.boughtAt||Date.now());
+      // The 15 s gate counts from DECU'S buy (his on-chain time), not the bot's; bot time if unknown.
+      const his=leaderBuys.get(mint), bought=p.boughtAt||Date.now(), hisMs=his?.time>0 && bought-his.time*1000<=60e3 ? his.time*1000 : bought, sinceHis=Date.now()-hisMs; // >60 s apart: not his matching buy
       let pnl=null;
       try {
         const v=await Promise.race([k.quoteSell(mint,Number(p.raw)),new Promise(r=>setTimeout(()=>r(null),2500).unref?.())]);
@@ -301,7 +303,7 @@ export async function startRuntime(k, {demo=false}={}) {
       if(pnl!=null) { m.peak=Math.max(m.peak,pnl); m.last=pnl; m.base??=pnl; }
       const move=pnl==null?null:stopFromEntry?(1+pnl)/(1+m.base)-1:pnl;
       if(move!=null && stopLoss>0 && move<=-stopLoss && (auto||stopLossManual)) return exitNow(mint,p,'stoploss',pnl,move);
-      if(auto && maxHoldMs>0 && age>=maxHoldMs && !m.decided) {
+      if(auto && maxHoldMs>0 && sinceHis>=maxHoldMs && !m.decided) {
         m.decided=true;
         if(m.peak>=gainGate) return exitNow(mint,p,'gain-target',pnl);
         engine.event('exit-rule',{mint,rule:'hold-until-his-sell',pnl,peak:Number.isFinite(m.peak)?m.peak:null});
@@ -334,7 +336,7 @@ export async function startRuntime(k, {demo=false}={}) {
     },number('GAP_ALERT_SEC',20)*1000); gapTimer.unref?.(); }
   };
   // Exit rule for the auto-sell style: sell everything at his FIRST sell (SELL_ALL_ON_LEADER_SELL),
-  // and if he has not sold MAX_HOLD_SEC (15) after the bot's buy, sell anyway. 0 = no time limit.
+  // plus the gain gate MAX_HOLD_SEC (15) after his buy (see EXIT RULES above). 0 = no gate.
   const sellAll=val('SELL_ALL_ON_LEADER_SELL','true')==='true', maxHoldSec=number('MAX_HOLD_SEC',15);
   const mintDecimals=new Map();
   const remember=(map,key,v)=>{map.set(key,v);if(map.size>2000)map.delete(map.keys().next().value);};
@@ -372,9 +374,12 @@ export async function startRuntime(k, {demo=false}={}) {
     try {
       const tx=await k.getTransaction(sig);
       if(!tx) throw new Error('transaction not available yet; will retry');
-      const signals=normalize(tx,k.config.leader,k.detectBuy,k.detectSell);
+      // LaunchLab / bonk.fun / any non-pump.fun coin: ignored completely (no copy, no study, no alert).
+      const venue=k.venueOf?k.venueOf(tx.meta?.logMessages||[]):'?', pumpVenue=['pump.fun','PumpSwap'].includes(venue);
+      const all=normalize(tx,k.config.leader,k.detectBuy,k.detectSell), signals=all.filter(s=>!(c.pumpOnly && (s.side==='buy'?!s.pump:!pumpVenue && !engine.d.positions[s.mint])));
+      if(signals.length<all.length) status.ignoredVenue=(status.ignoredVenue||0)+1;
       if(local && tx.meta?.logMessages && signals.some(s=>s.side==='buy')) { const ctx=buyContextFromLogs(tx.meta.logMessages,k.config.leader,k.b58encode); if(ctx && !buyCtx.has(ctx.mint)) remember(buyCtx,ctx.mint,ctx); }
-      if(!signals.length) {
+      if(!all.length) {
         const u=classifyUnsupported(tx,k.config.leader);
         if(u) {status.unsupported++;engine.event('unsupported',{leaderSignature:sig,mint:u.mint,kind:u.kind,reason:u.kind==='token-swap'?'token-to-token swap':'paid or received PUMP tokens instead of SOL; bot trades with SOL only'});}
         else {
@@ -391,7 +396,8 @@ export async function startRuntime(k, {demo=false}={}) {
         else { study?.leaderSell(s.mint,s); if(sellAll) { s.soldRaw='1'; s.beforeRaw='1'; } }
         await engine.ingest(s);
       }
-      if(gapSigs.delete(sig)) reportGap(sig,tx,signals);
+      // A non-pump.fun trade (LaunchLab / bonk.fun / Raydium / Meteora...) never makes a gap alert.
+      if(gapSigs.delete(sig)) { if(signals.length || !c.pumpOnly || (all.length===0 && ['pump.fun','PumpSwap','FLASHX router','other','?'].includes(venue))) reportGap(sig,tx,signals); else status.ignoredVenue=(status.ignoredVenue||0)+(signals.length<all.length?0:1); }
       completed.add(sig); status.lastSignal=new Date().toISOString();
       if(completed.size>10000) completed.delete(completed.values().next().value);
     } catch(e) {
@@ -451,6 +457,7 @@ export async function startRuntime(k, {demo=false}={}) {
         res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean(snap)));
       }
       if(url.pathname==='/api/memory' && req.method==='GET') {const {memoryBank,memoryInsights}=await import('./study.mjs');res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?{bank:memoryBank(study.records),insights:memoryInsights(study.records)}:{bank:[]}));}
+      if(url.pathname==='/api/brain' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?study.learning():{journey:null}));}
       if(url.pathname==='/api/study' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?{...study.summary(),text:summaryText(study.summary()),active:[...study.active.keys()]}:{trades:0,text:'Study is off.'}));}
       if(url.pathname==='/api/wallet' && req.method==='GET') {
         res.writeHead(200,{'Content-Type':'application/json'});

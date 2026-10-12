@@ -8,8 +8,8 @@
 //   BTSAB                best time to sell after buying: the second (0–15) with the highest profit
 //   PCAT                 profit if you had bought at Decu's own first-buy price and sold when he
 //                        first sold (or at the 15 s mark if he hadn't sold yet)
-//   FCAT                 THE BOT'S RULE: buy as fast as possible, sell when Decu first sells, or at
-//                        15 s if he hasn't sold. Uses the bot's real entry price (the headline number)
+//   FCAT                 THE BOT'S RULE: buy as fast as possible, sell when Decu first sells, or 15 s
+//                        after DECU'S buy if he hasn't sold. Uses the bot's real entry price (headline)
 //   entry gap            how much more the bot paid per token than Decu did
 //   BAND                 the same trade sized at BAND_PCT (10%) of what Decu spent instead of a fixed
 //                        0.1 SOL. Uses the same % moves; a bigger buy moves the price more, so real
@@ -17,6 +17,7 @@
 // Read-only: a study never signs or sends anything.
 
 import fs from 'node:fs';
+import { DIMENSIONS, createBrain, curveShape, simulateRules } from './learn.mjs';
 
 const pct = (x) => (x == null || !Number.isFinite(x) ? '—' : `${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}%`);
 const sol = (x) => (x == null || !Number.isFinite(x) ? '—' : `${x >= 0 ? '+' : ''}${x.toFixed(4)}`);
@@ -73,15 +74,10 @@ export function summarize(records, { buySol = 0.1 } = {}) {
 /** Short text of the summary for alerts and the status command. */
 // ===== MEMORY BANK =====
 // Every studied trade is grouped by what was known about it (Decu's buy size, how late the bot was,
-// how much more it paid than Decu, coin age, hour of day). For each group: trades, wins, average
+// how much more it paid than Decu, coin age / market cap / holders, how busy Decu was, hour of day).
+// learn.mjs builds the patterns, predictions and journey on top of this. For each group: trades, wins, average
 // FCAT. Over days this shows which kinds of Decu trades the bot wins and which it should skip.
-const BUCKETS = {
-  'Decu buy size': (r) => r.hisSol == null ? null : r.hisSol < 1 ? '<1 SOL' : r.hisSol < 2.5 ? '1-2.5 SOL' : r.hisSol < 4 ? '2.5-4 SOL' : '4+ SOL',
-  'bot late by': (r) => r.delaySec == null ? null : r.delaySec < 1 ? '<1s' : r.delaySec < 2 ? '1-2s' : r.delaySec < 3 ? '2-3s' : '3s+',
-  'paid above Decu': (r) => r.entryGap == null ? null : r.entryGap < 0.4 ? '<40%' : r.entryGap < 0.7 ? '40-70%' : r.entryGap < 1 ? '70-100%' : '100%+',
-  'coin age': (r) => r.coin?.ageSec == null ? null : r.coin.ageSec < 120 ? '<2 min' : r.coin.ageSec < 600 ? '2-10 min' : '10 min+',
-  'hour (UTC)': (r) => (r.time ? `${String(new Date(r.time).getUTCHours()).padStart(2, '0')}h` : null),
-};
+const BUCKETS = Object.fromEntries(Object.entries(DIMENSIONS).map(([k, d]) => [k, d.f]));
 export function memoryBank(records) {
   const rs = records.filter((r) => Number.isFinite(r.fcat));
   const out = [];
@@ -103,8 +99,8 @@ export function tradeNotes(rec, records, { stopLossPct = 20, gainGatePct = 15, m
   const n = [];
   const c = rec.curve || [];
   if (rec.delaySec != null || rec.entryGap != null) n.push(`Late by ${rec.delaySec ?? '?'}s and paid ${pct(rec.entryGap)} more per token than Decu${rec.entryGap > 0.9 ? ' (very high: most of his move was gone)' : rec.entryGap != null && rec.entryGap < 0.4 ? ' (good entry)' : ''}.`);
-  n.push(rec.hisSoldAtSec != null ? `Decu sold ${rec.hisSoldAtSec}s after the bot's buy.` : 'Decu was still holding at 15s.');
-  if (rec.btsab != null) n.push(`Best moment: ${rec.btsab}s at ${pct(rec.peak)}; ${rec.peak >= gainGatePct / 100 ? `reached +${gainGatePct}% → the 15 s exit applies` : `never +${gainGatePct}% → the bot holds for his sell`}.`);
+  n.push(rec.hisSoldAtSec != null ? `Decu sold ${rec.hisSoldAtSec}s after the bot's buy (${Math.round((rec.hisSoldAtSec + Math.max(0, rec.delaySec ?? 0)) * 10) / 10}s after his own).` : 'Decu was still holding when the 15 s study ended.');
+  if (rec.btsab != null) n.push(`Best moment: ${rec.btsab}s at ${pct(rec.peak)}; ${rec.peak >= gainGatePct / 100 ? `reached +${gainGatePct}% → sells 15 s after Decu's buy` : `never +${gainGatePct}% → the bot holds for his sell`}.`);
   const base = c.find((v) => v != null);
   if (base != null) { const hit = c.findIndex((v) => v != null && (1 + v) / (1 + base) - 1 <= -stopLossPct / 100); n.push(hit >= 0 ? `Organic -${stopLossPct}% stop would sell at ${hit}s.` : `Organic -${stopLossPct}% stop not hit in 15s.`); }
   if (rec.entryGap != null) n.push(`A max-pay guard of +${maxPayPct}% above Decu would have ${rec.entryGap > maxPayPct / 100 ? 'SKIPPED' : 'allowed'} this buy (FCAT ${pct(rec.fcat)}).`);
@@ -131,16 +127,29 @@ export function summaryText(sm) {
 /**
  * createStudy({file, quoteSell, notify, meta, ...}).start({...}) after each confirmed bot buy.
  * leaderSell(mint, {time, sol, soldRaw}) records his first sell during the window.
+ * learnOpts go to the brain (learn.mjs): stopLossPct, gainGatePct, gateSec, maxPayPct, reportEvery.
  */
-export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, notesOpts = {}, log = () => {} }) {
-  const memoryLines = (rs) => { const m = memoryInsights(rs); if (!m.all.length) return []; const f = (g) => `${g.dimension} ${g.bucket}: ${g.wins}/${g.trades} won, avg FCAT ${pct(g.avgFcat)}`; return ['Memory bank (groups with 5+ trades):', ...m.best.map((g) => '▲ ' + f(g)), ...m.worst.filter((g) => !m.best.includes(g)).map((g) => '▼ ' + f(g))]; };
+export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, notesOpts = {}, learnOpts = {}, log = () => {} }) {
+  const ruleOpts = { stopLossPct: notesOpts.stopLossPct ?? 20, gainGatePct: notesOpts.gainGatePct ?? 15, gateSec: learnOpts.gateSec ?? windowSec };
+  const brain = createBrain({ buySol, ...ruleOpts, maxPayPct: learnOpts.maxPayPct ?? 0, reportEvery: learnOpts.reportEvery ?? 10, digestHours: learnOpts.digestHours ?? 24 });
   const records = [];
   try {
     for (const line of fs.readFileSync(file, 'utf8').split('\n')) if (line.trim()) records.push(JSON.parse(line));
   } catch { /* first run */ }
+  // How many Decu trades the bot studied in the 10 minutes before this one (how busy he was).
+  const recentCount = (time, list) => { const t = Date.parse(time); return list.filter((r) => { const u = Date.parse(r.time); return u < t && t - u <= 600e3; }).length; };
+  const enrich = (rec, prior) => {
+    rec.shape ??= curveShape(rec.curve);
+    rec.ruleSim ??= simulateRules(rec, ruleOpts);
+    if (rec.ctx?.recent10m == null) rec.ctx = { ...(rec.ctx || {}), recent10m: recentCount(rec.time, prior.slice(-50)) };
+    return rec;
+  };
+  // Replay the journal through the brain (silently) so it remembers everything after a restart.
+  for (let i = 0; i < records.length; i++) { enrich(records[i], records.slice(0, i)); brain.observe(records[i], records.slice(0, i + 1), { silent: true }); }
   const active = new Map();
   const tag = mode === 'live' ? '' : mode === 'paper' ? '[PAPER] ' : '[DEMO] ';
   const timed = (p) => Promise.race([p, new Promise((r) => setTimeout(() => r(null), quoteTimeoutMs))]);
+  const send = (a) => { if (notify) Promise.resolve(notify(a)).catch(() => {}); };
 
   async function finish(st) {
     active.delete(st.mint);
@@ -150,31 +159,40 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
     const [worst, worstAt] = known.length ? known.reduce((a, b) => (b[0] < a[0] ? b : a)) : [null, null];
     const botPrice = st.cost / st.raw;
     const hisPrice = st.his.sol > 0 && st.his.raw > 0 ? st.his.sol / st.his.raw : null;
+    const delaySec = st.his.time ? Math.round((st.startedAt / 1000 - st.his.time) * 10) / 10 : null;
     let pcat = null, pcatExit = null;
     if (hisPrice) {
       const hs = st.hisSell;
       const exitPrice = hs && hs.sol > 0 && hs.soldRaw > 0 ? hs.sol / hs.soldRaw : st.values.findLast((v) => v != null) / st.raw;
       if (Number.isFinite(exitPrice)) { pcat = exitPrice / hisPrice - 1 - (2 * feeSol) / buySol; pcatExit = hs ? `his sell at ${hs.atSec}s` : '15s mark'; }
     }
-    // FCAT: exit at the first full second after his first sell inside the window, else at the end.
+    // FCAT: exit at the first full second after his first sell, else 15 s after DECU'S buy (the bot
+    // lands ~2 s after him, so that is ~13 s after the bot's buy). Both inside the study window.
     const lastKnown = (from) => { for (let s = Math.min(from, curve.length - 1); s >= 0; s--) if (curve[s] != null) return curve[s]; return null; };
-    const hs = st.hisSell, fcatSec = hs && hs.atSec <= windowSec ? Math.max(0, Math.min(windowSec, Math.ceil(hs.atSec))) : windowSec;
-    const fcat = lastKnown(fcatSec), fcatExit = hs && hs.atSec <= windowSec ? `his sell at ${hs.atSec}s` : `${windowSec}s limit`;
+    const limit = Math.max(0, Math.min(windowSec, Math.ceil(windowSec - Math.max(0, delaySec ?? 0) - 1e-9)));
+    const hs = st.hisSell, hisIn = hs && hs.atSec <= limit;
+    const fcatSec = hisIn ? Math.max(0, Math.ceil(hs.atSec - 1e-9)) : limit;
+    const fcat = lastKnown(fcatSec), fcatExit = hisIn ? `his sell at ${hs.atSec}s` : limit === windowSec ? `${windowSec}s limit` : `${windowSec}s after his buy (${limit}s after the bot's)`;
     const m = await (meta ? timed(meta(st.mint).catch(() => null)) : null);
     const rec = {
       time: new Date(st.startedAt).toISOString(), mint: st.mint, symbol: m?.symbol || null, mode,
-      hisSol: st.his.sol, hisUsd: st.his.usd, delaySec: st.his.time ? Math.round((st.startedAt / 1000 - st.his.time) * 10) / 10 : null,
+      hisSol: st.his.sol, hisUsd: st.his.usd, delaySec,
       entryGap: hisPrice ? botPrice / hisPrice - 1 : null, cost: st.cost, curve, fcat, fcatSec, fcatExit, btsab, peak, worst, worstAt, pcat, pcatExit,
       hisSoldAtSec: st.hisSell?.atSec ?? null, bandSol: st.his.sol > 0 ? st.his.sol * bandPct : null,
       coin: m ? { holders: m.holders ?? null, marketCapUsd: m.marketCapUsd ?? null, ageSec: m.createdTime ? Math.round(st.startedAt / 1000 - m.createdTime) : null } : null,
     };
+    enrich(rec, records);
     rec.notes = tradeNotes(rec, [...records, rec], notesOpts);
     records.push(rec);
     if (records.length > 5000) records.shift();
+    const learned = brain.observe(rec, records);
+    rec.thinking = brain.thinkingNotes(rec, learned, records);
+    rec.prediction = learned.prediction ? { fcat: learned.prediction.fcat, right: learned.prediction.win === rec.fcat > 0 } : null;
     try { fs.appendFileSync(file, JSON.stringify(rec) + '\n', { mode: 0o600 }); } catch (e) { log(`study journal unavailable: ${e.message}`); }
     if (notify) {
       const name = rec.symbol ? `$${rec.symbol}` : `${st.mint.slice(0, 6)}…`;
       const at = (s) => (curve[s] == null ? '—' : pct(curve[s]));
+      const lessons = brain.lessons();
       const body = [
         `${label} bought ${st.his.sol?.toFixed(3) ?? '?'} SOL${st.his.usd ? ` ($${Math.round(st.his.usd)})` : ''} · bot landed ${rec.delaySec ?? '?'}s later, entry ${pct(rec.entryGap)} vs his price`,
         `FCAT ${pct(fcat)} (${sol(fcat == null ? null : fcat * buySol)} SOL) · sold at ${fcatExit}${rec.bandSol ? ` · BAND ${sol(fcat == null ? null : fcat * rec.bandSol)} SOL` : ''}`,
@@ -186,13 +204,18 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
         rec.coin ? `Coin: ${rec.coin.holders ?? '?'} holders, mcap ${rec.coin.marketCapUsd ? `$${Math.round(rec.coin.marketCapUsd).toLocaleString('en-US')}` : '?'}, age ${rec.coin.ageSec != null ? `${Math.round(rec.coin.ageSec / 60)} min` : '?'}` : null,
         '',
         'Notes:', ...rec.notes.map((x) => '• ' + x),
+        'Brain:', ...rec.thinking.map((x) => '• ' + x),
         '',
         summaryText(summarize(records, { buySol })),
-        ...memoryLines(records),
+        lessons.length ? `Patterns (${lessons.length}): ${lessons.slice(0, 3).map((g) => `${g.status === 'confirmed' ? '✔' : '…'}${g.dev >= 0 ? '▲' : '▼'} ${g.label} ${pct(g.avg, 0)} (${g.n})`).join(' | ')}` : 'Patterns: none strong enough yet.',
+        brain.journeyLine(records),
         mode === 'live' ? '' : 'No real money used.',
         `Token: ${st.mint}`,
       ].filter((x) => x != null).join('\n');
-      Promise.resolve(notify({ title: `${tag}${name} FCAT ${pct(fcat)} | BTSAB ${btsab ?? '—'}s ${pct(peak)}`, body, priority: 3, tags: ['bar_chart'], click: `https://pump.fun/coin/${st.mint}` })).catch(() => {});
+      send({ title: `${tag}${name} FCAT ${pct(fcat)} | BTSAB ${btsab ?? '—'}s ${pct(peak)}`, body, priority: 3, tags: ['bar_chart'], click: `https://pump.fun/coin/${st.mint}` });
+      // What the brain decided is worth its own alert: new / confirmed / faded patterns, streaks,
+      // level-ups, the learning report every 10 trades and the daily digest.
+      for (const e of learned.events) send({ title: `${tag}${e.title}`, body: e.body + (mode === 'live' ? '' : '\nNo real money used.'), priority: e.priority, tags: e.tags });
     }
     return rec;
   }
@@ -200,7 +223,9 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
   return {
     records,
     active,
+    brain,
     summary: () => summarize(records, { buySol }),
+    learning: () => brain.snapshot(records),
     /** Begin a 15 s study of a position the bot just bought. Returns a promise of the record. */
     start({ mint, cost, raw, his = {} }) {
       if (active.has(mint) || active.size >= maxConcurrent || !(cost > 0) || !(Number(raw) > 0)) return null;
