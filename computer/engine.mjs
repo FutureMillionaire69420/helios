@@ -83,8 +83,8 @@ export class Engine {
           job = {...s, id:s.key, day:this.day(), phase:'building'};
           if (s.side === 'buy') {
             if (this.d.paused) throw new Error('new buys paused');
-            const balance = this.c.mode === 'live' ? await this.a.balance() : this.d.paperBalance;
-            job.sol = sizeBuy(this.c,s,balance,this.reserved(),this.d.daily[job.day] || 0);
+            const balance = this.c.mode === 'live' ? await this.a.balance() : this.c.paperUnlimited ? Math.max(this.d.paperBalance, 1e6) : this.d.paperBalance;
+            job.sol = sizeBuy(this.c,s,balance,this.c.paperUnlimited ? 0 : this.reserved(),this.c.paperUnlimited ? 0 : this.d.daily[job.day] || 0);
             job.reserveSol = job.sol * (1 + this.c.slippage/100) + this.c.feeBudget;
             this.d.daily[job.day] = (this.d.daily[job.day] || 0) + job.sol;
           } else {

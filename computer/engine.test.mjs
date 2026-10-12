@@ -144,3 +144,14 @@ test('two trading toggles: auto/manual are exclusive, both off stops buys',async
   await e.ingest(buy('c','c1'));await e.idle();assert.equal(e.d.positions.c,undefined);
   await e.ingest({...sell('500','500','b3'),mint:'b'});await e.idle();assert.equal(e.d.positions.b.raw,'0','held coins keep their selling style');
 });
+
+test('paper never runs out of budget: every copyable buy is studied (live keeps the cap)',async t=>{
+  const e=fixture(t,{},{dailyCap:0.1,maxBuy:0.05,paperUnlimited:true,paperBalance:0});
+  for(let i=0;i<5;i++) await e.ingest(buy('m'+i,'s'+i));
+  await e.idle(); assert.equal(Object.keys(e.d.positions).length,5);
+  const saved={...process.env}; t.after(()=>{process.env=saved;});
+  assert.equal(runtimeConfig({...config,dryRun:true}).paperUnlimited,true);
+  assert.equal(runtimeConfig({...config,dryRun:false}).paperUnlimited,false,'live keeps its cap');
+  process.env.PAPER_UNLIMITED='false';
+  assert.equal(runtimeConfig({...config,dryRun:true}).paperUnlimited,false);
+});
