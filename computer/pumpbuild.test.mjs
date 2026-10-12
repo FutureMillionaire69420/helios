@@ -68,3 +68,12 @@ test('fee recipients: reserved list for mayhem coins, buyback recipient required
   assert.equal(P.pickBuybackRecipient(global), global.buybackFeeRecipients[0]);
   assert.throws(() => P.pickFeeRecipient({feeRecipients: []}, false), /no pump.fun fee recipient/);
 });
+
+test('max-pay floor makes the on-chain minimum stricter, never looser', () => {
+  const ctx = {...P.buyContextFromLogs(fx.buy.logs, config.leader, b58encode), feeRecipient: global.feeRecipients[0], buybackRecipient: global.buybackFeeRecipients[0]};
+  const base = P.buildBuyTransaction({user: kp.publicKey, ctx, lamports: 100_000_000, slippagePct: 20, blockhash: BH}, h);
+  const strict = P.buildBuyTransaction({user: kp.publicKey, ctx, lamports: 100_000_000, slippagePct: 20, blockhash: BH, minTokensFloor: base.minTokensOut * 2n}, h);
+  assert.equal(strict.minTokensOut, base.minTokensOut * 2n);
+  const loose = P.buildBuyTransaction({user: kp.publicKey, ctx, lamports: 100_000_000, slippagePct: 20, blockhash: BH, minTokensFloor: 1n}, h);
+  assert.equal(loose.minTokensOut, base.minTokensOut);
+});

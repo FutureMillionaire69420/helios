@@ -1171,8 +1171,11 @@ async function validateTrade(bytes,job,balanceSol) {
     } else throw new Error('unapproved execution program '+program);
   }
   if(tradeCount!==1) throw new Error('expected exactly one pump trade instruction');
-  const before=await rpc('getMultipleAccounts',[[wallet,...atas],{encoding:'base64',commitment:'confirmed'}]);
-  const simulation=await rpc('simulateTransaction',[Buffer.from(bytes).toString('base64'),{encoding:'base64',sigVerify:true,commitment:'confirmed',accounts:{encoding:'base64',addresses:[wallet,...atas]}}]);
+  // Pre-trade balances and the simulation are independent reads: run them together (one round trip).
+  const [before,simulation]=await Promise.all([
+    rpc('getMultipleAccounts',[[wallet,...atas],{encoding:'base64',commitment:'confirmed'}]),
+    rpc('simulateTransaction',[Buffer.from(bytes).toString('base64'),{encoding:'base64',sigVerify:true,commitment:'confirmed',accounts:{encoding:'base64',addresses:[wallet,...atas]}}])
+  ]);
   const v=simulation.value;
   if(v.err || !v.accounts?.[0])throw new Error('simulation refused: '+JSON.stringify(v.err));
   const outflow=(before.value[0].lamports-v.accounts[0].lamports)/1e9;
@@ -1669,9 +1672,32 @@ class Copier {
  * each one exhausted the Helius rate limit within seconds. With PUMP_ONLY (the default) a trade must
  * invoke pump.fun or PumpSwap, which always shows in the logs. Missing or truncated logs: fetch anyway.
  */
+// Trading venues and routers Decu uses (checked 2026-10-12: he also trades Raydium LaunchLab /
+// bonk.fun coins through his FLASHX router, with no pump.fun program in the logs).
+const TRADE_PROGRAMS = {
+  [PROGRAMS.PUMP]: 'pump.fun', [PROGRAMS.PUMP_AMM]: 'PumpSwap',
+  FLASHX8DrLbgeR8FcfNV1F5krxYcYMUdBkrP1EPBtxB9: 'FLASHX router', LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj: 'Raydium LaunchLab',
+  CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK: 'Raydium CLMM', CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C: 'Raydium CPMM',
+  '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8': 'Raydium AMM', dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN: 'Meteora DBC',
+  LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo: 'Meteora DLMM', JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4: 'Jupiter',
+};
+for (const id of env('EXTRA_TRADE_PROGRAMS').split(',').map((x) => x.trim()).filter(Boolean)) TRADE_PROGRAMS[id] = 'extra';
+
+/** Where a transaction traded, from its logs: the first real venue (not the router), else the router. */
+function venueOf(logs) {
+  const seen = Object.entries(TRADE_PROGRAMS).filter(([id]) => (logs || []).some((l) => l.includes(id))).map(([, name]) => name);
+  return seen.find((n) => n !== 'FLASHX router' && n !== 'Jupiter') || seen[0] || 'other';
+}
+
+/**
+ * Can this transaction be a trade? Measured 2026-10-08: ~26 successful transactions a second mention
+ * his address, all from one unrelated program. Fetching each one exhausted the Helius rate limit, so
+ * only transactions that touch a trading venue or router he uses are fetched. Missing or truncated
+ * logs: fetch anyway.
+ */
 function relevantLogs(logs) {
-  if (!config.pumpOnly || !Array.isArray(logs) || !logs.length) return true;
-  return logs.some((l) => l.includes(PROGRAMS.PUMP) || l.includes(PROGRAMS.PUMP_AMM) || l.includes('Log truncated'));
+  if (!Array.isArray(logs) || !logs.length) return true;
+  return logs.some((l) => l.includes('Log truncated') || Object.keys(TRADE_PROGRAMS).some((id) => l.includes(id)));
 }
 
 function startWatcher(onSignature, { log = console.log, status = {} } = {}) {
@@ -2394,7 +2420,7 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
   if (!config.dryRun && !demo && config.executor!=='pumpportal') throw new Error('v2 live execution supports EXECUTOR=pumpportal only; legacy Jupiter remains for quotes/backtests');
   const solscanWatch = solscan.enabled && config.solscanPollMs > 0 ? (onSignature, opts) => startSolscanWatcher({ client: solscan, leader: config.leader, intervalMs: config.solscanPollMs, horizonSec: Math.max(config.maxSignalAgeSec, num('MAX_SELL_SIGNAL_AGE_SEC', 300)), onSignature, ...opts }) : null;
   const tokenLabel = solscan.enabled ? async (mint) => { const m = await solscan.tokenMeta(mint); return m?.symbol ? `$${m.symbol}` : null; } : null;
-  const r = await startRuntime({config,kp,notify,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  const r = await startRuntime({config,kp,notify,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();process.exit(0);});
 }
 
@@ -2589,6 +2615,12 @@ async function runStudyCmd(argv = process.argv) {
   for (const b of sm.bySecond) console.log(`  ${String(b.sec).padStart(2)}s  ${b.pnlSol >= 0 ? '+' : ''}${b.pnlSol.toFixed(4)}  wins ${b.wins}/${b.trades}`);
   console.log('\nTop 5 take-profit + stop-loss rules:');
   for (const r of sm.tpSl.slice(0, 5)) console.log(`  TP ${(r.tp * 100).toFixed(0)}% / SL ${(r.sl * 100).toFixed(0)}%  ${r.pnlSol >= 0 ? '+' : ''}${r.pnlSol.toFixed(4)} SOL  wins ${r.wins}/${r.trades}`);
+  const { memoryBank } = await import('./study.mjs');
+  const bank = memoryBank(records);
+  if (bank.length) {
+    console.log('\nMemory bank (FCAT by group; trust groups with 5+ trades):');
+    for (const g of bank) console.log(`  ${g.dimension.padEnd(16)} ${g.bucket.padEnd(10)} ${String(g.trades).padStart(3)} trades  ${String(g.wins).padStart(3)} wins  avg FCAT ${g.avgFcat >= 0 ? '+' : ''}${(g.avgFcat * 100).toFixed(1)}%`);
+  }
   console.log(`\nUpper bound (${sm.perfect.note}): ${sm.perfect.pnlSol >= 0 ? '+' : ''}${sm.perfect.pnlSol.toFixed(4)} SOL`);
   console.log('\nLast 10 trades:');
   for (const r of records.slice(-10)) console.log(`  ${r.time.slice(5, 19)} ${(r.symbol ? '$' + r.symbol : r.mint.slice(0, 6)).padEnd(12)} 5CAT ${r.curve[5] == null ? '—' : (r.curve[5] * 100).toFixed(0) + '%'}  BTSAB ${r.btsab}s ${r.peak == null ? '—' : (r.peak * 100).toFixed(0) + '%'}  PCAT ${r.pcat == null ? '—' : (r.pcat * 100).toFixed(0) + '%'}  gap ${r.entryGap == null ? '—' : (r.entryGap * 100).toFixed(0) + '%'}`);
@@ -2690,5 +2722,5 @@ async function main(argv = process.argv) {
 
 
 // ===== entry =====
-export {config,setFetch,rpc,relevantLogs,quoteSell,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,findProgramAddress,associatedTokenAddress as ata,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
+export {config,setFetch,rpc,relevantLogs,venueOf,quoteSell,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,findProgramAddress,associatedTokenAddress as ata,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);

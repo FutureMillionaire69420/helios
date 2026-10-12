@@ -146,10 +146,11 @@ export function compileLegacy(payer, instructions, blockhash, b58decode) {
  * optional tip. `ctx` comes from buyContextFromLogs (or the chain). minTokensOut = expected tokens
  * on his post-trade curve state reduced by slippagePct.
  */
-export function buildBuyTransaction({ user, ctx, lamports, slippagePct, blockhash, cuLimit = 120_000, priorityLamports = 500_000, tipAccount = null, tipLamports = 0 }, h) {
+export function buildBuyTransaction({ user, ctx, lamports, slippagePct, minTokensFloor = 0n, blockhash, cuLimit = 120_000, priorityLamports = 500_000, tipAccount = null, tipLamports = 0 }, h) {
   decode58 = h.b58decode;
   const expected = tokensOut(ctx, lamports);
-  const minOut = (expected * BigInt(Math.round((100 - slippagePct) * 100))) / 10000n;
+  const slipOut = (expected * BigInt(Math.round((100 - slippagePct) * 100))) / 10000n;
+  const minOut = slipOut > BigInt(minTokensFloor) ? slipOut : BigInt(minTokensFloor); // stricter of slippage and max-pay
   if (minOut <= 0n) throw new Error('local build: curve state gives no tokens');
   const accounts = buyAccounts({ user, mint: ctx.mint, tokenProgram: ctx.tokenProgram, creator: ctx.creator, feeRecipient: ctx.feeRecipient, buybackRecipient: ctx.buybackRecipient }, h);
   const microLamportsPerCu = BigInt(Math.floor((priorityLamports * 1e6) / cuLimit));

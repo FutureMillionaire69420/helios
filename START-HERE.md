@@ -128,7 +128,7 @@ his-sell+10s   120 trades   45 wins   -0.0800 SOL
    - **Auto buy + auto sell**: the robot buys when Decu buys and sells **everything** the moment he
      first sells. At 15 seconds: if the trade reached **+15%** by then it sells; if it never did, it
      keeps holding until Decu sells (and sells after 10 minutes at most).
-   - **In both styles: if a trade is ever down 15%, the robot sells everything at once (stop-loss).**
+   - **In both styles: if the coin falls 20% from the robot's entry price (fees ignored), it sells everything at once (stop-loss).**
    - **Auto buy + manual sell**: the robot buys when Decu buys. When your phone says
      **"Decu SOLD a coin you hold"**, you sell that coin yourself in Phantom.
    - Both OFF = no new buys. Same from a terminal: `node copybot.mjs style auto|manual|off`.

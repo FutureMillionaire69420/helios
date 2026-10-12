@@ -71,6 +71,48 @@ export function summarize(records, { buySol = 0.1 } = {}) {
 }
 
 /** Short text of the summary for alerts and the status command. */
+// ===== MEMORY BANK =====
+// Every studied trade is grouped by what was known about it (Decu's buy size, how late the bot was,
+// how much more it paid than Decu, coin age, hour of day). For each group: trades, wins, average
+// FCAT. Over days this shows which kinds of Decu trades the bot wins and which it should skip.
+const BUCKETS = {
+  'Decu buy size': (r) => r.hisSol == null ? null : r.hisSol < 1 ? '<1 SOL' : r.hisSol < 2.5 ? '1-2.5 SOL' : r.hisSol < 4 ? '2.5-4 SOL' : '4+ SOL',
+  'bot late by': (r) => r.delaySec == null ? null : r.delaySec < 1 ? '<1s' : r.delaySec < 2 ? '1-2s' : r.delaySec < 3 ? '2-3s' : '3s+',
+  'paid above Decu': (r) => r.entryGap == null ? null : r.entryGap < 0.4 ? '<40%' : r.entryGap < 0.7 ? '40-70%' : r.entryGap < 1 ? '70-100%' : '100%+',
+  'coin age': (r) => r.coin?.ageSec == null ? null : r.coin.ageSec < 120 ? '<2 min' : r.coin.ageSec < 600 ? '2-10 min' : '10 min+',
+  'hour (UTC)': (r) => (r.time ? `${String(new Date(r.time).getUTCHours()).padStart(2, '0')}h` : null),
+};
+export function memoryBank(records) {
+  const rs = records.filter((r) => Number.isFinite(r.fcat));
+  const out = [];
+  for (const [dimension, f] of Object.entries(BUCKETS)) {
+    const groups = new Map();
+    for (const r of rs) { const b = f(r); if (b == null) continue; const g = groups.get(b) || { dimension, bucket: b, trades: 0, wins: 0, sum: 0 }; g.trades++; g.wins += r.fcat > 0 ? 1 : 0; g.sum += r.fcat; groups.set(b, g); }
+    for (const g of groups.values()) out.push({ ...g, avgFcat: g.sum / g.trades });
+  }
+  return out;
+}
+/** Groups with enough trades to mean something, best and worst first. */
+export function memoryInsights(records, minTrades = 5) {
+  const bank = memoryBank(records).filter((g) => g.trades >= minTrades).sort((a, b) => b.avgFcat - a.avgFcat);
+  return { best: bank.slice(0, 2), worst: bank.slice(-2).reverse(), all: bank };
+}
+
+/** The bot's own notes on one finished trade: what happened, what each rule would have done. */
+export function tradeNotes(rec, records, { stopLossPct = 20, gainGatePct = 15, maxPayPct = 60 } = {}) {
+  const n = [];
+  const c = rec.curve || [];
+  if (rec.delaySec != null || rec.entryGap != null) n.push(`Late by ${rec.delaySec ?? '?'}s and paid ${pct(rec.entryGap)} more per token than Decu${rec.entryGap > 0.9 ? ' (very high: most of his move was gone)' : rec.entryGap != null && rec.entryGap < 0.4 ? ' (good entry)' : ''}.`);
+  n.push(rec.hisSoldAtSec != null ? `Decu sold ${rec.hisSoldAtSec}s after the bot's buy.` : 'Decu was still holding at 15s.');
+  if (rec.btsab != null) n.push(`Best moment: ${rec.btsab}s at ${pct(rec.peak)}; ${rec.peak >= gainGatePct / 100 ? `reached +${gainGatePct}% → the 15 s exit applies` : `never +${gainGatePct}% → the bot holds for his sell`}.`);
+  const base = c.find((v) => v != null);
+  if (base != null) { const hit = c.findIndex((v) => v != null && (1 + v) / (1 + base) - 1 <= -stopLossPct / 100); n.push(hit >= 0 ? `Organic -${stopLossPct}% stop would sell at ${hit}s.` : `Organic -${stopLossPct}% stop not hit in 15s.`); }
+  if (rec.entryGap != null) n.push(`A max-pay guard of +${maxPayPct}% above Decu would have ${rec.entryGap > maxPayPct / 100 ? 'SKIPPED' : 'allowed'} this buy (FCAT ${pct(rec.fcat)}).`);
+  const size = BUCKETS['Decu buy size'](rec);
+  if (size) { const g = memoryBank(records).find((x) => x.dimension === 'Decu buy size' && x.bucket === size); if (g && g.trades >= 3) n.push(`Memory: Decu buys of ${size} → ${g.wins}/${g.trades} won, avg FCAT ${pct(g.avgFcat)}.`); }
+  return n;
+}
+
 export function summaryText(sm) {
   if (!sm.trades) return 'No studied trades yet.';
   const b = sm.bestSecond, t = sm.bestTakeProfit, ts = sm.bestTpSl;
@@ -90,7 +132,8 @@ export function summaryText(sm) {
  * createStudy({file, quoteSell, notify, meta, ...}).start({...}) after each confirmed bot buy.
  * leaderSell(mint, {time, sol, soldRaw}) records his first sell during the window.
  */
-export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, log = () => {} }) {
+export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, notesOpts = {}, log = () => {} }) {
+  const memoryLines = (rs) => { const m = memoryInsights(rs); if (!m.all.length) return []; const f = (g) => `${g.dimension} ${g.bucket}: ${g.wins}/${g.trades} won, avg FCAT ${pct(g.avgFcat)}`; return ['Memory bank (groups with 5+ trades):', ...m.best.map((g) => '▲ ' + f(g)), ...m.worst.filter((g) => !m.best.includes(g)).map((g) => '▼ ' + f(g))]; };
   const records = [];
   try {
     for (const line of fs.readFileSync(file, 'utf8').split('\n')) if (line.trim()) records.push(JSON.parse(line));
@@ -125,6 +168,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
       hisSoldAtSec: st.hisSell?.atSec ?? null, bandSol: st.his.sol > 0 ? st.his.sol * bandPct : null,
       coin: m ? { holders: m.holders ?? null, marketCapUsd: m.marketCapUsd ?? null, ageSec: m.createdTime ? Math.round(st.startedAt / 1000 - m.createdTime) : null } : null,
     };
+    rec.notes = tradeNotes(rec, [...records, rec], notesOpts);
     records.push(rec);
     if (records.length > 5000) records.shift();
     try { fs.appendFileSync(file, JSON.stringify(rec) + '\n', { mode: 0o600 }); } catch (e) { log(`study journal unavailable: ${e.message}`); }
@@ -141,7 +185,10 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
         `Every second: ${curve.map((v, s) => `${s}:${v == null ? '—' : (v * 100).toFixed(0)}`).join(' ')}`,
         rec.coin ? `Coin: ${rec.coin.holders ?? '?'} holders, mcap ${rec.coin.marketCapUsd ? `$${Math.round(rec.coin.marketCapUsd).toLocaleString('en-US')}` : '?'}, age ${rec.coin.ageSec != null ? `${Math.round(rec.coin.ageSec / 60)} min` : '?'}` : null,
         '',
+        'Notes:', ...rec.notes.map((x) => '• ' + x),
+        '',
         summaryText(summarize(records, { buySol })),
+        ...memoryLines(records),
         mode === 'live' ? '' : 'No real money used.',
         `Token: ${st.mint}`,
       ].filter((x) => x != null).join('\n');

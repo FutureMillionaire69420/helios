@@ -78,20 +78,28 @@ test('auto-sell style: never reached +15% -> keeps holding until Decu sells', as
   assert.equal(r.engine.d.positions[MINT].raw, '0', 'sold at his sell');
 });
 
-test('stop-loss: down 15% -> sells everything at once, in both styles', async (t) => {
+test('organic stop-loss: fees at entry ignored; a further -20% move sells everything (both styles)', async (t) => {
   for (const style of ['auto', 'manual']) {
-    const {r, ws} = await bot(t, {MAX_HOLD_SEC: '15', MONITOR_MS: '20'}, async () => 0.08); // ~-23%
+    let n = 0; // starts -8% after fees (0.095), stays there, then the coin itself falls 25%
+    const {r, ws} = await bot(t, {MAX_HOLD_SEC: '15', MONITOR_MS: '20'}, async () => (n++ < 3 ? 0.095 : 0.071));
     r.engine.style(style);
     await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
-    await sleep(150); await r.engine.idle();
+    await sleep(200); await r.engine.idle();
     assert.equal(r.engine.d.positions[MINT].raw, '0', `${style}: stop-loss sold`);
-    assert.ok(r.engine.d.events.some((e) => e.type === 'exit-rule' && e.rule === 'stoploss'));
+    const ev = r.engine.d.events.find((e) => e.type === 'exit-rule' && e.rule === 'stoploss');
+    assert.ok(ev && ev.move <= -0.2 && ev.move > -0.3, JSON.stringify(ev));
     r.stop();
   }
 });
 
-test('stop-loss can be limited to the auto style', async (t) => {
-  const {r, ws} = await bot(t, {MONITOR_MS: '20', STOP_LOSS_MANUAL: 'false'}, async () => 0.08);
+test('organic stop ignores the entry fee dip; can be limited to the auto style', async (t) => {
+  const flat = await bot(t, {MONITOR_MS: '20', MAX_HOLD_SEC: '15'}, async () => 0.08); // -21% after fees, but flat
+  flat.r.engine.style('auto');
+  await flat.ws(fx.buy.signature, 'ws', fx.buy.logs); await flat.r.engine.idle(); await sleep(150);
+  assert.equal(flat.r.engine.d.positions[MINT].raw, '1000000', 'fee dip alone does not trigger the organic stop');
+  flat.r.stop();
+  let n = 0;
+  const {r, ws} = await bot(t, {MONITOR_MS: '20', STOP_LOSS_MANUAL: 'false'}, async () => (n++ < 2 ? 0.1 : 0.06));
   r.engine.style('manual');
   await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
   await sleep(150); await r.engine.idle();
@@ -119,4 +127,32 @@ test('after a restart, held coins are watched again: stop-loss still protects th
   assert.equal(again.r.engine.d.positions[MINT].raw, '1000000', 'past 15 s without a known +15%: held for his sell');
   price = 0.08; await sleep(150); await again.r.engine.idle();
   assert.equal(again.r.engine.d.positions[MINT].raw, '0', 'stop-loss sold it');
+});
+
+test('Solscan gap report: grouped, says what the trade was, no false alarm right after start', async (t) => {
+  const alerts = [];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-gap-')), saved = {...process.env};
+  Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: 'gap-test-token-24-characters-xx', STUDY: 'false', GAP_GRACE_SEC: '0', GAP_ALERT_SEC: '0.05'});
+  let ss;
+  const LEADER = config.leader;
+  const launchLab = {blockTime: Math.floor(Date.now() / 1000) - 12, slot: 1, transaction: {signatures: ['g'], message: {accountKeys: [{pubkey: LEADER, signer: true}]}},
+    meta: {err: null, fee: 5005000, logMessages: ['Program FLASHX8DrLbgeR8FcfNV1F5krxYcYMUdBkrP1EPBtxB9 invoke [1]', 'Program LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj invoke [2]'],
+      preBalances: [10e9], postBalances: [10e9 - 265005000], preTokenBalances: [], postTokenBalances: [{owner: LEADER, mint: '5dzSbvLaunchLabCoin1111111111111111111111111', uiTokenAmount: {amount: '2313951000000', decimals: 6, uiAmountString: '2313951'}}]}};
+  const k = {config: {...config, dryRun: true, logFile: path.join(dir, 'log')}, redact: (x) => x, detectBuy, detectSell, getSolUsd: async () => 116, notify: async (a) => alerts.push(a),
+    venueOf: (await import('./copybot.mjs')).venueOf, getTransaction: async () => launchLab, startWatcher: () => () => {}, startSolscanWatcher: (cb) => { ss = cb; return () => {}; }};
+  const r = await startRuntime(k);
+  t.after(() => { r.stop(); fs.rmSync(dir, {recursive: true, force: true}); for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]; Object.assign(process.env, saved); });
+  await ss('gap1', 'solscan'); await ss('gap2', 'solscan');
+  await sleep(150);
+  const a = alerts.find((x) => /Solscan caught 2 Decu trades/.test(x.title));
+  assert.ok(a, JSON.stringify(alerts.map((x) => x.title)));
+  assert.match(a.body, /BUY 5dzSbv… 0\.260 SOL on Raydium LaunchLab, 1\ds late: buy on Raydium LaunchLab: skipped \(bot copies pump.fun coins only/);
+});
+
+test('max-pay guard: paper buy refused when the price is already far above Decu', async (t) => {
+  const {r, ws} = await bot(t, {MAX_PAY_ABOVE_DECU_PCT: '10'});
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  // his price 0.2444 SOL / 2.25e12 raw; the paper quote gives only 1e6 raw for 0.1 SOL -> far above him
+  assert.equal(r.engine.d.positions[MINT], undefined);
+  assert.ok(r.engine.d.events.some((e) => e.type === 'failed' && /above Decu's/.test(e.message)));
 });

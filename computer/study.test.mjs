@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {createStudy, summarize, summaryText} from './study.mjs';
+import {createStudy, summarize, summaryText, memoryBank, memoryInsights, tradeNotes} from './study.mjs';
 
 const tmp = (t) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-study-')); t.after(() => fs.rmSync(d, {recursive: true, force: true})); return path.join(d, 'study.jsonl'); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -78,4 +78,17 @@ test('memory survives restart: the journal is reloaded', async (t) => {
   await createStudy({file, quoteSell: async () => 0.11, stepMs: 1, feeSol: 0, slip: 0}).start({mint: 'R', cost: 0.1, raw: '1'});
   const again = createStudy({file, quoteSell: async () => 0.1});
   assert.equal(again.summary().trades, 1); assert.ok(again.summary().bestSecond.pnlSol > 0);
+});
+
+test('each trade gets notes; the memory bank groups trades and finds the best and worst kinds', () => {
+  const mk = (hisSol, gap, fcat, i) => ({time: new Date(Date.UTC(2026, 9, 11, 17, i)).toISOString(), hisSol, delaySec: 1.7, entryGap: gap, fcat, curve: [-0.09, -0.12, -0.3, 0.1], btsab: 3, peak: 0.1, hisSoldAtSec: null, coin: {ageSec: 200}});
+  const rs = [...Array(6)].map((_, i) => mk(5, 0.3, 0.1, i)).concat([...Array(6)].map((_, i) => mk(2.9, 1.1, -0.2, 10 + i)));
+  const bank = memoryBank(rs);
+  const big = bank.find((g) => g.dimension === 'Decu buy size' && g.bucket === '4+ SOL'); assert.equal(big.trades, 6); assert.equal(big.wins, 6);
+  const ins = memoryInsights(rs); assert.ok(ins.best[0].avgFcat > 0); assert.ok(ins.worst[0].avgFcat < 0);
+  const notes = tradeNotes(rs[11], rs, {stopLossPct: 20, gainGatePct: 15, maxPayPct: 60});
+  assert.ok(notes.some((n) => /Late by 1.7s and paid \+110.0% more/.test(n)), notes.join('|'));
+  assert.ok(notes.some((n) => /Organic -20% stop would sell at 2s/.test(n)), notes.join('|'));
+  assert.ok(notes.some((n) => /max-pay guard of \+60% above Decu would have SKIPPED/.test(n)));
+  assert.ok(notes.some((n) => /Memory: Decu buys of 2.5-4 SOL → 0\/6 won/.test(n)));
 });

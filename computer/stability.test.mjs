@@ -7,7 +7,7 @@ import net from 'node:net';
 import {spawn} from 'node:child_process';
 import {Engine} from './engine.mjs';
 import {startRuntime} from './runtime.mjs';
-import {config, setFetch, rpc, relevantLogs, detectBuy, detectSell} from './copybot.mjs';
+import {config, setFetch, rpc, relevantLogs, venueOf, detectBuy, detectSell} from './copybot.mjs';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -154,4 +154,11 @@ test('state saved before the auto-copy switch existed keeps copying', (t) => {
   const dir = tmp(t), file = path.join(dir, 's.json');
   fs.writeFileSync(file, JSON.stringify({version: 2, mode: 'paper', paused: false, daily: {}, seen: {}, positions: {}, jobs: {}, queues: {}, events: []}));
   assert.equal(new Engine({file, config: {mode: 'paper', timezone: 'UTC', autoCopy: true}, adapter: {}}).d.autoCopy, true);
+});
+
+test("Decu's non-pump.fun trades (LaunchLab via his FLASHX router) pass the filter; the spam does not", () => {
+  const ll = ['Program FLASHX8DrLbgeR8FcfNV1F5krxYcYMUdBkrP1EPBtxB9 invoke [1]', 'Program LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj invoke [2]'];
+  assert.equal(relevantLogs(ll), true); assert.equal(venueOf(ll), 'Raydium LaunchLab');
+  assert.equal(venueOf(['Program 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P invoke [2]']), 'pump.fun');
+  assert.equal(relevantLogs(['Program DhpyNWkdxFh3DRPsBrwRwrK3TYC5t7Q4arnSvf3t84HY invoke [1]']), false);
 });

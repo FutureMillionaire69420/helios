@@ -99,7 +99,7 @@ test('buys paid with PUMP tokens are classified instead of silently ignored', ()
 test('runtime counts which provider saw each trade first and alerts on Helius gaps', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-providers-')); t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
   const saved = {...process.env};
-  Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: 'provider-test-token-24-characters'});
+  Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: 'provider-test-token-24-characters', GAP_GRACE_SEC: '0'});
   let ws, ss;
   const k = {config: {...config, dryRun: true, logFile: path.join(dir, 'log')}, redact: (x) => x, detectBuy, detectSell, getSolUsd: async () => 100,
     getTransaction: async (sig) => ({...pumpPairedBuy, transaction: {...pumpPairedBuy.transaction, signatures: [sig]}}),

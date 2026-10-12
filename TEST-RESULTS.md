@@ -149,3 +149,17 @@ Every held coin is priced once a second. Down 15% at any moment -> sell everythi
 Auto-sell style at 15 s: reached +15% by then -> sell; never reached it -> hold until Decu sells,
 with a 10-minute limit. His sell always exits at once. Coins still held after a restart are watched
 again. Phone alert for each rule. 72/72 tests (exit rules tested on his real logs), demo runs pass.
+
+## Gap alerts, organic stop, max-pay guard, memory bank (Oct 12, Claude)
+- Bug found from the live gap alerts: Decu also trades Raydium LaunchLab (bonk.fun) coins through his
+  FLASHX router; those logs have no pump.fun program, so the websocket filter dropped them and only the
+  Solscan backup saw them. The filter now passes every venue/router he uses; the spam still does not.
+- Gap alerts now say what the trade was (side, coin, SOL, venue, how late, what the bot did), are
+  grouped into one phone message per 20 s, and are not raised in the first 90 s after a restart.
+- Stop-loss -20% measured from the bot's entry price (fees ignored).
+- MAX_PAY_ABOVE_DECU_PCT guard (off by default): paper refuses, live local builds enforce on-chain.
+- Every study alert carries the bot's notes on the trade and a memory bank (FCAT by Decu buy size,
+  lateness, price paid above Decu, coin age, hour); `study` prints the whole bank.
+- Safety check: its two network reads run in parallel (one round trip less, same checks).
+- His reference buy is now the first one big enough to copy (fixes "Decu bought 0.000 SOL").
+Result: 77/77 tests, both demo runs pass.

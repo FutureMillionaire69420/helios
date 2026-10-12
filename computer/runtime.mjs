@@ -78,11 +78,11 @@ export function alertFor(e, mode, leaderLabel='Decu') {
   if (e.type==='unresolved') return {title:`${tag}Trade outcome UNKNOWN`, body:`${e.message||''}\nThe bot keeps checking and will not double-trade.\nTx: ${e.signature||'?'}`, priority:5, tags:['warning'], click:e.signature?tx(e.signature):undefined};
   if (e.type==='unsupported' && e.kind==='paid-with-pump') return {title:`${tag}${leaderLabel} bought with PUMP tokens (not copied)`, body:`He paid with PUMP tokens he held, not SOL. This bot buys with SOL only, so it skipped this one.\nToken: ${e.mint}`, priority:2, tags:['eyes'], click:pump(e.mint)};
   if (e.type==='exit-rule') {
-    const p=e.pnl==null?'':` (${e.pnl>=0?'+':''}${(e.pnl*100).toFixed(1)}%)`;
-    const t={stoploss:[`Stop-loss: selling ${short(e.mint)}${p}`,'Down 15% or more: selling everything now.',4,'stop_sign'],'gain-target':[`+15% reached: selling ${short(e.mint)}${p}`,'It hit +15% within 15 s: selling at the 15 s mark.',3,'moneybag'],'hold-until-his-sell':[`Holding ${short(e.mint)} until ${leaderLabel} sells${p}`,'Never reached +15% in the first 15 s, so the bot waits for his sell (stop-loss still on).',2,'hourglass'],'hold-limit':[`Time limit: selling ${short(e.mint)}${p}`,'Held 10 minutes without his sell: selling everything.',3,'alarm_clock']}[e.rule];
+    const p=e.pnl==null?'':` (${e.pnl>=0?'+':''}${(e.pnl*100).toFixed(1)}% incl. fees)`;
+    const t={stoploss:[`Stop-loss: selling ${short(e.mint)}${p}`,`The coin fell ${e.move!=null?(e.move*100).toFixed(0)+'%':'20%+'} from the bot's entry price: selling everything now.`,4,'stop_sign'],'gain-target':[`+15% reached: selling ${short(e.mint)}${p}`,'It hit +15% within 15 s: selling at the 15 s mark.',3,'moneybag'],'hold-until-his-sell':[`Holding ${short(e.mint)} until ${leaderLabel} sells${p}`,'Never reached +15% in the first 15 s, so the bot waits for his sell (stop-loss still on).',2,'hourglass'],'hold-limit':[`Time limit: selling ${short(e.mint)}${p}`,'Held 10 minutes without his sell: selling everything.',3,'alarm_clock']}[e.rule];
     if (t) return {title:`${tag}${t[0]}`, body:`${t[1]}\nToken: ${e.mint}`, priority:t[2], tags:[t[3]], click:pump(e.mint)};
   }
-  if (e.type==='provider-gap') return {title:`${tag}Helius missed a ${leaderLabel} trade`, body:`Solscan caught it and the bot processed it late.\nTx: ${e.leaderSignature}`, priority:3, tags:['satellite'], click:tx(e.leaderSignature)};
+  if (e.type==='provider-gap' && false) return {title:`${tag}Helius missed a ${leaderLabel} trade`, body:`Solscan caught it and the bot processed it late.\nTx: ${e.leaderSignature}`, priority:3, tags:['satellite'], click:tx(e.leaderSignature)};
   if (e.type==='alerts-on') return {title:`${tag}Alerts ON`, body:'Phone alerts resumed.', priority:2, tags:['bell']};
   if (e.type==='paused' || e.type==='resumed') return {title:`${tag}Bot ${e.type==='paused'?'PAUSED (no new buys)':'RESUMED'}`, body:'Changed from the dashboard.', priority:3, tags:['pause_button']};
   if (e.type==='started') return {title:`${tag}Copy bot started (${mode.toUpperCase()})`, body:e.note||'', priority:2, tags:['robot']};
@@ -150,7 +150,7 @@ export async function startRuntime(k, {demo=false}={}) {
   const leaderBuys=new Map();
   const study = demo || val('STUDY','true')==='false' || !k.quoteSell ? null : createStudy({
     file:val('STUDY_FILE',path.resolve(`study-${c.mode}.jsonl`)), quoteSell:k.quoteSell, mode:c.mode, buySol:c.buySol,
-    feeSol:k.config.tipSol+k.config.priorityFeeSol, windowSec:number('STUDY_WINDOW_SEC',15), bandPct:number('BAND_PCT',10)/100, label:k.config.leaderLabel,
+    feeSol:k.config.tipSol+k.config.priorityFeeSol, windowSec:number('STUDY_WINDOW_SEC',15), bandPct:number('BAND_PCT',10)/100, notesOpts:{stopLossPct:number('STOP_LOSS_PCT',20),gainGatePct:number('GAIN_GATE_PCT',15),maxPayPct:number('MAX_PAY_ABOVE_DECU_PCT',0)||60}, label:k.config.leaderLabel,
     meta:k.tokenMeta||null, notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, log:m=>engine?.event('connection',{message:m})});
   const receipt = async job => {
     const tx = await k.getTransaction(job.signature,2);
@@ -169,6 +169,8 @@ export async function startRuntime(k, {demo=false}={}) {
     if(job.side==='buy') {
       const q=demo?{raw:Math.floor(job.sol*1e9)}:await k.quoteBuy(job.mint,job.sol*0.995);
       if(!q?.raw) return {status:'failed',error:'no paper buy quote'};
+      const ref=leaderBuys.get(job.mint), maxPay=number('MAX_PAY_ABOVE_DECU_PCT',0)/100;
+      if(maxPay>0 && ref?.sol>0 && ref.raw>0) { const gap=(job.sol/q.raw)/(ref.sol/ref.raw)-1; if(gap>maxPay) return {status:'failed',error:`price already ${Math.round(gap*100)}% above Decu's (MAX_PAY_ABOVE_DECU_PCT ${Math.round(maxPay*100)}%): not bought`}; }
       if(job.quoteRaw && q.raw<job.quoteRaw/(1+k.config.slippagePct/100)) return {status:'failed',error:'paper landing price exceeded slippage limit'};
       return {status:'confirmed',rawDelta:BigInt(Math.floor(q.raw)).toString(),solDelta:-job.sol-fee};
     }
@@ -209,7 +211,10 @@ export async function startRuntime(k, {demo=false}={}) {
           try {
             const t0=Date.now();
             const tip=k.config.tipSol>0 ? k.TIP_ACCOUNTS[Math.floor(Math.random()*k.TIP_ACCOUNTS.length)] : null;
-            const {bytes}=buildBuyTransaction({user:k.kp.publicKey,ctx:{...ctx,feeRecipient:pickFeeRecipient(local.global,ctx.mayhem),buybackRecipient:pickBuybackRecipient(local.global)},lamports:Math.floor(job.sol*1e9),slippagePct:k.config.slippagePct,blockhash,priorityLamports:Math.round(k.config.priorityFeeSol*1e9),tipAccount:tip,tipLamports:Math.round(k.config.tipSol*1e9)},local.helpers);
+            const ref=leaderBuys.get(job.mint), maxPay=number('MAX_PAY_ABOVE_DECU_PCT',0)/100;
+            // the chain enforces the max-pay guard: the buy fails (fee only) if the price ran past it
+            const minTokensFloor=maxPay>0 && ref?.sol>0 && ref.raw>0 ? BigInt(Math.floor(job.sol/((ref.sol/ref.raw)*(1+maxPay)))) : 0n;
+            const {bytes}=buildBuyTransaction({user:k.kp.publicKey,minTokensFloor,ctx:{...ctx,feeRecipient:pickFeeRecipient(local.global,ctx.mayhem),buybackRecipient:pickBuybackRecipient(local.global)},lamports:Math.floor(job.sol*1e9),slippagePct:k.config.slippagePct,blockhash,priorityLamports:Math.round(k.config.priorityFeeSol*1e9),tipAccount:tip,tipLamports:Math.round(k.config.tipSol*1e9)},local.helpers);
             const signed=k.signTransaction(bytes,k.kp);
             await k.validateTrade(signed.bytes,job,balance);
             status.localBuilds=(status.localBuilds||0)+1; status.lastLocalBuildMs=Date.now()-t0;
@@ -269,12 +274,14 @@ export async function startRuntime(k, {demo=false}={}) {
   //     holding until Decu sells (the stop-loss still applies).
   //  3. Auto-sell style, HOLD_LIMIT_SEC (600): sell whatever happens, in case his sell is missed.
   //  His sell always exits at once in auto-sell style (SELL_ALL_ON_LEADER_SELL).
-  const stopLoss=number('STOP_LOSS_PCT',15)/100, gainGate=number('GAIN_GATE_PCT',15)/100;
+  // STOP_LOSS_FROM=entry (default): the stop measures the coin's own move from the price right after
+  // the bot's buy ("organic"), ignoring the fees and price impact already paid. =cost: from cost.
+  const stopLoss=number('STOP_LOSS_PCT',20)/100, gainGate=number('GAIN_GATE_PCT',15)/100, stopFromEntry=val('STOP_LOSS_FROM','entry')!=='cost';
   const holdLimitMs=number('HOLD_LIMIT_SEC',600)*1000, stopLossManual=val('STOP_LOSS_MANUAL','true')==='true';
   const exitFee=k.config.tipSol+k.config.priorityFeeSol, monitors=new Map();
-  const exitNow=(mint,p,rule,pnl)=>{
+  const exitNow=(mint,p,rule,pnl,move)=>{
     monitors.delete(mint);
-    engine.event('exit-rule',{mint,rule,pnl});
+    engine.event('exit-rule',{mint,rule,pnl,move});
     return engine.ingest({sig:`${rule}-${mint}-${p.boughtAt||0}`,side:'sell',mint,soldRaw:'1',beforeRaw:'1',time:Date.now()/1000,decimals:mintDecimals.get(mint)??6,force:true})
       .catch(err=>engine.event('error',{mint,message:`${rule} sell: ${err.message}`}));
   };
@@ -291,8 +298,9 @@ export async function startRuntime(k, {demo=false}={}) {
         const v=await Promise.race([k.quoteSell(mint,Number(p.raw)),new Promise(r=>setTimeout(()=>r(null),2500).unref?.())]);
         if(Number.isFinite(v) && p.costSol>0) pnl=(v*0.995-exitFee-p.costSol)/p.costSol;
       } catch {}
-      if(pnl!=null) { m.peak=Math.max(m.peak,pnl); m.last=pnl; }
-      if(pnl!=null && stopLoss>0 && pnl<=-stopLoss && (auto||stopLossManual)) return exitNow(mint,p,'stoploss',pnl);
+      if(pnl!=null) { m.peak=Math.max(m.peak,pnl); m.last=pnl; m.base??=pnl; }
+      const move=pnl==null?null:stopFromEntry?(1+pnl)/(1+m.base)-1:pnl;
+      if(move!=null && stopLoss>0 && move<=-stopLoss && (auto||stopLossManual)) return exitNow(mint,p,'stoploss',pnl,move);
       if(auto && maxHoldMs>0 && age>=maxHoldMs && !m.decided) {
         m.decided=true;
         if(m.peak>=gainGate) return exitNow(mint,p,'gain-target',pnl);
@@ -305,13 +313,33 @@ export async function startRuntime(k, {demo=false}={}) {
   };
   // after a restart, keep watching coins still held (peak unknown: treated as never reached +15%)
   for(const [mint,p] of Object.entries(engine.d.positions)) if(BigInt(p.raw||'0')>0n) scheduleMaxHold(mint);
-  const inFlight=new Set(), completed=new Set(), delivered=new Set(), fastDone=new Set();
+  const inFlight=new Set(), completed=new Set(), delivered=new Set(), fastDone=new Set(), gapSigs=new Set();
+  const runtimeStart=Date.now();
+  // GAP REPORT: a Decu trade Solscan saw before Helius. Says what it was, where, how late, and what
+  // the bot did; alerts are grouped (one phone message per GAP_ALERT_SEC) so a burst is one alert.
+  let gapBuffer=[], gapTimer=null;
+  const reportGap=(sig,tx,signals)=>{
+    status.gaps++;
+    const s0=signals[0], logs=tx.meta?.logMessages||[], venue=k.venueOf?k.venueOf(logs):'?';
+    const lateSec=tx.blockTime?Math.round(Date.now()/1000-tx.blockTime):null;
+    const action=!s0?'no copyable SOL trade':s0.side==='sell'?(engine.d.positions[s0.mint]?'sell of a coin the bot holds: exit rules applied now':'sell of a coin the bot does not hold'):(!s0.pump&&c.pumpOnly?`buy on ${venue}: skipped (bot copies pump.fun coins only, PUMP_ONLY)`:lateSec!=null&&lateSec>c.maxAge?`buy ${lateSec}s old: too late to copy (limit ${c.maxAge}s)`:'pump.fun buy: processed by the copy rules now');
+    const g={leaderSignature:sig,side:s0?.side||'other',mint:s0?.mint||null,sol:s0?.sol??null,venue,lateSec,action};
+    engine.event('provider-gap',g); gapBuffer.push(g);
+    if(!gapTimer) { gapTimer=setTimeout(()=>{
+      gapTimer=null; const list=gapBuffer; gapBuffer=[];
+      if(demo || !k.notify || engine.d.alertsOff || !list.length) return;
+      const line=x=>`${x.side.toUpperCase()} ${x.mint?x.mint.slice(0,6)+'…':''}${x.sol!=null?` ${x.sol.toFixed(3)} SOL`:''} on ${x.venue}, ${x.lateSec??'?'}s late: ${x.action}`;
+      const tag=c.mode==='live'?'':c.mode==='paper'?'[PAPER] ':'[DEMO] ';
+      Promise.resolve(k.notify({title:`${tag}Solscan caught ${list.length} Decu trade${list.length>1?'s':''} Helius missed`,body:list.slice(0,8).map(line).join('\n')+(list.length>8?`\n…and ${list.length-8} more`:'')+'\nThe Solscan backup worked; nothing was lost.',priority:list.some(x=>/processed by the copy rules|exit rules/.test(x.action))?4:2,tags:['satellite'],click:`https://solscan.io/tx/${list[0].leaderSignature}`})).catch(()=>{});
+    },number('GAP_ALERT_SEC',20)*1000); gapTimer.unref?.(); }
+  };
   // Exit rule for the auto-sell style: sell everything at his FIRST sell (SELL_ALL_ON_LEADER_SELL),
   // and if he has not sold MAX_HOLD_SEC (15) after the bot's buy, sell anyway. 0 = no time limit.
   const sellAll=val('SELL_ALL_ON_LEADER_SELL','true')==='true', maxHoldSec=number('MAX_HOLD_SEC',15);
   const mintDecimals=new Map();
   const remember=(map,key,v)=>{map.set(key,v);if(map.size>2000)map.delete(map.keys().next().value);};
-  const recordLeaderBuy=s=>{ if(!leaderBuys.has(s.mint)) remember(leaderBuys,s.mint,{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time}); };
+  // His reference buy for PCAT / entry gap / max-pay guard: the first one big enough to be copied.
+  const recordLeaderBuy=s=>{ const old=leaderBuys.get(s.mint); if(!old || (old.usd<c.minLeaderUsd && s.usd>=c.minLeaderUsd)) remember(leaderBuys,s.mint,{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time}); };
   let lastErrorEventAt=0, hiddenErrors=0;
   const onSignature=async(sig,source='poll',logs)=>{
     // Which provider saw each leader transaction first. Solscan arriving first means both Helius
@@ -319,7 +347,8 @@ export async function startRuntime(k, {demo=false}={}) {
     if(!delivered.has(sig)) {
       delivered.add(sig); if(delivered.size>20000) delivered.delete(delivered.values().next().value);
       status.firstSeen[source]=(status.firstSeen[source]||0)+1;
-      if(source==='solscan') {status.gaps++;engine.event('provider-gap',{leaderSignature:sig,message:'Solscan delivered a leader transaction before Helius'});}
+      // A restart replays Solscan's last few minutes before Helius has caught up: not a gap.
+      if(source==='solscan' && Date.now()-runtimeStart>number('GAP_GRACE_SEC',90)*1000) gapSigs.add(sig);
     }
     // FAST PATH: his pump.fun trade decoded straight from the websocket logs (processed commitment),
     // before the transaction is confirmed or downloaded. The full path below still runs and is deduplicated.
@@ -362,6 +391,7 @@ export async function startRuntime(k, {demo=false}={}) {
         else { study?.leaderSell(s.mint,s); if(sellAll) { s.soldRaw='1'; s.beforeRaw='1'; } }
         await engine.ingest(s);
       }
+      if(gapSigs.delete(sig)) reportGap(sig,tx,signals);
       completed.add(sig); status.lastSignal=new Date().toISOString();
       if(completed.size>10000) completed.delete(completed.values().next().value);
     } catch(e) {
@@ -420,6 +450,7 @@ export async function startRuntime(k, {demo=false}={}) {
           wallet:{publicKey:c.wallet||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true}};
         res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean(snap)));
       }
+      if(url.pathname==='/api/memory' && req.method==='GET') {const {memoryBank,memoryInsights}=await import('./study.mjs');res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?{bank:memoryBank(study.records),insights:memoryInsights(study.records)}:{bank:[]}));}
       if(url.pathname==='/api/study' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?{...study.summary(),text:summaryText(study.summary()),active:[...study.active.keys()]}:{trades:0,text:'Study is off.'}));}
       if(url.pathname==='/api/wallet' && req.method==='GET') {
         res.writeHead(200,{'Content-Type':'application/json'});
