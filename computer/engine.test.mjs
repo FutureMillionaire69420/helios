@@ -15,7 +15,7 @@ function fixture(t, overrides={}, conf={}){
   return new Engine({file:path.join(dir,'state.json'),config:{...cfg,...conf},adapter});
 }
 test('proportional sizing uses spendable balance and leader pre-balance',()=>{assert.equal(sizeBuy(cfg,buy(),0.5,0,0),0.00947);assert.throws(()=>sizeBuy(cfg,{...buy(),leaderBalanceSol:0},0.5,0,0),/pre-trade/);});
-test('sizing caps trade, daily budget, fees, and pending reserves',()=>{assert.equal(sizeBuy({...cfg,minBuy:0.00001},{...buy(),sol:100},0.5,0,0),0.05);assert.equal(sizeBuy(cfg,buy(),0.5,0,0.995),0.005);assert.throws(()=>sizeBuy(cfg,buy(),0.5,0.47,0),/budget/);});
+test('sizing caps trade, daily budget, fees, and pending reserves',()=>{assert.equal(sizeBuy({...cfg,minBuy:0.00001},{...buy(),sol:100},0.5,0,0),0.05);assert.equal(sizeBuy(cfg,buy(),0.5,0,0.995),0.005);assert.throws(()=>sizeBuy(cfg,buy(),0.5,0.47,0),/too small|balance too low/);assert.throws(()=>sizeBuy({...cfg,sizing:'fixed'},buy(),0.5,0,0.999),/daily spending cap reached/);});
 test('integer partial sells preserve precision above Number safe range',()=>{const held=9007199254740993000n;assert.equal(fractionRaw(held,25n,100n),held/4n);assert.equal(fractionRaw(held,200n,100n),held);});
 test('duplicate signature buys exactly once',async t=>{let sends=0;const e=fixture(t,{send:async()=>{sends++;return {status:'confirmed',rawDelta:'1000',solDelta:-0.01};}});await Promise.all([e.ingest(buy()),e.ingest(buy())]);await e.idle();assert.equal(sends,1);assert.equal(e.d.positions.coin.raw,'1000');});
 test('25% sell followed by full remaining exit',async t=>{const e=fixture(t);await e.ingest(buy());await e.idle();await e.ingest(sell());await e.idle();assert.equal(e.d.positions.coin.raw,'750');await e.ingest(sell('750','750','exit'));await e.idle();assert.equal(e.d.positions.coin.raw,'0');});
@@ -110,7 +110,7 @@ test('defaults follow the user rules: fixed 0.1 SOL, auto-sell off, ~$200 paper 
 test('paper mode closes nothing for real but values every position at quick and after-his-sell timings',async t=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'decu-paper-'));
   const saved={...process.env};
-  Object.assign(process.env,{ENGINE_STATE_FILE:path.join(dir,'engine.json'),PORT:'0',DASHBOARD_TOKEN:'',PAPER_QUICK_SELL_SEC:'0.05',PAPER_AFTER_HIS_SELL_SEC:'0',AUTO_SELL:'false',AUTO_COPY:'false',SIZING_MODE:'fixed'});
+  Object.assign(process.env,{ENGINE_STATE_FILE:path.join(dir,'engine.json'),PORT:'0',DASHBOARD_TOKEN:'',PAPER_QUICK_SELL_SEC:'0.05',PAPER_AFTER_HIS_SELL_SEC:'0',AUTO_SELL:'false',AUTO_COPY:'false',SIZING_MODE:'fixed',PAPER_MAX_PAY_PCT:'0',STALE_DATA_SEC:'0'});
   const alerts=[];let sent=0;
   const k={config:{...config,dryRun:true,buySol:0.1,dailyCapSol:1,logFile:path.join(dir,'log'),tipSol:0.001,priorityFeeSol:0.0005,paperLandMs:0,slippagePct:20},
     notify:async a=>{alerts.push(a);},redact:x=>x,startWatcher:()=>()=>{},
@@ -145,10 +145,13 @@ test('two trading toggles: auto/manual are exclusive, both off stops buys',async
   await e.ingest({...sell('500','500','b3'),mint:'b'});await e.idle();assert.equal(e.d.positions.b.raw,'0','held coins keep their selling style');
 });
 
-test('paper never runs out of budget: every copyable buy is studied (live keeps the cap)',async t=>{
-  const e=fixture(t,{},{dailyCap:0.1,maxBuy:0.05,paperUnlimited:true,paperBalance:0});
+test('paper never runs out of pretend balance; the daily spending cap applies in paper like live',async t=>{
+  const e=fixture(t,{},{dailyCap:1e9,maxBuy:0.05,paperUnlimited:true,paperBalance:0});
   for(let i=0;i<5;i++) await e.ingest(buy('m'+i,'s'+i));
-  await e.idle(); assert.equal(Object.keys(e.d.positions).length,5);
+  await e.idle(); assert.equal(Object.keys(e.d.positions).length,5,'balance 0 never blocks paper');
+  const capped=fixture(t,{},{dailyCap:0.1,maxBuy:0.05,paperUnlimited:true,paperBalance:0});
+  for(let i=0;i<5;i++) await capped.ingest(buy('m'+i,'s'+i));
+  await capped.idle(); assert.equal(Object.keys(capped.d.positions).length,2,'cap 0.1 SOL = two 0.05 buys');
   const saved={...process.env}; t.after(()=>{process.env=saved;});
   assert.equal(runtimeConfig({...config,dryRun:true}).paperUnlimited,true);
   assert.equal(runtimeConfig({...config,dryRun:false}).paperUnlimited,false,'live keeps its cap');
@@ -173,4 +176,30 @@ test('daily loss limit (off by default): after closed trades lose the limit, no 
   assert.equal(e.d.positions.b, undefined); assert.ok(e.d.events.some(x=>x.type==='skip'&&/daily loss limit/.test(x.reason)));
   const off=fixture(t,{},{sizing:'fixed',buySol:0.05,maxBuy:0.05}); off.d.dailyPnl={[off.day()]:-99};
   await off.ingest(buy('c','c1')); await off.idle(); assert.equal(off.d.positions.c.raw,'1000','no limit when DAILY_LOSS_LIMIT_SOL=0');
+});
+
+test('max 2 open coins: a third Decu buy is skipped until a slot frees up', async t => {
+  const e=fixture(t,{},{maxPositions:2,sizing:'fixed',buySol:0.05,maxBuy:0.05});
+  for(const m of ['a','b','c']) await e.ingest(buy(m,m+'1'));
+  await e.idle(); assert.deepEqual(Object.keys(e.d.positions).sort(),['a','b']);
+  assert.ok(e.d.events.some(x=>x.type==='skip'&&x.mint==='c'&&/max open positions reached \(2 coins\)/.test(x.reason)));
+  await e.ingest({...sell('1000','1000','a2'),mint:'a'}); await e.idle();
+  await e.ingest(buy('d','d1')); await e.idle(); assert.equal(e.d.positions.d.raw,'1000','slot freed after a coin was sold');
+});
+test('daily spending cap in dollars ($600), converted with Decu\'s own SOL price', async t => {
+  // his trade: 2 SOL = $300 -> $150/SOL -> $600 = 4 SOL; at 1.5 SOL a buy only 2 buys fit
+  const e=fixture(t,{},{mode:'live',dailyCap:Infinity,dailyCapUsd:600,sizing:'fixed',buySol:1.5,maxBuy:1.5});
+  e.a.balance=async()=>100;
+  for(const m of ['a','b','c']) await e.ingest(buy(m,m+'1'));
+  await e.idle(); assert.equal(Object.keys(e.d.positions).length,3,'third buy shrinks to the 1 SOL left');
+  assert.ok(Math.abs(e.d.daily[e.day()]-4)<1e-9);
+  await e.ingest(buy('d','d1')); await e.idle(); assert.equal(e.d.positions.d,undefined);
+  assert.ok(e.d.events.some(x=>x.type==='skip'&&/daily spending cap reached.*\$600/.test(x.reason)));
+});
+test('circuit-breaker gate from the runtime blocks new buys, never sells', async t => {
+  let reason='market data stale: Helius websocket down';
+  const e=fixture(t,{},{gate:()=>reason});
+  await e.ingest(buy('a','a1')); await e.idle(); assert.equal(e.d.positions.a,undefined);
+  reason=null; await e.ingest(buy('a','a2')); await e.idle(); assert.equal(e.d.positions.a.raw,'1000');
+  reason='blocked'; await e.ingest({...sell('1000','1000','a3'),mint:'a'}); await e.idle(); assert.equal(e.d.positions.a.raw,'0','sells ignore the gate');
 });

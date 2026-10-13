@@ -184,7 +184,7 @@ export function summaryText(sm) {
  * leaderSell(mint, {time, sol, soldRaw}) records his first sell during the window.
  * learnOpts go to the brain (learn.mjs): stopLossPct, gainGatePct, gateSec, maxPayPct, reportEvery.
  */
-export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, notesOpts = {}, learnOpts = {}, log = () => {} }) {
+export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, notesOpts = {}, learnOpts = {}, skippedAlerts = true, log = () => {} }) {
   const filterPct = notesOpts.maxPayPct ?? 60;
   const ruleOpts = { stopLossPct: notesOpts.stopLossPct ?? 20, gainGatePct: notesOpts.gainGatePct ?? 15, gateSec: learnOpts.gateSec ?? windowSec };
   const brain = createBrain({ buySol, ...ruleOpts, maxPayPct: learnOpts.maxPayPct ?? 0, reportEvery: learnOpts.reportEvery ?? 10, digestHours: learnOpts.digestHours ?? 24 });
@@ -271,7 +271,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
         mode === 'live' ? '' : 'No real money used.',
         `Token: ${st.mint}`,
       ].filter((x) => x != null).join('\n');
-      send({ title: `${tag}${st.shadow ? 'SKIPPED ' : ''}${name} FCAT ${pct(fcat)} | BTSAB ${btsab ?? '—'}s ${pct(peak)}`, body, priority: st.shadow ? 2 : 3, tags: ['bar_chart'], click: `https://pump.fun/coin/${st.mint}`, image: tradeChart(rec, ruleOpts.gainGatePct, ruleOpts.stopLossPct) });
+      if (!st.shadow || skippedAlerts) send({ title: `${tag}${st.shadow ? 'SKIPPED ' : ''}${name} FCAT ${pct(fcat)} | BTSAB ${btsab ?? '—'}s ${pct(peak)}`, body, priority: st.shadow ? 2 : 3, tags: ['bar_chart'], click: `https://pump.fun/coin/${st.mint}`, image: tradeChart(rec, ruleOpts.gainGatePct, ruleOpts.stopLossPct) });
       // What the brain decided is worth its own alert: new / confirmed / faded patterns, streaks,
       // level-ups, the learning report every 10 trades and the daily digest.
       for (const e of learned.events) send({ title: `${tag}${e.title}`, body: e.body + (mode === 'live' ? '' : '\nNo real money used.'), priority: e.priority, tags: e.tags, image: ['report', 'level', 'digest', 'streak'].includes(e.kind) ? historyChart(records) : undefined });

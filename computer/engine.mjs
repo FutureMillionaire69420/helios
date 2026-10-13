@@ -5,7 +5,7 @@ export function sizeBuy(c, signal, balance, reserved, spent) {
   if (c.sizing === 'proportional' && !(signal.leaderBalanceSol > 0)) throw new Error('leader pre-trade SOL balance unavailable');
   const desired = c.sizing === 'proportional' ? spendable * Math.min(1, signal.sol / signal.leaderBalanceSol) * c.multiplier : c.buySol;
   const sol = Math.floor(Math.max(0, Math.min(desired, c.maxBuy, spendable / (1 + c.slippage / 100), c.dailyCap - spent)) * 1e9) / 1e9;
-  if (sol < c.minBuy) throw new Error('trade too small or budget exhausted');
+  if (sol < c.minBuy) throw new Error(c.dailyCap - spent < c.minBuy ? `daily spending cap reached (${spent.toFixed(2)} of ${c.dailyCap.toFixed(2)} SOL today${c.dailyCapUsd ? `, $${c.dailyCapUsd}` : ''})` : 'trade too small or wallet balance too low');
   return sol;
 }
 
@@ -37,6 +37,8 @@ export class Engine {
     try { this.log(e); } catch (error) { console.error('event log unavailable:', error.message); }
   }
   lock(fn) { const p = this.serial.then(fn); this.serial = p.catch(() => {}); return p; }
+  /** Coins held plus buys being built/sent or queued. */
+  openCount() { const m = new Set(Object.entries(this.d.positions).filter(([,p]) => BigInt(p.raw || '0') > 0n).map(([k]) => k)); for (const j of Object.values(this.d.jobs)) if (j.side === 'buy') m.add(j.mint); for (const [k,q] of Object.entries(this.d.queues)) if (q?.some(x => x.side === 'buy')) m.add(k); return m.size; }
   reserved() { return Object.values(this.d.jobs).filter(j => j.side === 'buy').reduce((s,j) => s+j.reserveSol,0); }
   async ingest(s) {
     return this.lock(async () => {
@@ -53,6 +55,10 @@ export class Engine {
         else if (!s.pump && this.c.pumpOnly) reason = 'not a pump trade';
         else if (s.usd < this.c.minLeaderUsd) reason = 'leader buy below minimum';
         else if (this.c.oneBuy && (this.d.positions[s.mint] || this.d.jobs[s.mint] || this.d.queues[s.mint]?.some(x=>x.side==='buy'))) reason = 'already copied mint';
+        // MAX_OPEN_POSITIONS (2): coins held + buys in flight. A Decu buy over the limit is skipped (and still studied).
+        else if (this.c.maxPositions > 0 && this.openCount() >= this.c.maxPositions) reason = `max open positions reached (${this.c.maxPositions} coins)`;
+        // Circuit breakers from the runtime (stale market data, several failed buys in a row).
+        else if (this.c.gate && (reason = this.c.gate())) { /* reason set */ }
       } else if (!this.d.autoCopy && !s.force) {
         // Manual-sell style (auto copy OFF): never sell; alert the moment he sells a coin the bot holds,
         // so the user can sell by hand in Phantom.
@@ -86,7 +92,9 @@ export class Engine {
           if (s.side === 'buy') {
             if (this.d.paused) throw new Error('new buys paused');
             const balance = this.c.mode === 'live' ? await this.a.balance() : this.c.paperUnlimited ? Math.max(this.d.paperBalance, 1e6) : this.d.paperBalance;
-            job.sol = sizeBuy(this.c,s,balance,this.c.paperUnlimited ? 0 : this.reserved(),this.c.paperUnlimited ? 0 : this.d.daily[job.day] || 0);
+            // DAILY_CAP_USD (600): converted to SOL with Decu's own trade (his $ / his SOL), no extra API call.
+            const capSol = this.c.dailyCapUsd > 0 && s.usd > 0 && s.sol > 0 ? Math.min(this.c.dailyCap, this.c.dailyCapUsd / (s.usd / s.sol)) : this.c.dailyCap;
+            job.sol = sizeBuy({...this.c, dailyCap: capSol},s,balance,this.c.paperUnlimited ? 0 : this.reserved(),this.d.daily[job.day] || 0);
             job.reserveSol = job.sol * (1 + this.c.slippage/100) + this.c.feeBudget;
             this.d.daily[job.day] = (this.d.daily[job.day] || 0) + job.sol;
           } else {
@@ -169,7 +177,7 @@ export class Engine {
   mute(value) { this.d.alertsOff=value; this.event(value ? 'alerts-off' : 'alerts-on'); }
   snapshot() {
     const jobs = Object.values(this.d.jobs).map(({mint,side,phase,signature,sol,raw}) => ({mint,side,phase,signature,sol,raw}));
-    return {mode:this.c.mode,autoSell:this.c.autoSell,autoCopy:!!this.d.autoCopy,paused:this.d.paused,alertsOff:!!this.d.alertsOff,balance:this.c.mode === 'live' ? null : this.d.paperBalance,spent:this.d.daily[this.day()] || 0,cap:Number.isFinite(this.c.dailyCap)?this.c.dailyCap:null,pnlToday:this.d.dailyPnl?.[this.day()] || 0,lossLimit:this.c.dailyLossLimit || 0,reserved:this.reserved(),positions:this.d.positions,jobs,events:this.d.events.slice(-100)};
+    return {mode:this.c.mode,autoSell:this.c.autoSell,autoCopy:!!this.d.autoCopy,paused:this.d.paused,alertsOff:!!this.d.alertsOff,balance:this.c.mode === 'live' ? null : this.d.paperBalance,spent:this.d.daily[this.day()] || 0,cap:Number.isFinite(this.c.dailyCap)?this.c.dailyCap:null,pnlToday:this.d.dailyPnl?.[this.day()] || 0,lossLimit:this.c.dailyLossLimit || 0,open:this.openCount(),maxPositions:this.c.maxPositions || 0,capUsd:this.c.dailyCapUsd || 0,gate:this.c.gate?.() || null,reserved:this.reserved(),positions:this.d.positions,jobs,events:this.d.events.slice(-100)};
   }
   async idle() { await this.serial; while(this.tasks.size) await Promise.all([...this.tasks.values()]); }
 }

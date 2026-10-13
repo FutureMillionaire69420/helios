@@ -59,3 +59,19 @@ Your current exit rules are unchanged.
   - research numbers
   - the loss limit
   - the paper vs. live filter
+
+## v3.1 (your choices after the review)
+
+- **30% entry-premium filter, fail-closed.** No Decu price or no current price means no buy, in all three build paths (paper, local builder, PumpPortal). Paper uses the same filter, and skipped buys are still studied (no phone alert unless `SKIPPED_ALERTS=true`).
+- **At most 2 coins open at once** (`MAX_OPEN_POSITIONS=2`): held coins plus buys in progress.
+- **Daily spending cap of $600** (`DAILY_CAP_USD`), converted with Decu's own trade price, so no extra API call. Paper and live. No daily loss limit.
+- **Decu's sell must be confirmed** before the bot sells (`FAST_PATH_SELLS=false`). Buys keep the fast path.
+- **Stop-loss reliability:**
+  - prices checked every 0.5 s, each check gives up after 1.5 s
+  - 3 failed checks → alert; 6 failed checks → sell anyway
+  - sells allow 35% slippage
+  - a failed sell is retried 3 times at once, then **CAN'T SELL** is alerted and the bot keeps trying
+- **Stop-loss alerts:** STOP TRIGGERED → SELL SENT (live) → POSITION CLOSED, comparing the trigger with the real fill.
+- **Circuit breakers** (new buys only): 3 failed buys in a row → 10-minute pause. Helius websocket down for 30 s → no new buys until it is back.
+- **Dashboard:** open coins out of the maximum, spending against the $ cap, and why buys are blocked.
+- **Tests:** 97/97 pass (new: max positions, $ cap, breaker gate, confirmed-only sells, price-failure sell, sell retries and CAN'T SELL, close alerts).

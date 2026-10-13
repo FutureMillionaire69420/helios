@@ -107,9 +107,15 @@ Decu's Raydium LaunchLab / bonk.fun coins are ignored completely: no copy, no st
 
 **Two words used everywhere:**
 - **Execution latency**: seconds from Decu's buy to the bot's buy. The alert's *Latency:* line splits it into steps (seen, decode, decide, build, send, land) and shows the part that is only SIMULATED in paper (1 s).
-- **Entry premium**: how much more per token the bot paid than Decu. Live skips buys over **60%** (the entry-premium filter); paper buys everything and each alert says **TAKE** or **SKIP**.
+- **Entry premium**: how much more per token the bot paid than Decu. The bot skips buys over **30%** (the entry-premium filter), in paper and live. If it can't get Decu's price or the current price, it does **not** buy.
 
-A Decu buy the bot did not take (filtered, paused, too late) still gets an alert marked **SKIPPED** with what it would have done, so the research never hides the trades it missed.
+A Decu buy the bot did not take (filtered, 2 coins already open, daily cap, paused) is still studied and shown on the dashboard, so the research never hides the trades it missed (phone alerts for those are off: `SKIPPED_ALERTS=true` turns them on).
+
+**Limits:** at most **2 coins** open at once, at most **$600** of buys a day, no daily loss limit. New buys stop by themselves (sells never stop) if 3 buys fail in a row (10 min) or Helius stops sending data.
+
+**Selling:** the bot sells on Decu's sell only once his sell is **confirmed** on-chain (about 0.4 s later), so a sell of his that fails can't make it sell. Buys still use the fastest path.
+
+**Stop-loss alerts, in order:** STOP TRIGGERED → SELL SENT (live) → POSITION CLOSED (with the trigger vs the real fill). If prices can't be read 3 times in a row you get *Price checks failing*; after 6 it sells anyway. If a sell fails it retries at once; after 3 failures you get **CAN'T SELL** and it keeps trying.
 
 **Dashboard on your iPhone:** open the bot's address in Safari → Share → *Add to Home Screen*. It shows mode, balance, P&L, positions, entry premium, execution latency, why buys were skipped, the brain's level, and two red buttons: **EMERGENCY STOP** (no new buys) and **Sell everything**.
 

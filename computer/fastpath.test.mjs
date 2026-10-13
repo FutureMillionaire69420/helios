@@ -23,14 +23,19 @@ test('decoder reads his real pump.fun buy and sell from the logs', () => {
   assert.equal(leaderPumpBuys(fx.buy.logs, 'Someone1111111111111111111111111111111111111').length, 0, 'only his trades');
 });
 
+let confirmedSell = true;
+const confirmedSellTx = () => ({blockTime: Math.floor(Date.now() / 1000), slot: 9, transaction: {signatures: [fx.sell.signature], message: {accountKeys: [{pubkey: config.leader, signer: true}]}},
+  meta: {err: null, fee: 5000, logMessages: fx.sell.logs, preBalances: [10e9], postBalances: [10e9 + 4.9e9], preTokenBalances: [{owner: config.leader, mint: MINT, uiTokenAmount: {amount: '2254826796163', decimals: 6, uiAmountString: '2254826.796163'}}], postTokenBalances: [{owner: config.leader, mint: MINT, uiTokenAmount: {amount: '0', decimals: 6, uiAmountString: '0'}}]}});
 async function bot(t, env = {}, quote = async () => 0.11) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-fast-')), saved = {...process.env};
-  Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: 'fastpath-test-token-24-characters', STUDY: 'false', ...env});
+  Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: 'fastpath-test-token-24-characters', STUDY: 'false', PAPER_MAX_PAY_PCT: '0', STALE_DATA_SEC: '0', ...env});
   let ws; const fetches = [];
   const k = {config: {...config, dryRun: true, minLeaderBuyUsd: 1, logFile: path.join(dir, 'log'), paperLandMs: 0, tipSol: 0.001, priorityFeeSol: 0.0005, slippagePct: 20}, redact: (x) => x,
     detectBuy, detectSell, leaderPumpBuys, leaderPumpSells, getSolUsd: async () => 116,
     quoteBuy: async () => ({raw: 1_000_000}), quoteSell: (...a) => quote(...a),
-    getTransaction: async (sig) => { fetches.push(sig); return null; }, // full path unavailable: proves the fast path alone trades
+    // Buys: full path unavailable, proving the fast path alone buys. His SELL: only the confirmed
+    // transaction (full path) makes the bot sell, so the sell signature returns a confirmed tx.
+    getTransaction: async (sig) => { fetches.push(sig); return sig === fx.sell.signature && confirmedSell ? confirmedSellTx() : null; },
     startWatcher: (cb) => { ws = cb; return () => {}; }};
   const r = await startRuntime(k);
   t.after(() => { r.stop(); fs.rmSync(dir, {recursive: true, force: true}); for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]; Object.assign(process.env, saved); });
@@ -158,12 +163,12 @@ test('Solscan gap report: grouped, says what the trade was; LaunchLab / bonk.fun
   assert.match(a.body, /SELL 7pumpC…  ?(0\.300 SOL )?on pump\.fun, \ds late: sell of a coin the bot does not hold/);
 });
 
-test('entry-premium filter in paper only with PAPER_MAX_PAY_PCT; MAX_PAY_ABOVE_DECU_PCT alone never blocks paper', async (t) => {
-  const free = await bot(t, {MAX_PAY_ABOVE_DECU_PCT: '10'});
+test('30% entry-premium filter applies in paper like live (PAPER_MAX_PAY_PCT=0 turns it off in paper)', async (t) => {
+  const free = await bot(t, {PAPER_MAX_PAY_PCT: '0'});
   await free.ws(fx.buy.signature, 'ws', fx.buy.logs); await free.r.engine.idle();
-  assert.equal(free.r.engine.d.positions[MINT].raw, '1000000', 'paper studies everything');
+  assert.equal(free.r.engine.d.positions[MINT].raw, '1000000', 'filter off: bought');
   free.r.stop();
-  const {r, ws} = await bot(t, {PAPER_MAX_PAY_PCT: '10'});
+  const {r, ws} = await bot(t, {PAPER_MAX_PAY_PCT: '30'}); // the default when unset: the live value (30)
   await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
   // his price 0.2444 SOL / 2.25e12 raw; the paper quote gives only 1e6 raw for 0.1 SOL -> far above him
   assert.equal(r.engine.d.positions[MINT], undefined);
@@ -179,4 +184,47 @@ test('execution latency: every stage of a paper copy is timed, with the simulate
   assert.ok(L.decodeMs >= 0 && L.decodeMs < 1000);
   assert.equal(L.simulatedMs, Number(process.env.PAPER_LAND_MS || 0) || L.simulatedMs, 'simulated wait recorded');
   assert.ok(L.landMs >= L.simulatedMs, 'land time includes the simulated wait');
+});
+
+test('his sell is only acted on once CONFIRMED: an unconfirmed fast-path sell never sells', async (t) => {
+  const {r, ws} = await bot(t, {MAX_HOLD_SEC: '0', MONITOR_MS: '20'}, async () => 0.11);
+  r.engine.style('auto');
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  confirmedSell = false;
+  try { await ws(fx.sell.signature, 'ws', fx.sell.logs); await sleep(50); await r.engine.idle(); }
+  finally { confirmedSell = true; }
+  assert.equal(r.engine.d.positions[MINT].raw, '1000000', 'processed-only sell signal: held');
+});
+
+test('stop-loss reliability: failed price checks alert, then sell anyway; failed sells retry, then CAN\'T SELL', async (t) => {
+  let n = 0;
+  const {r, ws} = await bot(t, {MAX_HOLD_SEC: '0', MONITOR_MS: '10', QUOTE_TIMEOUT_MS: '20', PRICE_FAIL_ALERT: '2', PRICE_FAIL_SELL: '4'}, async () => (n++ < 2 ? 0.1 : null));
+  r.engine.style('auto');
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  await sleep(200); await r.engine.idle();
+  assert.ok(r.engine.d.events.some((e) => e.type === 'price-check-failing'), 'alerted');
+  assert.ok(r.engine.d.events.some((e) => e.type === 'exit-rule' && e.rule === 'no-price'), 'sold without a price');
+});
+
+test('failed exit sells are retried, then CAN\'T SELL is alerted', async (t) => {
+  let n = 0;
+  const {r, ws} = await bot(t, {MAX_HOLD_SEC: '15', MONITOR_MS: '10', SELL_RETRIES: '2'}, async () => (n++ < 2 ? 0.1 : 0.06)); // -40%: stop
+  r.engine.style('auto');
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  const realSend = r.engine.a.send; let sells = 0;
+  r.engine.a.send = async (job) => (job.side === 'sell' ? (sells++, {status: 'failed', error: 'slippage exceeded'}) : realSend(job));
+  await sleep(1500); await r.engine.idle();
+  assert.ok(sells >= 3, `${sells} sell attempts`);
+  assert.ok(r.engine.d.events.some((e) => e.type === 'unsellable'), 'CAN\'T SELL alerted');
+  assert.ok(r.engine.d.events.filter((e) => e.type === 'exit-rule' && e.rule === 'stoploss').length >= 1);
+});
+
+test('position-closed alert compares the fill with the exit trigger', async () => {
+  const {alertFor} = await import('./runtime.mjs');
+  const a = alertFor({type: 'confirmed', side: 'sell', mint: MINT, solDelta: 0.075, closed: true, pnl: -0.25, trigger: -0.21, rule: 'stoploss', signature: 's'}, 'live');
+  assert.match(a.title, /POSITION CLOSED siBF3b… -25.0% \(stop-loss\)/); assert.match(a.body, /Triggered at -21.0% · closed at -25.0% \(4.0 points worse/);
+  assert.match(alertFor({type: 'unsellable', mint: MINT, attempts: 4, message: 'x'}, 'live').title, /CAN'T SELL/);
+  assert.match(alertFor({type: 'exit-rule', rule: 'stoploss', mint: MINT, pnl: -0.21, move: -0.2}, 'live').title, /STOP TRIGGERED/);
+  assert.match(alertFor({type: 'submitted', side: 'sell', mint: MINT, signature: 's', rule: 'stoploss'}, 'live').title, /SELL SENT/);
+  assert.equal(alertFor({type: 'submitted', side: 'sell', mint: MINT, signature: 's'}, 'paper'), null, 'paper: no extra alert');
 });

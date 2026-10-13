@@ -21,13 +21,13 @@ async function refresh(){try{
   $('balance').textContent=fmt(latest.balance);
   const w=latest.wallet||{};
   $('wallet-state').textContent=w.publicKey?`${w.publicKey} · ${w.autonomous?'autonomous signer ready':'simulated'}`:'No signer configured';
-  $('spent').textContent=fmt(latest.spent)+(latest.cap?' / '+latest.cap:' (no cap)')+(latest.pnlToday?' · P&L '+(latest.pnlToday>=0?'+':'')+latest.pnlToday.toFixed(4):'');$('reserved').textContent=fmt(latest.reserved);
-  const entries=Object.entries(latest.positions).filter(([,p])=>BigInt(p.raw)>0n);$('count').textContent=entries.length;
+  $('spent').textContent=fmt(latest.spent)+' SOL'+(latest.capUsd?' / $'+latest.capUsd+' cap':latest.cap?' / '+latest.cap:' (no cap)')+(latest.pnlToday?' · P&L '+(latest.pnlToday>=0?'+':'')+latest.pnlToday.toFixed(4):'');$('reserved').textContent=fmt(latest.reserved);
+  const entries=Object.entries(latest.positions).filter(([,p])=>BigInt(p.raw)>0n);$('count').textContent=entries.length+(latest.maxPositions?' / '+latest.maxPositions+' max':'');
   const autoOn=!latest.paused&&latest.autoCopy, manualOn=!latest.paused&&!latest.autoCopy;
   $('style-auto-state').textContent=autoOn?'ON · buys when Decu buys, sells the same share when he sells':'OFF';
   $('style-manual-state').textContent=manualOn?'ON · buys when Decu buys; you sell in Phantom after the SOLD alert':'OFF';
   $('style-auto-on').disabled=autoOn;$('style-auto-off').disabled=!autoOn;$('style-manual-on').disabled=manualOn;$('style-manual-off').disabled=!manualOn;
-  $('buy-state').textContent=latest.paused?'Paused: both trading toggles are OFF, no new buys.':'Enabled';$('updated').textContent='Updated '+new Date().toLocaleTimeString();
+  $('buy-state').textContent=latest.paused?'Paused: both trading toggles are OFF, no new buys.':latest.gate?'Blocked: '+latest.gate:'Enabled';$('updated').textContent='Updated '+new Date().toLocaleTimeString();
   $('connection').textContent=latest.connection.websocket+' · Last poll: '+(latest.connection.lastPoll?new Date(latest.connection.lastPoll).toLocaleTimeString():'—')+' · Errors: '+latest.connection.errors;
   const k=latest.connection,sc=k.solscan,fs=k.firstSeen||{};
   $('providers').textContent='Helius: websocket first '+(fs.ws||0)+' · poll first '+(fs.poll||0)+' | Solscan: '+(!sc?'—':sc.ok===false?(sc.note||sc.error||'error'):sc.ok?'OK '+(sc.latencyMs??'?')+' ms':'starting')+' · gaps caught '+(k.gaps||0)+' | non-SOL trades skipped '+(k.unsupported||0)+' | other wallets filtered '+((k.otherWallets||0)+(k.filteredWs||0))+(k.pollMode?' | Helius poll: '+k.pollMode:'')+(k.lastError?' | last error: '+k.lastError:'');
