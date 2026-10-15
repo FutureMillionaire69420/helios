@@ -228,3 +228,16 @@ test('position-closed alert compares the fill with the exit trigger', async () =
   assert.match(alertFor({type: 'submitted', side: 'sell', mint: MINT, signature: 's', rule: 'stoploss'}, 'live').title, /SELL SENT/);
   assert.equal(alertFor({type: 'submitted', side: 'sell', mint: MINT, signature: 's'}, 'paper'), null, 'paper: no extra alert');
 });
+
+test('a later Decu buy that gets copied is measured against THAT buy, not his first one', async (t) => {
+  const {r, ws} = await bot(t, {MAX_OPEN_POSITIONS: '0'}, async () => 0.11);
+  // his first buy arrives while buys are paused (skipped), his second buy of the same coin is copied
+  r.engine.pause(true);
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  r.engine.pause(false);
+  const second = fx.buy.logs.map((l) => { if (!l.startsWith('Program data: ')) return l; const b = Buffer.from(l.slice(14), 'base64'); if (b.length >= 97) b.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) + 30), 89); return 'Program data: ' + b.toString('base64'); });
+  await ws('second-buy-sig', 'ws', second); await r.engine.idle();
+  assert.equal(r.engine.d.positions[MINT].raw, '1000000');
+  const L = r.latency(MINT);
+  assert.ok(L.detectMs < 0, `measured from his second buy (its clock is 30 s ahead in this test): ${L.detectMs}`);
+});

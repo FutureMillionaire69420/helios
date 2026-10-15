@@ -163,7 +163,7 @@ export async function startRuntime(k, {demo=false}={}) {
     if (c.mode==='paper') paperExits(e);
     // Every bot buy (paper or live) gets a 15 s study: re-priced each second, then one detailed alert.
     if (e.type==='confirmed' && e.side==='buy') scheduleMaxHold?.(e.mint);
-    if (study && e.type==='confirmed' && e.side==='buy') study.start({mint:e.mint,cost:-e.solDelta,raw:e.rawDelta,his:{...(leaderBuys.get(e.mint)||{}),latency:latencyOf(e.mint)}});
+    if (study && e.type==='confirmed' && e.side==='buy') study.start({mint:e.mint,cost:-e.solDelta,raw:e.rawDelta,his:{...(refFor(e.mint)||{}),first:leaderBuys.get(e.mint)||null,latency:latencyOf(e.mint)}});
     // RESEARCH: a Decu buy the bot did NOT take is still studied (no trade): what it would have done.
     if (study && !demo && ((e.type==='skip' && e.side!=='sell' && e.mint && !/below minimum|already|no bot position|not a pump/.test(e.reason||'')) || (e.type==='failed' && e.side==='buy'))) shadowStudy(e.mint, e.reason||e.message||'not bought');
   };
@@ -196,10 +196,16 @@ export async function startRuntime(k, {demo=false}={}) {
   // EXECUTION LATENCY: one timestamp per stage of each copy (ms since epoch unless noted):
   //  hisTime (his on-chain clock, whole seconds) · hisSlot · seenAt (our websocket/poll got it) ·
   //  decodedAt · buildStart · builtAt · sentAt (live) · landedAt · landSlot · simulatedMs (paper wait)
-  const pipe=new Map();
-  const stamp=(mint,key,v=Date.now())=>{ let p=pipe.get(mint); if(!p){ p={}; pipe.set(mint,p); if(pipe.size>500) pipe.delete(pipe.keys().next().value); } if(p[key]==null) p[key]=v; return p; };
+  // Keyed by HIS transaction: when Decu buys a coin twice and the bot copies the later buy, timing
+  // and entry premium are measured against the buy that was copied, not his first one.
+  const pipe=new Map(), copiedSig=new Map(), lastSig=new Map(), hisBySig=new Map();
+  const hisKey=(sig,mint)=>`${sig}:${mint}`;
+  const stampSig=(sig,mint,key,v=Date.now())=>{ const id=hisKey(sig,mint); let p=pipe.get(id); if(!p){ p={}; pipe.set(id,p); if(pipe.size>1000) pipe.delete(pipe.keys().next().value); } if(p[key]==null) p[key]=v; return p; };
+  const stamp=(mint,key,v=Date.now())=>stampSig(copiedSig.get(mint)||lastSig.get(mint)||'unknown',mint,key,v);
+  // The Decu buy a bot buy refers to: the one it copied, else his latest seen buy, else his first copyable one.
+  const refFor=mint=>{ const sig=copiedSig.get(mint)||lastSig.get(mint); return (sig&&hisBySig.get(hisKey(sig,mint)))||leaderBuys.get(mint)||null; };
   const latencyOf=mint=>{
-    const p=pipe.get(mint); if(!p) return null;
+    const p=pipe.get(hisKey(copiedSig.get(mint)||lastSig.get(mint)||'unknown',mint)); if(!p) return null;
     const d=(a,b)=>p[a]!=null&&p[b]!=null?Math.round(p[b]-p[a]):null;
     return {route:p.route||null, source:p.source||null, simulatedMs:p.simulatedMs??null,
       detectMs:p.hisTime&&p.seenAt?Math.round(p.seenAt-p.hisTime*1000):null, // his clock is whole seconds: about ±500 ms
@@ -217,12 +223,12 @@ export async function startRuntime(k, {demo=false}={}) {
   const shadowDone=new Set();
   const shadowStudy=async(mint,reason)=>{
     try {
-      const his=leaderBuys.get(mint);
+      const his=refFor(mint);
       if(!study || !his || his.usd<c.minLeaderUsd || shadowDone.has(mint) || study.active.has(mint) || engine.d.positions[mint]) return;
       shadowDone.add(mint); if(shadowDone.size>2000) shadowDone.delete(shadowDone.values().next().value);
       const q=await k.quoteBuy(mint,c.buySol*0.995);
       if(!q?.raw) return;
-      study.start({mint,cost:c.buySol+k.config.tipSol+k.config.priorityFeeSol,raw:String(q.raw),his:{...his,latency:latencyOf(mint)},shadow:String(reason).slice(0,160)});
+      study.start({mint,cost:c.buySol+k.config.tipSol+k.config.priorityFeeSol,raw:String(q.raw),his:{...his,first:leaderBuys.get(mint)||null,latency:latencyOf(mint)},shadow:String(reason).slice(0,160)});
     } catch {}
   };
   const receipt = async job => {
@@ -246,7 +252,7 @@ export async function startRuntime(k, {demo=false}={}) {
       const q=demo?{raw:Math.floor(job.sol*1e9)}:await k.quoteBuy(job.mint,job.sol*0.995);
       if(!q?.raw) return {status:'failed',error:'no paper buy quote'};
       const pp=stamp(job.mint,'landedAt'); pp.simulatedMs=waitMs; const sl=await slotP; if(Number.isInteger(sl)) { pp.landSlot??=sl; pp.slotEstimated=true; }
-      const ref=leaderBuys.get(job.mint), maxPay=maxPayPct/100;
+      const ref=refFor(job.mint), maxPay=maxPayPct/100;
       if(maxPay>0 && !(ref?.sol>0 && ref.raw>0)) return {status:'failed',error:"no Decu price to check the entry premium against: not bought (fail-closed)"};
       if(maxPay>0) { const gap=(job.sol/q.raw)/(ref.sol/ref.raw)-1; if(gap>maxPay) return {status:'failed',error:`entry premium ${Math.round(gap*100)}% above Decu's price (limit ${Math.round(maxPay*100)}%): not bought`}; }
       if(job.quoteRaw && q.raw<job.quoteRaw/(1+k.config.slippagePct/100)) return {status:'failed',error:'paper landing price exceeded slippage limit'};
@@ -289,7 +295,7 @@ export async function startRuntime(k, {demo=false}={}) {
           try {
             const t0=Date.now();
             const tip=k.config.tipSol>0 ? k.TIP_ACCOUNTS[Math.floor(Math.random()*k.TIP_ACCOUNTS.length)] : null;
-            const ref=leaderBuys.get(job.mint), maxPay=maxPayPct/100;
+            const ref=refFor(job.mint), maxPay=maxPayPct/100;
             // the chain enforces the max-pay guard: the buy fails (fee only) if the price ran past it
             if(maxPay>0 && !(ref?.sol>0 && ref.raw>0)) throw new Error('no Decu price to check the entry premium against: not bought (fail-closed)');
             const minTokensFloor=maxPay>0 ? BigInt(Math.floor(job.sol/((ref.sol/ref.raw)*(1+maxPay)))) : 0n;
@@ -307,7 +313,7 @@ export async function startRuntime(k, {demo=false}={}) {
       // Exact token quantity in decimal text; never sell tokens outside the bot position.
       const raw=job.side==='sell'?job.raw.padStart(decimals+1,'0'):'';
       const amount=job.side==='buy'?job.sol:decimals?raw.slice(0,-decimals)+'.'+raw.slice(-decimals):raw;
-      const ref=leaderBuys.get(job.mint), checkPrem=job.side==='buy' && maxPayPct>0;
+      const ref=refFor(job.mint), checkPrem=job.side==='buy' && maxPayPct>0;
       if(checkPrem && !(ref?.sol>0 && ref.raw>0)) throw new Error('no Decu price to check the entry premium against: not bought (fail-closed)');
       const premQ=checkPrem ? k.quoteBuy(job.mint,job.sol*0.995).catch(()=>null) : null;
       let bytes=await k.http('https://pumpportal.fun/api/trade-local',{method:'POST',raw:true,body:{publicKey:k.kp.publicKey,action:job.side,mint:job.mint,amount,denominatedInSol:job.side==='buy'?'true':'false',slippage:job.side==='sell'?sellSlippagePct:k.config.slippagePct,priorityFee:k.config.priorityFeeSol,pool:'auto'}});
@@ -347,7 +353,7 @@ export async function startRuntime(k, {demo=false}={}) {
   // Time the build stage of every buy (execution-latency breakdown).
   const buildTx=adapter.build;
   adapter.build=async job=>{
-    if(job.side==='buy') stamp(job.mint,'buildStart');
+    if(job.side==='buy') { if(job.sig) copiedSig.set(job.mint,job.sig); if(copiedSig.size>2000) copiedSig.delete(copiedSig.keys().next().value); stamp(job.mint,'buildStart'); }
     const out=await buildTx(job);
     if(job.side==='buy') { const p=stamp(job.mint,'builtAt'); p.route??=out.built||(c.mode==='live'?'pumpportal':'paper'); }
     return out;
@@ -410,7 +416,7 @@ export async function startRuntime(k, {demo=false}={}) {
       if(!p || BigInt(p.raw)<=0n) { monitors.delete(mint); return; }
       const auto=engine.d.autoCopy, age=Date.now()-(p.boughtAt||Date.now());
       // The 15 s gate counts from DECU'S buy (his on-chain time), not the bot's; bot time if unknown.
-      const his=leaderBuys.get(mint), bought=p.boughtAt||Date.now(), hisMs=his?.time>0 && bought-his.time*1000<=60e3 ? his.time*1000 : bought, sinceHis=Date.now()-hisMs; // >60 s apart: not his matching buy
+      const his=refFor(mint), bought=p.boughtAt||Date.now(), hisMs=his?.time>0 && bought-his.time*1000<=60e3 ? his.time*1000 : bought, sinceHis=Date.now()-hisMs; // >60 s apart: not his matching buy
       let pnl=null;
       try {
         const v=await Promise.race([k.quoteSell(mint,Number(p.raw)),new Promise(r=>setTimeout(()=>r(null),quoteTimeoutMs).unref?.())]);
@@ -462,7 +468,7 @@ export async function startRuntime(k, {demo=false}={}) {
   const mintDecimals=new Map();
   const remember=(map,key,v)=>{map.set(key,v);if(map.size>2000)map.delete(map.keys().next().value);};
   // His reference buy for PCAT / entry gap / max-pay guard: the first one big enough to be copied.
-  const recordLeaderBuy=s=>{ const old=leaderBuys.get(s.mint); if(!old || (old.usd<c.minLeaderUsd && s.usd>=c.minLeaderUsd)) remember(leaderBuys,s.mint,{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time}); };
+  const recordLeaderBuy=s=>{ remember(hisBySig,hisKey(s.sig,s.mint),{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time,sig:s.sig}); remember(lastSig,s.mint,s.sig); const old=leaderBuys.get(s.mint); if(!old || (old.usd<c.minLeaderUsd && s.usd>=c.minLeaderUsd)) remember(leaderBuys,s.mint,{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time}); };
   let lastErrorEventAt=0, hiddenErrors=0;
   const onSignature=async(sig,source='poll',logs,slot)=>{
     const seenAt=Date.now();
@@ -482,7 +488,7 @@ export async function startRuntime(k, {demo=false}={}) {
         if(local) { const ctx=buyContextFromLogs(logs,k.config.leader,k.b58encode); if(ctx) remember(buyCtx,ctx.mint,ctx); }
         for(const ev of k.leaderPumpBuys(logs,k.config.leader)) {
           const s={sig,time:ev.timestamp||Date.now()/1000,side:'buy',mint:ev.mint,sol:ev.solAmount/1e9,raw:String(ev.tokenAmount),pump:true,decimals:6,fast:true};
-          const tp=stamp(ev.mint,'seenAt',seenAt); stamp(ev.mint,'hisTime',ev.timestamp); if(Number.isInteger(slot)) stamp(ev.mint,'hisSlot',slot); stamp(ev.mint,'decodedAt'); tp.source??='websocket (fast path)';
+          const tp=stampSig(sig,ev.mint,'seenAt',seenAt); stampSig(sig,ev.mint,'hisTime',ev.timestamp); if(Number.isInteger(slot)) stampSig(sig,ev.mint,'hisSlot',slot); stampSig(sig,ev.mint,'decodedAt'); tp.source??='websocket (fast path)';
           s.usd=s.sol*await k.getSolUsd(); recordLeaderBuy(s); remember(mintDecimals,s.mint,6); status.fastSignals=(status.fastSignals||0)+1;
           await engine.ingest(s);
         }
@@ -517,7 +523,7 @@ export async function startRuntime(k, {demo=false}={}) {
       }
       for(const s of signals) {
         if(Number.isInteger(s.decimals)) remember(mintDecimals,s.mint,s.decimals);
-        if(s.side==='buy') { s.usd=s.sol*await k.getSolUsd(); recordLeaderBuy(s); const tp=stamp(s.mint,'seenAt',seenAt); stamp(s.mint,'hisTime',tx.blockTime); if(Number.isInteger(tx.slot)) stamp(s.mint,'hisSlot',tx.slot); stamp(s.mint,'decodedAt'); tp.source??=source==='ws'?'websocket':source; }
+        if(s.side==='buy') { s.usd=s.sol*await k.getSolUsd(); recordLeaderBuy(s); const tp=stampSig(sig,s.mint,'seenAt',seenAt); stampSig(sig,s.mint,'hisTime',tx.blockTime); if(Number.isInteger(tx.slot)) stampSig(sig,s.mint,'hisSlot',tx.slot); stampSig(sig,s.mint,'decodedAt'); tp.source??=source==='ws'?'websocket':source; }
         else { study?.leaderSell(s.mint,s); if(sellAll) { s.soldRaw='1'; s.beforeRaw='1'; } }
         await engine.ingest(s);
       }

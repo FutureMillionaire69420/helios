@@ -215,3 +215,12 @@ test('research summary: latency percentiles, drawdown, profit factor; latency li
   assert.equal(R.latency.blocksMedian, 5); assert.equal(R.latency.botMedianMs, 1200); assert.equal(R.filter.trades, 1, "premiums 50%, 80%, 110%: only one under 60%");
   assert.match(latencyLine({detectMs: 400, decodeMs: 2, decideMs: 1, buildMs: 150, landMs: 1100, simulatedMs: 1000, botMs: 1260, route: 'paper', blocksAfter: 5, blocksEstimated: true}), /SIMULATED paper wait.*5 blocks after Decu \(≈, paper\)/);
 });
+
+test('copied a later Decu buy: premium/latency vs that buy, PCAT vs his first buy', async (t) => {
+  const s = createStudy({file: tmp(t), quoteSell: async () => 0.1, stepMs: 1, feeSol: 0, slip: 0});
+  const now = Date.now() / 1000;
+  const rec = await s.start({mint: 'Later', cost: 0.1, raw: '1000', his: {sol: 1, raw: 12500, time: now - 2, first: {sol: 1, raw: 20000, time: now - 600}}});
+  assert.ok(Math.abs(rec.entryGap - 0.25) < 1e-9, 'vs the copied buy (8e-5 per token)');
+  assert.ok(Math.abs(rec.pcat - 1) < 1e-9, 'vs his first buy (5e-5 per token)');
+  assert.ok(rec.delaySec < 3 && rec.copiedLaterBuy);
+});

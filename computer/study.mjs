@@ -214,13 +214,15 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
     const [peak, btsab] = known.length ? known.reduce((a, b) => (b[0] > a[0] ? b : a)) : [null, null];
     const [worst, worstAt] = known.length ? known.reduce((a, b) => (b[0] < a[0] ? b : a)) : [null, null];
     const botPrice = st.cost / st.raw;
+    // Entry premium and latency: vs the Decu buy the bot copied. PCAT: vs his FIRST buy (his real entry).
     const hisPrice = st.his.sol > 0 && st.his.raw > 0 ? st.his.sol / st.his.raw : null;
+    const f = st.his.first, firstPrice = f?.sol > 0 && f.raw > 0 ? f.sol / f.raw : hisPrice;
     const delaySec = st.his.time ? Math.round((st.startedAt / 1000 - st.his.time) * 10) / 10 : null;
     let pcat = null, pcatExit = null;
-    if (hisPrice) {
+    if (firstPrice) {
       const hs = st.hisSell;
       const exitPrice = hs && hs.sol > 0 && hs.soldRaw > 0 ? hs.sol / hs.soldRaw : st.values.findLast((v) => v != null) / st.raw;
-      if (Number.isFinite(exitPrice)) { pcat = exitPrice / hisPrice - 1 - (2 * feeSol) / buySol; pcatExit = hs ? `his sell at ${hs.atSec}s` : '15s mark'; }
+      if (Number.isFinite(exitPrice)) { pcat = exitPrice / firstPrice - 1 - (2 * feeSol) / buySol; pcatExit = hs ? `his sell at ${hs.atSec}s` : '15s mark'; }
     }
     // FCAT: exit at the first full second after his first sell, else 15 s after DECU'S buy (the bot
     // lands ~2 s after him, so that is ~13 s after the bot's buy). Both inside the study window.
@@ -236,6 +238,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
       entryGap: hisPrice ? botPrice / hisPrice - 1 : null, cost: st.cost, curve, fcat, fcatSec, fcatExit, btsab, peak, worst, worstAt, pcat, pcatExit,
       hisSoldAtSec: st.hisSell?.atSec ?? null, bandSol: st.his.sol > 0 ? st.his.sol * bandPct : null,
       taken: !st.shadow, skipReason: st.shadow || null, latency: st.his.latency || null, hisTime: st.his.time ?? null,
+      copiedLaterBuy: !!(f && f.time && st.his.time && st.his.time - f.time > 1), hisFirstTime: f?.time ?? null,
       coin: m ? { holders: m.holders ?? null, marketCapUsd: m.marketCapUsd ?? null, ageSec: m.createdTime ? Math.round(st.startedAt / 1000 - m.createdTime) : null } : null,
     };
     enrich(rec, records);
@@ -251,6 +254,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
       const at = (s) => (curve[s] == null ? '—' : pct(curve[s]));
       const lessons = brain.lessons();
       const body = [
+        rec.copiedLaterBuy ? `Copied a LATER buy of Decu's (his first buy of this coin was ${Math.round((rec.hisTime - rec.hisFirstTime) / 60)} min earlier). Latency and entry premium are vs the copied buy; PCAT is vs his first buy.` : null,
         st.shadow ? `NOT BOUGHT (${st.shadow}). Studied anyway with a ${buySol} SOL quote: what it would have done.` : null,
         `${label} bought ${st.his.sol?.toFixed(3) ?? '?'} SOL${st.his.usd ? ` ($${Math.round(st.his.usd)})` : ''} · execution latency ${rec.delaySec ?? '?'} s · entry premium ${pct(rec.entryGap)} · ${filterPct}% filter: ${rec.entryGap == null ? '—' : rec.entryGap <= filterPct / 100 ? 'TAKE' : 'SKIP'}`,
         latencyLine(rec.latency),
