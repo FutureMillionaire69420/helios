@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {createStudy, summarize, summaryText, memoryBank, memoryInsights, tradeNotes} from './study.mjs';
 import {createBrain, curveShape, simulateRules, advise, readiness, exitSim} from './learn.mjs';
-import {research, latencyLine} from './study.mjs';
+import {research, latencyLine, toCsv} from './study.mjs';
 
 const tmp = (t) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-study-')); t.after(() => fs.rmSync(d, {recursive: true, force: true})); return path.join(d, 'study.jsonl'); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -223,4 +223,13 @@ test('copied a later Decu buy: premium/latency vs that buy, PCAT vs his first bu
   assert.ok(Math.abs(rec.entryGap - 0.25) < 1e-9, 'vs the copied buy (8e-5 per token)');
   assert.ok(Math.abs(rec.pcat - 1) < 1e-9, 'vs his first buy (5e-5 per token)');
   assert.ok(rec.delaySec < 3 && rec.copiedLaterBuy);
+});
+
+test('CSV export: one row per studied Decu buy, bought or skipped', () => {
+  const recs = [mkRec(1, {symbol: 'A,B', fcat: 0.1234, taken: false, skipReason: 'entry premium 80% above Decu\'s price', ruleSim: {pnl: -0.2, how: 'stop', sec: 4}}), mkRec(2)];
+  const lines = toCsv(recs).trim().split('\n');
+  assert.equal(lines.length, 3);
+  assert.match(lines[0], /^time_utc,coin,mint,bought,skip_reason/); assert.match(lines[0], /s15_pct$/);
+  assert.match(lines[1], /"A,B",M1,no,entry premium 80% above Decu's price,1\.5,/); assert.match(lines[1], /,12\.34,/); assert.match(lines[1], /stop at 4s/);
+  assert.match(lines[2], /,yes,,/);
 });

@@ -50,6 +50,7 @@ function renderResearch(r){
   for(const t of r.recent)item(rec,`${new Date(t.time).toLocaleTimeString()} · ${t.coin} · ${t.taken?'BOUGHT':'SKIPPED'}`,`premium ${pc(t.premium)} · latency ${sec(t.latencySec)}${t.blocks!=null?' · '+t.blocks+' blocks':''} · FCAT ${pc(t.fcat)}${t.reason?' · '+t.reason:''}`,!t.taken);
   $('research-updated').textContent='Updated '+new Date().toLocaleTimeString();
 }
+$('export').onclick=async()=>{try{const r=await fetch('/api/export.csv',{headers:token?{Authorization:'Bearer '+token}:{},cache:'no-store'});if(!r.ok)throw new Error('Download failed: '+r.status);const b=await r.blob();const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=(r.headers.get('content-disposition')||'').match(/filename="([^"]+)"/)?.[1]||'decu-trades.csv';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),5000);}catch(e){$('message').textContent=e.message;}};
 $('emergency').onclick=async()=>{if(!confirm('EMERGENCY STOP: no new buys until you turn a style back on. Continue?'))return;try{await api('/api/emergency','POST');refresh();}catch(e){$('message').textContent=e.message;}};
 $('sellall').onclick=async()=>{if(!confirm('Sell EVERY open position now? In LIVE this sends real sells.'))return;if(!confirm('Are you sure? This cannot be undone.'))return;try{await api('/api/sell-all','POST');refresh();}catch(e){$('message').textContent=e.message;}};
 $('connect').onclick=()=>{token=$('token').value;$('token').value='';refresh();};

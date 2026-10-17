@@ -456,7 +456,8 @@ export async function startRuntime(k, {demo=false}={}) {
     engine.event('provider-gap',g); gapBuffer.push(g);
     if(!gapTimer) { gapTimer=setTimeout(()=>{
       gapTimer=null; const list=gapBuffer; gapBuffer=[];
-      if(demo || !k.notify || engine.d.alertsOff || !list.length) return;
+      // GAP_ALERTS (default off): missed-trade reports stay in the log and the dashboard, no phone alert.
+      if(demo || !k.notify || engine.d.alertsOff || !list.length || val('GAP_ALERTS','false')!=='true') return;
       const line=x=>`${x.side.toUpperCase()} ${x.mint?x.mint.slice(0,6)+'…':''}${x.sol!=null?` ${x.sol.toFixed(3)} SOL`:''} on ${x.venue}, ${x.lateSec??'?'}s late: ${x.action}`;
       const tag=c.mode==='live'?'':c.mode==='paper'?'[PAPER] ':'[DEMO] ';
       Promise.resolve(k.notify({title:`${tag}Solscan caught ${list.length} Decu trade${list.length>1?'s':''} Helius missed`,body:list.slice(0,8).map(line).join('\n')+(list.length>8?`\n…and ${list.length-8} more`:'')+'\nThe Solscan backup worked; nothing was lost.',priority:list.some(x=>/processed by the copy rules|exit rules/.test(x.action))?4:2,tags:['satellite'],click:`https://solscan.io/tx/${list[0].leaderSignature}`})).catch(()=>{});
@@ -609,6 +610,7 @@ export async function startRuntime(k, {demo=false}={}) {
         for(const [mint,p] of held) exitNow(mint,p,'sell-all',null);
         engine.event('emergency-stop',{message:`sell everything from the dashboard: ${held.length} position(s)`}); res.writeHead(200); return res.end(String(held.length));
       }
+      if(url.pathname==='/api/export.csv' && req.method==='GET') {const {toCsv}=await import('./study.mjs');res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':`attachment; filename="decu-trades-${c.mode}-${new Date().toISOString().slice(0,10)}.csv"`});return res.end(toCsv(study?study.records:[]));}
       if(url.pathname==='/api/research' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?study.research():{trades:0}));}
       if(req.method==='POST' && ['/api/autocopy/on','/api/autocopy/off'].includes(url.pathname)) {
         engine.autoCopy(url.pathname==='/api/autocopy/on');res.writeHead(200);return res.end('OK');

@@ -138,7 +138,7 @@ test('after a restart, held coins are watched again: stop-loss still protects th
 test('Solscan gap report: grouped, says what the trade was; LaunchLab / bonk.fun coins ignored completely', async (t) => {
   const alerts = [];
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-gap-')), saved = {...process.env};
-  Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: 'gap-test-token-24-characters-xx', STUDY: 'false', GAP_GRACE_SEC: '0', GAP_ALERT_SEC: '0.05'});
+  Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: 'gap-test-token-24-characters-xx', STUDY: 'false', GAP_GRACE_SEC: '0', GAP_ALERT_SEC: '0.05', GAP_ALERTS: 'true'});
   let ss;
   const LEADER = config.leader;
   const launchLab = {blockTime: Math.floor(Date.now() / 1000) - 12, slot: 1, transaction: {signatures: ['g'], message: {accountKeys: [{pubkey: LEADER, signer: true}]}},

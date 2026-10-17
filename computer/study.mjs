@@ -125,6 +125,17 @@ export function research(records, { buySol = 0.1, filterPct = 60 } = {}) {
   };
 }
 
+/** Every studied trade as CSV (one row per Decu buy, bought or skipped), for a spreadsheet. */
+export function toCsv(records) {
+  const cols = ['time_utc', 'coin', 'mint', 'bought', 'skip_reason', 'decu_sol', 'decu_usd', 'execution_latency_s', 'blocks_after_decu', 'entry_premium_pct', 'fcat_pct', 'fcat_exit', 'cat3_pct', 'cat5_pct', 'cat10_pct', 'btsab_s', 'peak_pct', 'worst_pct', 'pcat_pct', 'your_rules_pct', 'your_rules_exit', 'shape', 'predicted_pct', 'holders', 'mcap_usd', 'coin_age_min', ...Array.from({ length: 16 }, (_, s) => `s${s}_pct`)];
+  const p = (x) => (x == null || !Number.isFinite(x) ? '' : (x * 100).toFixed(2));
+  const q = (v) => { const t = v == null ? '' : String(v); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const rows = records.map((r) => [r.time, r.symbol || '', r.mint, r.taken === false ? 'no' : 'yes', r.skipReason || '', r.hisSol ?? '', r.hisUsd != null ? Math.round(r.hisUsd) : '', r.delaySec ?? '', r.latency?.blocksAfter ?? '', p(r.entryGap), p(r.fcat), r.fcatExit || '',
+    p(r.curve?.[3]), p(r.curve?.[5]), p(r.curve?.[10]), r.btsab ?? '', p(r.peak), p(r.worst), p(r.pcat), p(r.ruleSim?.pnl), r.ruleSim ? (r.ruleSim.open ? 'holding at 15 s' : `${r.ruleSim.how} at ${r.ruleSim.sec}s`) : '', r.shape || '', p(r.prediction?.fcat), r.coin?.holders ?? '', r.coin?.marketCapUsd != null ? Math.round(r.coin.marketCapUsd) : '', r.coin?.ageSec != null ? Math.round(r.coin.ageSec / 60) : '',
+    ...Array.from({ length: 16 }, (_, s) => p(r.curve?.[s]))].map(q).join(','));
+  return [cols.join(','), ...rows].join('\n') + '\n';
+}
+
 /** Short text of the summary for alerts and the status command. */
 // ===== MEMORY BANK =====
 // Every studied trade is grouped by what was known about it (Decu's buy size, how late the bot was,
