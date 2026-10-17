@@ -232,7 +232,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
     let pcat = null, pcatExit = null;
     if (firstPrice) {
       const hs = st.hisSell;
-      const exitPrice = hs && hs.sol > 0 && hs.soldRaw > 0 ? hs.sol / hs.soldRaw : st.values.findLast((v) => v != null) / st.raw;
+      const exitPrice = hs && hs.sol > 0 && hs.soldRaw > 1000 ? hs.sol / hs.soldRaw /* a placeholder amount ('1') is never a price */ : st.values.findLast((v) => v != null) / st.raw;
       if (Number.isFinite(exitPrice)) { pcat = exitPrice / firstPrice - 1 - (2 * feeSol) / buySol; pcatExit = hs ? `his sell at ${hs.atSec}s` : '15s mark'; }
     }
     // FCAT: exit at the first full second after his first sell, else 15 s after DECU'S buy (the bot
