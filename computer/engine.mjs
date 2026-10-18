@@ -108,9 +108,11 @@ export class Engine {
           } else {
             const p = this.d.positions[mint];
             if (!p || BigInt(p.raw) === 0n) throw new Error('no filled bot position');
-            let available = BigInt(p.raw);
-            if (this.c.mode === 'live') { const actual = BigInt(await this.a.tokens(mint)); if (actual < available) available = actual; }
+            let available = BigInt(p.raw), onChain = BigInt(p.raw);
+            if (this.c.mode === 'live') { onChain = BigInt(await this.a.tokens(mint)); if (onChain < available) available = onChain; }
             job.raw = fractionRaw(available,s.soldRaw,s.beforeRaw).toString();
+            // what the wallet holds on-chain: a sell of exactly this much may also close the token account
+            job.chainRaw = onChain.toString();
             if (BigInt(job.raw) === 0n) throw new Error('sell rounds to zero tokens');
           }
           this.d.jobs[mint] = job; this.d.queues[mint].shift(); this.event('building',{mint,side:job.side,sol:job.sol,raw:job.raw},{soon:true});

@@ -139,3 +139,67 @@ Your current exit rules are unchanged.
   - pushed confirmation
   - the holder money (curve and dev excluded)
   - the dev taken from Decu's trade event
+
+## v3.3 (local sell builder, lower fees, Solscan credits)
+
+**Local sell builder, integrated with the local buy builder:**
+- **One sell desk for the whole run, never rebuilt per trade.** A coin is armed the moment it is bought, from the same trade context the buy used. Its sell accounts are worked out once and its token balance is watched. The coin is disarmed only when fully sold. After a restart, held coins are re-armed from the saved position.
+- **Built inside the bot.** Every sell (stop-loss, the +15% gate, Decu's sell, sell-all) is pump.fun `sell` with the 14 IDL accounts plus pump.fun's extra accounts, exactly as pump.fun's own SDK 4.1.0 builds it. A cashback coin adds the user's volume account; every sell adds bonding-curve-v2 and a buyback fee recipient.
+  - Minimum SOL out: the live curve price less `SELL_SLIPPAGE_PCT`.
+  - The sell math matches Decu's real sell to the lamport.
+- **No round trip before the safety simulation.** The price comes pushed (or one read), the token balance comes pushed, and the SOL balance is cached. The build takes about 0.13 ms and signing 0.16 ms.
+- **Before:** a token-balance lookup, a fresh balance lookup and a PumpPortal round trip, about 0.3-0.7 s before the simulation.
+- **Same safety check as every trade.** If it refuses the local sell, the same sell is tried without the account close, then PumpPortal. PumpPortal also sells coins that left the curve (PumpSwap) or aren't quoted in SOL.
+- **Token account closed when the sell empties it** (`CLOSE_TOKEN_ACCOUNT`): the ~0.002 SOL rent comes back on every coin, about 2% of a 0.1 SOL trade.
+- **Paper assembles the same sell on every paper exit** (never signed or sent), so the desk is proven before live money depends on it. The dashboard shows armed coins, builds, closes and fallbacks.
+
+**Local buy fix:**
+- pump.fun added a 4th argument to `buy_exact_sol_in` (`partial_fill`, IDL after Oct 11). The local buy now sends it (false = all or nothing). A program without the argument ignores the extra byte.
+
+**Fees:**
+- Capped at 0.001 priority + 0.002 tip = **0.003 SOL per side**, down from 0.008. The paper data showed max fees took a third to over half of the profit, while being faster didn't buy cheaper.
+- Fee estimates are refreshed every 30 s instead of 10 s.
+
+**Solscan credits** (the plan was burning ~1.6M CU a day, 16,195 requests of 100 CU, mostly the watcher polling every 5 s):
+- The watcher polls every 10 min while Helius is healthy and nothing is held, every 30 s while coins are held, and every 15 s while the Helius websocket is down. It doesn't poll at all when the bot is off.
+- A hard daily budget (`SOLSCAN_MAX_PER_DAY` 2500) is counted across restarts.
+- The SOL price comes from Jupiter / DexScreener first; Solscan is last.
+- Expected: about 500-600 requests a day (~60k CU, about 96% less).
+
+**Helius credits:**
+- Holder lookups only for bought coins and skipped ones inside 25%.
+- The SOL price no longer uses Helius first.
+- Blockhash refresh every 3 s instead of 2 s (live).
+- Fee estimates every 30 s instead of 10 s.
+
+**Found and fixed in the final review (before any live money):**
+- **The safety check now reads a closed token account correctly.** The simulation returns a closed account as 0 lamports with no data, not as "missing" (checked in Solana's RPC source). Token-2022 coins, which are most new pump.fun coins, come back this way. The check used to call that an invalid account, so every full sell would have failed its first simulation and needed a second one.
+- **A pushed token balance is not trusted across a websocket reconnect.** The server only pushes changes, so a change made while the socket was down would be missed. Until the next push the bot reads the chain instead. The same rule now applies to pushed prices: the exit rules poll until the next price push after a reconnect.
+- **After a failed sell, the next try reads the balance from the chain.**
+- **A failed buy disarms its sell and closes its token-account watch,** so subscriptions don't pile up.
+- **Re-arming a held coin (a second ladder buy) keeps the newest price.** An older price from the trade event never replaces a newer pushed one.
+- **Arming the sell is off the buy's critical path.** It runs while the buy's safety simulation waits on the network, still well before the buy lands.
+- **The "enough SOL for the sell fees" check applies to both sell builders.** A short cached balance is read again before a sell is refused.
+- **Faster address math.** The on-curve test used for every new coin's addresses is 4.8× faster: one exponentiation instead of two, with a shift-based reduction. It gives identical answers on 200,022 test inputs and matches pump.fun's published addresses. Building a buy for a new coin dropped from 4.2 ms to 1.0 ms (p95 from 8.2 ms to 1.8 ms).
+- **A stray empty Solscan counter file is no longer written** when Solscan is off (it is also gitignored).
+
+**Tests: 138/138.** New in the review:
+- the closed account as the RPC really returns it
+- the stale pushed balance after a reconnect
+- the subscription re-acknowledgment time
+- LIVE buy → sell desk (armed and watched before the buy is sent; sells with no lookups after landing)
+- a failed buy disarming
+- the SOL re-read for sell fees
+- pump.fun's published addresses
+
+Earlier v3.3 tests:
+- sell accounts vs pump.fun's IDL
+- sell math vs Decu's real sell
+- the sell transaction
+- the safety check accepting a sell that closes the account
+- the buy's partial_fill
+- the curve decoder
+- the sell desk
+- a LIVE end-to-end stop-loss sell (local, no PumpPortal, pushed balance, account closed, disarmed)
+- the fallback chain
+- the Solscan budget and schedule

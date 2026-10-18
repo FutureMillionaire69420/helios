@@ -345,13 +345,17 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
     start({ mint, cost, raw, his = {}, shadow = null, entryPrice = null, fill = null }) {
       if (active.has(mint) || active.size >= maxConcurrent || !(cost > 0) || !(Number(raw) > 0)) return null;
       const st = { mint, cost, raw: Number(raw), his, values: [], startedAt: Date.now(), hisSell: null, shadow, entryPrice, fill, sellFee: sellFee(), holderPath: [], holderPending: [] };
+      // Holder lookups cost data credits: every bought coin, and skipped ones only inside the widest
+      // reported filter (the ones the filters and the holder rule are compared on).
+      const hisPx = his?.sol > 0 && his?.raw > 0 ? his.sol / his.raw : null, gap0 = hisPx && entryPrice > 0 ? entryPrice / hisPx - 1 : null;
+      const holdersHere = sampleHolders && (!shadow || (gap0 != null && gap0 <= Math.max(filterPct, ...reportPcts) / 100 + 1e-9));
       active.set(mint, st);
       return new Promise((resolve) => {
         let s = 0;
         const tick = async () => {
           const due = st.startedAt + s * stepMs;
           // holder money + market cap every holderEverySec (in parallel; never delays the price samples)
-          if (sampleHolders && s % holderEverySec === 0) { const at = s; st.holderPending.push(timed(sampleHolders(mint)).then((h) => { if (h) st.holderPath.push({ s: at, holders: h.holders ?? null, mcapUsd: h.mcapUsd ?? null, valueUsd: h.valueUsd ?? null, devPct: h.devPct ?? null, devKnown: h.devKnown ?? null }); }).catch(() => {})); }
+          if (holdersHere && s % holderEverySec === 0) { const at = s; st.holderPending.push(timed(sampleHolders(mint)).then((h) => { if (h) st.holderPath.push({ s: at, holders: h.holders ?? null, mcapUsd: h.mcapUsd ?? null, valueUsd: h.valueUsd ?? null, devPct: h.devPct ?? null, devKnown: h.devKnown ?? null }); }).catch(() => {})); }
           st.values[s] = await timed(quoteSell(mint, st.raw).then((v) => (Number.isFinite(v) ? v : null)).catch(() => null));
           s++;
           if (s > windowSec) return resolve(await finish(st)); // hard stop: never studies a coin longer than the window

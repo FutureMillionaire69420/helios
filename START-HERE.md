@@ -112,7 +112,7 @@ Decu's Raydium LaunchLab / bonk.fun coins are ignored completely: no copy, no st
 
 A Decu buy the bot did not take (filtered, 2 coins already open, daily cap, paused) is still studied and shown on the dashboard, so the research never hides the trades it missed. You get a phone alert for a skipped buy only when it was inside 25% (`SKIPPED_ALERTS=report`; `true` = all, `false` = none).
 
-**Speed:** fees are set to the top of the market for every buy and sell (`FEE_MODE=max`: up to 0.003 SOL priority + 0.005 SOL tip per side). The current block, "your transaction confirmed" and every price change of a held coin are **pushed** to the bot over the websocket, so it never waits for the next check.
+**Speed:** fees follow the market for every buy and sell, capped at **0.003 SOL per side** (`FEE_MODE=max`: up to 0.001 SOL priority + 0.002 SOL tip). The bot builds both the buy AND the sell itself (no PumpPortal round trip). Each coin's sell is ready the moment it is bought, and selling everything also closes the coin's token account (about 0.002 SOL rent back per coin). The current block, "your transaction confirmed" and every price change of a held coin are **pushed** to the bot over the websocket, so it never waits for the next check.
 
 **Paper tests of other exits** (on every trade, nothing changes for real): **c** = a -20% stop counted on your money, **d** = sell when the holders' money (dev excluded) falls behind the market cap. Notes and the dashboard compare each with your real rules on the same trades. The real stop-loss **always** sells.
 
@@ -121,6 +121,8 @@ A Decu buy the bot did not take (filtered, 2 coins already open, daily cap, paus
 **Selling:** the bot sells on Decu's sell only once his sell is **confirmed** on-chain (about 0.4 s later), so a sell of his that fails can't make it sell. Buys still use the fastest path.
 
 **Stop-loss alerts, in order:** STOP TRIGGERED → SELL SENT (live) → POSITION CLOSED (with the trigger vs the real fill). If prices can't be read 3 times in a row you get *Price checks failing*; after 6 it sells anyway. If a sell fails it retries at once; after 3 failures you get **CAN'T SELL** and it keeps trying.
+
+**Solscan credits:** Solscan is asked only when it helps: every 10 min while Helius works and nothing is held, every 30 s while coins are held, every 15 s if Helius is down, and never more than 2,500 requests a day (the dashboard shows today's count).
 
 **Bot power ON / OFF (dashboard, top):** OFF stops everything that uses your Helius and Solscan credits. The bot stops watching Decu, stops checking prices and stops all background lookups. The dashboard keeps working, and ON starts it all again. The choice is kept after restarts. In LIVE, OFF asks first if coins are still held, because their stop-loss can't run while it's off.
 

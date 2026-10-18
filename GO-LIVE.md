@@ -32,7 +32,9 @@ Do these in order. Don't skip a step because an earlier one passed.
 | `SLIPPAGE_PCT` | `20` | 10% failed often on his coins |
 | `MAX_PAY_ABOVE_DECU_PCT` | `15` (default) | entry-premium filter (price vs price), fail-closed: skip buys over 15% above Decu's price, or when a price is missing |
 | `FILTER_REPORT_PCTS` | `10,25` | alerts also show what a 10% and a 25% limit would have done (report only) |
-| `FEE_MODE` | `max` (default) | top-of-market fees on every buy and sell, capped by `PRIORITY_FEE_MAX_SOL` `0.003` + `TIP_MAX_SOL` `0.005` (up to 0.008 SOL per side). `fixed` = `PRIORITY_FEE_SOL` + `TIP_SOL` |
+| `FEE_MODE` | `max` (default) | market fees on every buy and sell, capped by `PRIORITY_FEE_MAX_SOL` `0.001` + `TIP_MAX_SOL` `0.002` (at most 0.003 SOL per side). `fixed` = `PRIORITY_FEE_SOL` + `TIP_SOL` |
+| `LOCAL_SELL` / `CLOSE_TOKEN_ACCOUNT` | `true` / `true` | the bot builds its sells itself (PumpPortal as fallback) and closes the token account when it sells everything (rent back) |
+| `SOLSCAN_MAX_PER_DAY` | `2500` | hard daily Solscan request budget (100 CU each) |
 | `PUSH_STREAM` | `true` | blocks, confirmations and prices pushed over the websocket (faster stop-loss and confirmations) |
 | `NTFY_TOKEN` | optional | ntfy access token: lifts the free daily alert limit |
 | `SENDER_URL` | Render (Oregon): `http://slc-sender.helius-rpc.com/fast` | the regional Helius Sender nearest the server (the API key is never sent over http) |

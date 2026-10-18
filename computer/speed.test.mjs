@@ -36,15 +36,19 @@ test('push stream: blocks, confirmations and curve changes arrive pushed; reconn
   const got = [];
   const un = s.watchAccount('CURVE', (b64) => got.push(b64));
   assert.equal(un.ready(), false, 'not ready until the server acknowledges');
+  assert.equal(un.readyAt(), null);
   ws.ack('accountSubscribe', 13); assert.equal(un.ready(), true);
+  const firstAck = un.readyAt(); assert.ok(firstAck > 0, 'when the server acknowledged it');
   ws.push('accountNotification', 13, {value: {data: ['AAEC', 'base64']}});
   assert.deepEqual(got, ['AAEC']);
   ws.close(); assert.equal(s.connected(), false); assert.equal(s.slot(), null, 'no stale block while down'); assert.equal(un.ready(), false);
+  assert.equal(un.readyAt(), null, 'down: not acknowledged');
   await sleep(600);
   const ws2 = FakeWS.all[1];
   assert.ok(ws2, 'reconnected');
   assert.deepEqual(ws2.sent.map((x) => x.method).sort(), ['accountSubscribe', 'slotSubscribe'], 're-subscribed (the finished signature is not)');
-  ws2.ack('accountSubscribe', 21); ws2.push('accountNotification', 21, {value: {data: ['BBBB', 'base64']}});
+  ws2.ack('accountSubscribe', 21); assert.ok(un.readyAt() >= firstAck + 500, 'the re-subscription has its own time: pushes before it are older');
+  ws2.push('accountNotification', 21, {value: {data: ['BBBB', 'base64']}});
   assert.deepEqual(got, ['AAEC', 'BBBB']);
   un(); assert.ok(ws2.sent.some((x) => x.method === 'accountUnsubscribe' && x.params[0] === 21));
   const [late] = await Promise.all([s.waitSignature('LATE', {timeoutMs: 20}), sleep(40)]); // (its timer is unref'd)
@@ -137,8 +141,9 @@ test('alerts: price-vs-price premium, 10% / 15% (trading) / 25% labels, holders 
   assert.ok(alerts.length > n);
   const R = s.research();
   assert.deepEqual(R.filters.map((f) => [f.pct, f.trades, f.trading]), [[10, 0, false], [15, 1, true], [25, 2, false]]);
-  assert.equal(R.holders.risky.trades, 3);
-  assert.equal(R.exitTests[1].name, 'holder momentum'); assert.equal(R.exitTests[1].trades, 3);
+  // holder lookups: the bought coin and the skipped one inside 25%; the skip at 40% is not looked up (saves credits)
+  assert.equal(R.holders.risky.trades, 2); assert.equal(R.holders.unknown, 1);
+  assert.equal(R.exitTests[1].name, 'holder momentum'); assert.equal(R.exitTests[1].trades, 2);
   const csv = toCsv(s.records).split('\n');
   assert.match(csv[0], /premium_basis,cost_premium_pct,buy_fee_sol,sell_fee_sol,holder_rule,holder_money_usd,holder_money_needed_usd,dev_pct,test_c_stop_on_money_pct/);
   assert.match(csv[1], /,price,/); assert.match(csv[1], /,RISKY,900,1000,30\.00,/);
@@ -151,15 +156,17 @@ test('latency line shows detection in exact blocks', () => {
 
 test('fees: max mode follows Jito\'s 99th percentile tip, falls back to the caps when unknown', async (t) => {
   const saved = {...process.env}; t.after(() => { setFetch(null); for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]; Object.assign(process.env, saved); });
-  Object.assign(process.env, {FEE_MODE: 'max', TIP_MAX_SOL: '0.005', PRIORITY_FEE_MAX_SOL: '0.003'});
-  setFetch(async (url) => ({ok: true, json: async () => (/tip_floor/.test(url) ? [{landed_tips_99th_percentile: 0.0021}] : {result: {priorityFeeEstimate: 1_000_000}})}));
+  for (const k of ['TIP_MAX_SOL', 'PRIORITY_FEE_MAX_SOL']) delete process.env[k]; // the defaults: 0.002 + 0.001 = 0.003 per side
+  process.env.FEE_MODE = 'max';
+  setFetch(async (url) => ({ok: true, json: async () => (/tip_floor/.test(url) ? [{landed_tips_99th_percentile: 0.0015}] : {result: {priorityFeeEstimate: 1_000_000}})}));
   await refreshFees();
-  assert.equal(currentFees().tipSol, 0.0021, '99th percentile of landed tips');
-  assert.ok(currentFees().priorityFeeSol > 0 && currentFees().priorityFeeSol <= 0.003);
+  assert.equal(currentFees().tipSol, 0.0015, '99th percentile of landed tips (under the 0.002 cap)');
+  assert.ok(currentFees().priorityFeeSol > 0 && currentFees().priorityFeeSol <= 0.001);
   setFetch(async (url) => (/tip_floor/.test(url) ? {ok: false, status: 503, text: async () => ''} : {ok: true, json: async () => ({result: {priorityFeeEstimate: 9e12}})}));
   await refreshFees();
-  assert.equal(currentFees().tipSol, 0.005, 'unknown: the cap (never stuck on a low tip)');
-  assert.ok(currentFees().priorityFeeSol <= 0.003, 'never above the priority cap');
+  assert.equal(currentFees().tipSol, 0.002, 'unknown: the cap (never stuck on a low tip)');
+  assert.ok(currentFees().priorityFeeSol <= 0.001, 'never above the priority cap');
+  assert.ok(currentFees().priorityFeeSol + currentFees().tipSol <= 0.003 + 1e-12, 'at most 0.003 SOL per side');
 });
 
 test('SOL price never blocks a buy; confirmation comes from the push when it is live', async (t) => {

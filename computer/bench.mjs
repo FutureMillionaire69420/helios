@@ -17,6 +17,11 @@ const ctx = {...P.buyContextFromLogs(fx.buy.logs, config.leader, b58encode), ...
 // a coin the bot has never seen (its own addresses are new; the shared ones are remembered)
 let coin = 0; const freshCtx = () => ({...ctx, mint: b58encode(Buffer.alloc(32, (++coin % 250) + 1).fill(coin >> 8, 0, 1)), creator: b58encode(Buffer.alloc(32, (coin % 200) + 3))});
 time('build buy, NEW coin (18 accounts)', 200, () => P.buildBuyTransaction({user: kp.publicKey, ctx: freshCtx(), lamports: 100_000_000, slippagePct: 20, blockhash: BH, tipAccount: ctx.feeRecipient, tipLamports: 1_000_000}, h));
+// SELL: a coin armed at its buy (the desk works every address out then); a sell is assembly + signing only
+const desk = P.createSellDesk({helpers: h});
+desk.arm(ctx.mint, {tokenProgram: ctx.tokenProgram, creator: ctx.creator, mayhem: false, feeBps: ctx.feeBps, creatorFeeBps: ctx.creatorFeeBps, user: kp.publicKey, curve: {vSol: ctx.vSol, vTok: ctx.vTok, complete: false}});
+const gl = {feeRecipients: [g.feeRecipient], reservedFeeRecipients: [g.feeRecipient], buybackFeeRecipients: [g.buybackRecipient]};
+time('build sell, armed coin (16 accounts + close)', 500, () => desk.build({mint: ctx.mint, raw: 1_000_000_000n, slippagePct: 35, blockhash: BH, priorityLamports: 1_000_000, tipAccount: ctx.feeRecipient, tipLamports: 1_000_000, closeAccount: true, global: gl}));
 time('build buy, same coin again (18 accounts)', 500, () => P.buildBuyTransaction({user: kp.publicKey, ctx, lamports: 100_000_000, slippagePct: 20, blockhash: BH, tipAccount: ctx.feeRecipient, tipLamports: 1_000_000}, h));
 const {bytes} = P.buildBuyTransaction({user: kp.publicKey, ctx, lamports: 100_000_000, slippagePct: 20, blockhash: BH}, h);
 time('sign it (ed25519)', 500, () => signTransaction(bytes, kp));

@@ -28,10 +28,26 @@ export function solscanQuery(params = {}) {
   return q.toString();
 }
 
-export function solscanClient({ apiKey, http, base = SOLSCAN_BASE, timeoutMs = 8000 }) {
+/**
+ * Solscan Pro charges compute units per request (100 CU for the calls the bot makes). Every request is
+ * counted per UTC day and refused past budgetPerDay, so the monthly credits can't run out early.
+ * load()/save() persist the count across restarts.
+ */
+export function solscanClient({ apiKey, http, base = SOLSCAN_BASE, timeoutMs = 8000, budgetPerDay = 0, load = () => null, save = () => {}, now = () => Date.now() }) {
   const enabled = Boolean(apiKey);
+  const day = () => new Date(now()).toISOString().slice(0, 10);
+  let usage = (() => { try { const u = load(); return u && u.day === day() ? { day: u.day, count: Number(u.count) || 0, byRoute: u.byRoute || {} } : null; } catch { return null; } })() || { day: day(), count: 0, byRoute: {} };
+  let unsaved = 0;
+  const count = (route) => {
+    if (usage.day !== day()) usage = { day: day(), count: 0, byRoute: {} };
+    usage.count++; usage.byRoute[route] = (usage.byRoute[route] || 0) + 1;
+    if (++unsaved >= 10) { unsaved = 0; try { save(usage); } catch { /* best effort */ } }
+  };
+  const left = () => (budgetPerDay > 0 ? Math.max(0, budgetPerDay - (usage.day === day() ? usage.count : 0)) : Infinity);
   const get = async (route, params) => {
     if (!enabled) throw new Error('SOLSCAN_API_KEY not set');
+    if (left() <= 0) throw new Error(`Solscan daily budget reached (${budgetPerDay} requests): paused until 00:00 UTC`);
+    count(route);
     const qs = solscanQuery(params);
     const r = await http(`${base}${route}${qs ? `?${qs}` : ''}`, { headers: { token: apiKey }, timeoutMs });
     if (r?.success === false) throw new Error(`Solscan ${route}: ${r.errors?.message || r.message || 'request failed'}`.slice(0, 200));
@@ -41,6 +57,9 @@ export function solscanClient({ apiKey, http, base = SOLSCAN_BASE, timeoutMs = 8
   return {
     enabled,
     get,
+    /** Requests today (UTC), per route, and what is left of the daily budget. */
+    usage: () => ({ day: usage.day === day() ? usage.day : day(), requests: usage.day === day() ? usage.count : 0, budget: budgetPerDay || null, left: left(), byRoute: usage.day === day() ? { ...usage.byRoute } : {} }),
+    flush: () => { if (!unsaved) return; unsaved = 0; try { save(usage); } catch { /* best effort */ } },
     lastBlock: async () => (await get('/block/last', { limit: 10 }))?.[0] || null,
     defiActivities: (address, { page = 1, pageSize = 100, fromTime, toTime } = {}) =>
       get('/account/defi/activities', { address, activity_type: SWAP_TYPES, page, page_size: pageSize, sort_by: 'block_time', sort_order: 'desc', from_time: fromTime, to_time: toTime }),
@@ -207,25 +226,42 @@ export function compareDetection(swap, signals) {
  * Second watcher on the leader through Solscan. Re-reads the recent window every intervalMs
  * and hands each swap signature to onSignature(sig, 'solscan'). The runtime deduplicates.
  */
-export function startSolscanWatcher({ client, leader, intervalMs = 10000, horizonSec = 300, startDelayMs = 15000, onSignature, log = () => {}, status = {} }) {
+/**
+ * Second watcher on the leader through Solscan. Each poll re-reads the recent window and hands every
+ * swap signature to onSignature(sig, 'solscan'); the runtime deduplicates.
+ * schedule() decides how often, from what the bot is doing ({ms, mode}): rarely while Helius is healthy
+ * and nothing is held, more often while coins are held (a missed sell of his matters), and when Helius
+ * is down. ms = Infinity: no polls (power off, budget used up). Without schedule: every intervalMs.
+ */
+export function startSolscanWatcher({ client, leader, intervalMs = 10000, horizonSec = 300, startDelayMs = 15000, onSignature, log = () => {}, status = {}, schedule = null, tickMs = 1000 }) {
   if (!client?.enabled || !(intervalMs > 0)) return () => {};
-  let stopped = false, timer;
-  const poll = async () => {
-    if (stopped) return;
+  let stopped = false, timer, lastAt = 0;
+  const plan = () => { try { return schedule ? schedule() : { ms: intervalMs, mode: 'fixed' }; } catch { return { ms: intervalMs, mode: 'fixed' }; } };
+  const poll = async (p) => {
     const t0 = Date.now();
+    lastAt = t0;
     try {
       const rows = await client.defiActivities(leader, { pageSize: 40 });
       const cutoff = Date.now() / 1000 - horizonSec;
-      status.solscan = { ok: true, lastPoll: new Date().toISOString(), latencyMs: Date.now() - t0 };
+      status.solscan = { ok: true, lastPoll: new Date().toISOString(), latencyMs: Date.now() - t0, mode: p.mode, everySec: Number.isFinite(p.ms) ? p.ms / 1000 : null };
       for (const a of (Array.isArray(rows) ? rows : []).reverse()) if (a.block_time >= cutoff && a.trans_id) onSignature(a.trans_id, 'solscan');
     } catch (e) {
-      status.solscan = { ok: false, lastPoll: new Date().toISOString(), error: e.message.slice(0, 160) };
-      log('solscan poll error: ' + e.message.slice(0, 160));
+      const budget = /daily budget/.test(e.message);
+      status.solscan = budget ? { ok: null, lastPoll: new Date().toISOString(), note: e.message.slice(0, 160), mode: 'budget' } : { ok: false, lastPoll: new Date().toISOString(), error: e.message.slice(0, 160), mode: p.mode };
+      if (!budget) log('solscan poll error: ' + e.message.slice(0, 160));
     }
-    if (!stopped) timer = setTimeout(poll, intervalMs);
+  };
+  // A cheap 1 s tick (no network) checks whether a poll is due under the current schedule, so a change
+  // (a coin bought, Helius dropping) takes effect within a second.
+  const tick = async () => {
+    if (stopped) return;
+    const p = plan();
+    if (Number.isFinite(p.ms) && p.ms > 0 && Date.now() - lastAt >= p.ms) await poll(p);
+    else if (status.solscan) { status.solscan.mode = p.mode; status.solscan.everySec = Number.isFinite(p.ms) ? p.ms / 1000 : null; }
+    if (!stopped) { timer = setTimeout(tick, schedule ? tickMs : Math.min(tickMs, intervalMs)); timer.unref?.(); }
   };
   // Start after Helius has replayed its own window, so startup history isn't counted as a gap.
-  timer = setTimeout(poll, startDelayMs);
+  timer = setTimeout(tick, startDelayMs);
   timer.unref?.();
   return () => { stopped = true; clearTimeout(timer); };
 }

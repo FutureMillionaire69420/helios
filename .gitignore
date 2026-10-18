@@ -12,3 +12,5 @@ diagnose-*.json
 *.log
 trades.log.*
 study-*.jsonl
+solscan-usage.json
+solscan-usage.json.tmp

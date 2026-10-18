@@ -56,7 +56,7 @@ export function createStream({ url, WebSocketImpl = globalThis.WebSocket, log = 
         const p = pending.get(m.id); pending.delete(m.id);
         const s = subs.get(p.key);
         if (typeof m.result === 'number') {
-          if (s) { s.subId = m.result; bySubId.set(m.result, p.key); s.ready = true; }
+          if (s) { s.subId = m.result; bySubId.set(m.result, p.key); s.ready = true; s.readyAt = Date.now(); }
           else send(p.unsubMethod, [m.result]); // cancelled before the server answered: close it there too
         }
         return;
@@ -82,6 +82,9 @@ export function createStream({ url, WebSocketImpl = globalThis.WebSocket, log = 
       if (s.subId != null) { bySubId.delete(s.subId); if (open) send(s.unsubMethod, [s.subId]); }
     };
     un.ready = () => fresh() && !!subs.get(key)?.ready; // pushes for THIS subscription are flowing
+    // When the server last acknowledged it. The server pushes changes only, never the current state, so a
+    // value pushed before a reconnect's re-subscription may have missed a change made while the socket was down.
+    un.readyAt = () => { const s = subs.get(key); return s?.ready ? s.readyAt : null; };
     return un;
   };
 

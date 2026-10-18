@@ -172,3 +172,33 @@ test('diagnose does not report false gaps when flooded Helius history ends befor
   assert.deepEqual(r.coverage.missingFromHelius, []);
   assert.equal(r.warnings.some((w) => /missing from Helius/.test(w)), false);
 });
+
+test('Solscan daily budget: counted per route, kept across restarts, refused past the limit, reset at 00:00 UTC', async () => {
+  let saved = null, t = Date.UTC(2026, 9, 18, 23, 59), calls = 0;
+  const http = async () => { calls++; return {success: true, data: []}; };
+  const mk = () => solscanClient({apiKey: 'k', http, budgetPerDay: 3, load: () => saved, save: (u) => { saved = JSON.parse(JSON.stringify(u)); }, now: () => t});
+  const a = mk();
+  await a.defiActivities(LEADER); await a.lastBlock();
+  assert.deepEqual(a.usage(), {day: '2026-10-18', requests: 2, budget: 3, left: 1, byRoute: {'/account/defi/activities': 1, '/block/last': 1}});
+  a.flush();
+  const b = mk(); // a restart keeps today's count
+  assert.equal(b.usage().requests, 2);
+  await b.lastBlock();
+  await assert.rejects(b.lastBlock(), /daily budget reached \(3 requests\)/);
+  assert.equal(calls, 3, 'the refused request never reached Solscan');
+  t += 120_000; // past midnight UTC
+  assert.equal(b.usage().left, 3); await b.lastBlock(); assert.equal(b.usage().requests, 1);
+});
+
+test('Solscan watcher follows the schedule: no polls while it says Infinity, polls as soon as it changes', async () => {
+  const now = Math.floor(Date.now() / 1000), status = {};
+  let polls = 0, plan = {ms: Infinity, mode: 'off (power off)'};
+  const client = {enabled: true, defiActivities: async () => { polls++; return [{trans_id: 'x', block_time: now}]; }};
+  const stop = startSolscanWatcher({client, leader: LEADER, startDelayMs: 0, tickMs: 5, onSignature: () => {}, status, schedule: () => plan});
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(polls, 0, 'off: nothing asked');
+  plan = {ms: 25, mode: 'coins held: watching for a missed sell'};
+  await new Promise((r) => setTimeout(r, 70)); stop();
+  assert.ok(polls >= 2 && polls <= 4, `${polls} polls in 70 ms at every 25 ms`);
+  assert.equal(status.solscan.mode, 'coins held: watching for a missed sell'); assert.equal(status.solscan.ok, true);
+});

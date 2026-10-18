@@ -1,11 +1,12 @@
-// LOCAL PUMP.FUN BUY BUILDER: builds the buy transaction inside the bot instead of asking
-// PumpPortal's server, so a buy needs no web round trip at all.
+// LOCAL PUMP.FUN BUY + SELL BUILDER: builds the trades inside the bot instead of asking PumpPortal's
+// server, so neither a buy nor a sell needs a web round trip before its safety simulation.
 //
 // Everything comes from Decu's own trade event in the websocket logs (creator, fee recipient,
 // reserves after his buy, token program) plus a blockhash the bot keeps fresh in the background.
-// Instruction: pump.fun `buy_exact_sol_in` (spend exactly X SOL, receive at least N tokens), with
-// accounts and discriminator taken from pump.fun's own IDL stored on-chain (read 2026-10-11).
-// Bonding-curve coins only; graduated (PumpSwap) coins fall back to PumpPortal.
+// Buy: pump.fun `buy_exact_sol_in` (spend exactly X SOL, receive at least N tokens). Sell: `sell`
+// (sell exactly N tokens, receive at least X SOL). Accounts, arguments and the extra accounts after the
+// IDL list follow pump.fun's own SDK (@pump-fun/pump-sdk 4.1.0, npm, 2026-10-13) and its IDL.
+// Bonding-curve coins quoted in SOL only; graduated (PumpSwap) and token-quoted coins use PumpPortal.
 
 import crypto from 'node:crypto';
 
@@ -17,6 +18,12 @@ export const ATA_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
 export const SYSTEM = '11111111111111111111111111111111';
 export const COMPUTE_BUDGET = 'ComputeBudget111111111111111111111111111111';
 const BUY_EXACT_SOL_IN = Buffer.from('38fc74089edfcd5f', 'hex');
+const SELL = Buffer.from('33e685a4017f83ad', 'hex');
+export const WSOL = 'So11111111111111111111111111111111111111112';
+// Used only when the pump.fun Global account can't be read (pump-sdk 4.1.0: CURRENT_FEE_RECIPIENTS and
+// CURRENT_FEE_RECIPIENTS_FOR_BUYBACK, "same keys, same order as Global.buybackFeeRecipients on mainnet").
+export const STATIC_FEE_RECIPIENTS = ['62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV', '7VtfL8fvgNfhz17qKRMjzQEXgbdpnHHHQRh54R9jP2RJ', '7hTckgnGnLQR6sdH7YkqFTAA7VwTfYFaZ6EhEsU3saCX', '9rPYyANsfQZw3DnDmKE3YCQF5E8oD89UXoHn9JFEhJUz', 'AVmoTthdrX6tKt4nDjco2D775W2YK3sDhxPcMmzUAmTY', 'CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM', 'FWsW1xNtWscwNmKv6wVsU1iTzRN6wmmk3MjxRP5tT7hz', 'G5UZAVbAf46s7cKWoyKu8kYTip9DGTpbLZ2qa9Aq69dP'];
+export const STATIC_BUYBACK_RECIPIENTS = ['5YxQFdt3Tr9zJLvkFccqXVUwhdTWJQc1fFg2YPbxvxeD', '9M4giFFMxmFGXtc3feFzRai56WbBqehoSeRE5GK7gf7', 'GXPFM2caqTtQYC2cJ5yJRi9VDkpsYZXzYdwYpGnLmtDL', '3BpXnfJaUTiwXnJNe7Ej1rcbzqTTQUvLShZaWazebsVR', '5cjcW9wExnJJiqgLjq7DEG75Pm6JBgE1hNv4B2vHXUW6', 'EHAAiTxcdDwQ3U4bU6YcMsQGaekdzLS3B5SmYo46kJtL', '5eHhjP8JaYkz83CWwvGU2uMUXefd3AazWGx4gpcuEEYD', 'A7hAgCzFw14fejgCp387JUJRMNyz4j89JKnhtKU8piqW'];
 const TRADE_EVENT = Buffer.from('bddb7fd34ee661ee', 'hex');
 const FEE_CONFIG_SEED = Buffer.from('0156e0f693665acf44db1568bf175baa5189cb97f5d2ff3b655d2bb6fd6d18b0', 'hex');
 
@@ -63,8 +70,8 @@ export function pickFeeRecipient(global, mayhem) {
 
 /** Buyback fee recipient: pump.fun now requires one as an extra (17th) account on every buy. */
 export function pickBuybackRecipient(global) {
-  const list = global.buybackFeeRecipients || [];
-  return list.length ? list[Math.floor(Math.random() * list.length)] : null;
+  const list = global?.buybackFeeRecipients?.length ? global.buybackFeeRecipients : STATIC_BUYBACK_RECIPIENTS;
+  return list[Math.floor(Math.random() * list.length)];
 }
 
 /** Token program the coin uses, from the program invocations in the transaction logs. */
@@ -88,16 +95,22 @@ export function tokensOut({ vSol, vTok, feeBps = 95n, creatorFeeBps = 30n }, lam
   return (BigInt(vTok) * net) / (BigInt(vSol) + net);
 }
 
-/** All 16 pump.fun accounts for buy_exact_sol_in, in IDL order. */
-// Derived addresses never change: remember them (most are the same on every buy: global, event
-// authority, fee config, your volume account; a coin's own are reused by its sell and by Decu's next buy).
+// Derived addresses never change: remember them (most are the same on every trade: global, event
+// authority, fee config, your volume account; a coin's own are shared by its buy, its sell and Decu's next buy).
 const pdaMemo = new Map();
-const memo = (key, f) => { let v = pdaMemo.get(key); if (v === undefined) { v = f(); pdaMemo.set(key, v); if (pdaMemo.size > 2000) pdaMemo.delete(pdaMemo.keys().next().value); } return v; };
-export function buyAccounts({ user, mint, tokenProgram, creator, feeRecipient, buybackRecipient = null }, { findProgramAddress, ata: ata0 }) {
-  const pda = (seeds, program = PUMP) => memo(program + ':' + seeds.map((x) => Buffer.from(x).toString('hex')).join(':'), () => findProgramAddress(seeds, program)[0]);
-  const ata = (owner, m, prog) => memo(`ata:${owner}:${m}:${prog}`, () => ata0(owner, m, prog));
-  const b = (s) => Buffer.from(s);
-  const d = (k) => decode58(k);
+const memo = (key, f) => { let v = pdaMemo.get(key); if (v === undefined) { v = f(); pdaMemo.set(key, v); if (pdaMemo.size > 4000) pdaMemo.delete(pdaMemo.keys().next().value); } return v; };
+function addresses({ findProgramAddress, ata: ata0, b58decode }) {
+  const dec = b58decode || decode58;
+  return {
+    pda: (seeds, program = PUMP) => memo(program + ':' + seeds.map((x) => Buffer.from(x).toString('hex')).join(':'), () => findProgramAddress(seeds, program)[0]),
+    ata: (owner, m, prog) => memo(`ata:${owner}:${m}:${prog}`, () => ata0(owner, m, prog)),
+    b: (x) => Buffer.from(x),
+    d: (k) => dec(k),
+  };
+}
+/** All 16 pump.fun accounts for buy_exact_sol_in, in IDL order, then the 2 extra accounts. */
+export function buyAccounts({ user, mint, tokenProgram, creator, feeRecipient, buybackRecipient = null }, h) {
+  const { pda, ata, b, d } = addresses(h);
   const bondingCurve = pda([b('bonding-curve'), d(mint)]);
   return [
     { k: pda([b('global')]), w: false },
@@ -117,11 +130,74 @@ export function buyAccounts({ user, mint, tokenProgram, creator, feeRecipient, b
     { k: pda([b('fee_config'), FEE_CONFIG_SEED], FEE_PROGRAM), w: false },
     { k: FEE_PROGRAM, w: false },
     // Newer pump.fun accounts after the 16 in the IDL, matched against real successful
-    // buy_exact_sol_in transactions (2026-10-11): the coin's bonding-curve-v2 PDA, then a buyback
-    // fee recipient from the global account.
+    // buy_exact_sol_in transactions (2026-10-11) and pump-sdk 4.1.0: the coin's bonding-curve-v2 PDA,
+    // then a buyback fee recipient from the global account.
     { k: pda([b('bonding-curve-v2'), d(mint)]), w: false },
     ...(buybackRecipient ? [{ k: buybackRecipient, w: true }] : []),
   ];
+}
+
+/**
+ * pump.fun `sell`: the 14 IDL accounts in IDL order (creator_vault BEFORE token_program, unlike buy),
+ * then the remaining accounts exactly as pump-sdk 4.1.0 adds them: a cashback coin first adds the user's
+ * volume accumulator (writable); always the coin's bonding-curve-v2 (read-only) and a buyback fee
+ * recipient (writable).
+ */
+export function sellAccounts({ user, mint, tokenProgram, creator, feeRecipient, buybackRecipient, cashback = false }, h) {
+  const { pda, ata, b, d } = addresses(h);
+  const bondingCurve = pda([b('bonding-curve'), d(mint)]);
+  return [
+    { k: pda([b('global')]), w: false },
+    { k: feeRecipient, w: true },
+    { k: mint, w: false },
+    { k: bondingCurve, w: true },
+    { k: ata(bondingCurve, mint, tokenProgram), w: true },
+    { k: ata(user, mint, tokenProgram), w: true },
+    { k: user, w: true, s: true },
+    { k: SYSTEM, w: false },
+    { k: pda([b('creator-vault'), d(creator)]), w: true },
+    { k: tokenProgram, w: false },
+    { k: pda([b('__event_authority')]), w: false },
+    { k: PUMP, w: false },
+    { k: pda([b('fee_config'), FEE_CONFIG_SEED], FEE_PROGRAM), w: false },
+    { k: FEE_PROGRAM, w: false },
+    ...(cashback ? [{ k: pda([b('user_volume_accumulator'), d(user)]), w: true }] : []),
+    { k: pda([b('bonding-curve-v2'), d(mint)]), w: false },
+    { k: buybackRecipient, w: true },
+  ];
+}
+
+/** A coin's bonding curve account (IDL layout, pump-sdk 4.1.0): reserves, complete, creator, mayhem / cashback flags, quote mint. */
+export function decodeBondingCurve(data, b58encode) {
+  let b;
+  try { b = Buffer.isBuffer(data) ? data : Buffer.from(data, 'base64'); } catch { return null; }
+  if (b.length < 49) return null;
+  const u = (o) => b.readBigUInt64LE(o);
+  const out = { vTok: u(8), vSol: u(16), realTok: u(24), realSol: u(32), supply: u(40), complete: b[48] === 1 };
+  if (b.length >= 81) out.creator = b58encode(b.subarray(49, 81));
+  if (b.length >= 83) { out.mayhem = b[81] === 1; out.cashback = b[82] === 1; }
+  // SOL coins store an all-zero quote mint (pump-sdk normalizeQuoteMint); anything else is token-quoted.
+  if (b.length >= 115) { const q = b.subarray(83, 115); out.quoteMint = q.every((x) => x === 0) ? null : b58encode(q); }
+  return out;
+}
+export const quotedInSol = (c) => !c?.quoteMint || c.quoteMint === WSOL;
+
+/** Lamports out for selling `raw` tokens on this curve state, after the protocol and creator fees
+ *  (each rounded up, as the program does). */
+export function solOut({ vSol, vTok, feeBps = 95n, creatorFeeBps = 30n }, raw) {
+  const r = BigInt(raw);
+  if (r <= 0n || BigInt(vTok) <= 0n) return 0n;
+  const gross = (BigInt(vSol) * r) / (BigInt(vTok) + r);
+  const fee = (x, bps) => (x * BigInt(bps) + 9999n) / 10000n;
+  const net = gross - fee(gross, feeBps) - fee(gross, creatorFeeBps);
+  return net > 0n ? net : 0n;
+}
+
+/** Token amount from a token account's data (SPL Token and Token-2022 share the base layout); 0 when closed. */
+export function tokenAccountAmount(data) {
+  let b;
+  try { b = Buffer.isBuffer(data) ? data : Buffer.from(data || '', 'base64'); } catch { return 0n; }
+  return b.length >= 72 ? b.readBigUInt64LE(64) : 0n;
 }
 let decode58 = null;
 
@@ -163,10 +239,120 @@ export function buildBuyTransaction({ user, ctx, lamports, slippagePct, minToken
     { program: COMPUTE_BUDGET, accounts: [], data: Buffer.concat([Buffer.from([2]), u32(cuLimit)]) },
     { program: COMPUTE_BUDGET, accounts: [], data: Buffer.concat([Buffer.from([3]), u64(microLamportsPerCu)]) },
     { program: ATA_PROGRAM, accounts: [{ k: user, w: true, s: true }, { k: accounts[5].k, w: true }, { k: user }, { k: ctx.mint }, { k: SYSTEM }, { k: ctx.tokenProgram }], data: Buffer.from([1]) },
-    { program: PUMP, accounts, data: Buffer.concat([BUY_EXACT_SOL_IN, u64(lamports), u64(minOut), Buffer.from([1])]) },
+    // args: spendable_sol_in, min_tokens_out, track_volume (OptionBool = true), partial_fill (OptionBool =
+    // false: all or nothing). partial_fill was added to the IDL after 2026-10-11; a program without it
+    // ignores the extra byte.
+    { program: PUMP, accounts, data: Buffer.concat([BUY_EXACT_SOL_IN, u64(lamports), u64(minOut), Buffer.from([1, 0])]) },
   ];
   if (tipAccount && tipLamports > 0) ixs.push({ program: SYSTEM, accounts: [{ k: user, w: true, s: true }, { k: tipAccount, w: true }], data: Buffer.concat([u32(2), u64(tipLamports)]) });
   return { bytes: compileLegacy(user, ixs, blockhash, h.b58decode), expectedTokens: expected, minTokensOut: minOut };
+}
+
+/**
+ * Unsigned sell: compute budget, `sell(amount, min_sol_output)`, then (closeAccount) close the token
+ * account so its rent (~0.002 SOL) comes back to the wallet, then the optional tip. Close only when the
+ * sell empties the account: closing a non-empty account would fail the whole transaction.
+ */
+export function buildSellTransaction({ user, kit, raw, minSolOut, blockhash, cuLimit = 100_000, priorityLamports = 500_000, tipAccount = null, tipLamports = 0, closeAccount = false }, h) {
+  if (!(BigInt(raw) > 0n)) throw new Error('local sell: nothing to sell');
+  const accounts = sellAccounts({ user, mint: kit.mint, tokenProgram: kit.tokenProgram, creator: kit.creator, feeRecipient: kit.feeRecipient, buybackRecipient: kit.buybackRecipient, cashback: !!kit.cashback }, h);
+  const microLamportsPerCu = BigInt(Math.floor((priorityLamports * 1e6) / cuLimit));
+  const ixs = [
+    { program: COMPUTE_BUDGET, accounts: [], data: Buffer.concat([Buffer.from([2]), u32(cuLimit)]) },
+    { program: COMPUTE_BUDGET, accounts: [], data: Buffer.concat([Buffer.from([3]), u64(microLamportsPerCu)]) },
+    { program: PUMP, accounts, data: Buffer.concat([SELL, u64(raw), u64(minSolOut)]) },
+  ];
+  // SPL / Token-2022 CloseAccount (9): [account, destination, owner]; the rent goes back to the wallet.
+  if (closeAccount) ixs.push({ program: kit.tokenProgram, accounts: [{ k: accounts[5].k, w: true }, { k: user, w: true }, { k: user, s: true }], data: Buffer.from([9]) });
+  if (tipAccount && tipLamports > 0) ixs.push({ program: SYSTEM, accounts: [{ k: user, w: true, s: true }, { k: tipAccount, w: true }], data: Buffer.concat([u32(2), u64(tipLamports)]) });
+  return { bytes: compileLegacy(user, ixs, blockhash, h.b58decode), accounts };
+}
+
+/**
+ * THE SELL DESK: one per bot, alive for the whole run (never rebuilt per trade).
+ * A coin is ARMED the moment the bot buys it, from the same trade context the local buy used (token
+ * program, creator, mayhem / cashback, fees), and every address its sell needs is worked out then.
+ * While the coin is held, the pushed bonding-curve state keeps its price current and (live) the wallet's
+ * token balance is pushed too, so a sell needs no network at all before the safety simulation.
+ * A coin is disarmed only when it is fully sold.
+ */
+export function createSellDesk({ helpers, watchAccount = null, now = () => Date.now() } = {}) {
+  const kits = new Map();
+  const stats = { armed: 0, builds: 0, lastBuildMs: null, closes: 0, fallbacks: 0, lastError: null };
+  const has = (v) => v !== undefined && v !== null;
+  function arm(mint, info = {}) {
+    const k = kits.get(mint) || { mint, armedAt: now() };
+    if (!kits.has(mint)) stats.armed++;
+    for (const key of ['tokenProgram', 'creator', 'mayhem', 'cashback', 'quoteMint', 'feeBps', 'creatorFeeBps', 'user', 'decimals']) if (has(info[key])) k[key] = info[key];
+    // a re-arm (a second buy of a held coin) never replaces a newer pushed price with an older one
+    const at = info.curveAt ?? now();
+    if (info.curve && !(k.curve && (k.curveAt || 0) > at)) { k.curve = info.curve; k.curveAt = at; }
+    kits.set(mint, k);
+    // Work every address out now (sell accounts with a placeholder recipient), so the sell itself is pure assembly.
+    if (k.user && k.tokenProgram && k.creator && helpers) {
+      const acc = sellAccounts({ user: k.user, mint, tokenProgram: k.tokenProgram, creator: k.creator, feeRecipient: STATIC_FEE_RECIPIENTS[0], buybackRecipient: STATIC_BUYBACK_RECIPIENTS[0], cashback: !!k.cashback }, helpers);
+      k.userAta = acc[5].k;
+      if (watchAccount && !k.unwatchAta) {
+        try { k.unwatchAta = watchAccount(k.userAta, (b64, at) => { k.tokenBalance = tokenAccountAmount(b64); k.tokenBalanceAt = at ?? now(); }); } catch { k.unwatchAta = null; }
+      }
+    }
+    return k;
+  }
+  /** A newer curve state (pushed over the websocket, or read): price, creator and flags. */
+  function update(mint, curve, at) {
+    const k = kits.get(mint); if (!k || !curve) return;
+    k.curve = curve; k.curveAt = at ?? now();
+    for (const key of ['creator', 'mayhem', 'cashback']) if (has(curve[key])) k[key] = curve[key];
+    if ('quoteMint' in curve) k.quoteMint = curve.quoteMint;
+  }
+  /** The wallet's pushed token balance, when its subscription is live and the value current. */
+  function balance(mint, maxAgeMs = 600_000) {
+    const k = kits.get(mint);
+    if (!k || k.tokenBalance == null || !k.unwatchAta?.ready?.() || now() - (k.tokenBalanceAt || 0) > maxAgeMs) return null;
+    // pushed before the subscription was last re-made (a websocket reconnect): a change may have been missed
+    const since = k.unwatchAta.readyAt?.();
+    if (since != null && (k.tokenBalanceAt || 0) < since) return null;
+    return k.tokenBalance;
+  }
+  /** Drop the pushed balance (a sell failed): the next sell reads the chain. */
+  function forgetBalance(mint) { const k = kits.get(mint); if (k) { k.tokenBalance = null; k.tokenBalanceAt = 0; } }
+  /** Why this coin can't be sold locally right now (null = ready). */
+  function blocker(mint, { curveMaxAgeMs = 3000 } = {}) {
+    const k = kits.get(mint);
+    if (!k) return 'not armed';
+    if (!k.tokenProgram || !k.creator || !k.user) return 'kit incomplete';
+    if (!k.curve) return 'no curve state';
+    if (k.curve.complete) return 'coin left the curve (PumpSwap)';
+    if (!quotedInSol(k)) return 'coin is not quoted in SOL';
+    if (now() - (k.curveAt || 0) > curveMaxAgeMs) return 'curve state too old';
+    return null;
+  }
+  /**
+   * Build (unsigned) the sell of `raw` tokens: min SOL out = the current curve's SOL out less slippagePct.
+   * global: the pump.fun Global account (fee and buyback recipients); without it only non-mayhem coins.
+   */
+  function build({ mint, raw, slippagePct, blockhash, priorityLamports, tipAccount = null, tipLamports = 0, closeAccount = false, global = null, cuLimit }) {
+    const t0 = performance.now();
+    const k = kits.get(mint);
+    const why = blocker(mint, { curveMaxAgeMs: Infinity });
+    if (why) throw new Error('local sell: ' + why);
+    if (k.mayhem && !global?.reservedFeeRecipients?.length) throw new Error('local sell: mayhem coin needs the reserved fee recipients (global not read)');
+    const feeRecipient = global ? pickFeeRecipient(global, !!k.mayhem) : STATIC_FEE_RECIPIENTS[Math.floor(Math.random() * STATIC_FEE_RECIPIENTS.length)];
+    const buybackRecipient = pickBuybackRecipient(global);
+    const expected = solOut({ vSol: k.curve.vSol, vTok: k.curve.vTok, feeBps: k.feeBps ?? global?.feeBps ?? 95n, creatorFeeBps: k.creatorFeeBps ?? global?.creatorFeeBps ?? 30n }, raw);
+    const minSolOut = (expected * BigInt(Math.round((100 - slippagePct) * 100))) / 10000n;
+    const out = buildSellTransaction({ user: k.user, kit: { ...k, feeRecipient, buybackRecipient }, raw, minSolOut, blockhash, priorityLamports, tipAccount, tipLamports, closeAccount, ...(cuLimit ? { cuLimit } : {}) }, helpers);
+    stats.builds++; stats.lastBuildMs = Math.round((performance.now() - t0) * 1000) / 1000;
+    return { ...out, expectedLamports: expected, minSolOut, feeRecipient, buybackRecipient, curveAgeMs: now() - (k.curveAt || 0) };
+  }
+  function disarm(mint) { const k = kits.get(mint); if (!k) return; try { k.unwatchAta?.(); } catch {} kits.delete(mint); }
+  return {
+    arm, update, balance, forgetBalance, blocker, build, disarm, stats,
+    kit: (mint) => kits.get(mint) || null,
+    size: () => kits.size,
+    stop: () => { for (const m of [...kits.keys()]) disarm(m); },
+    snapshot: () => ({ ...stats, holding: kits.size }),
+  };
 }
 
 /** Keeps a recent blockhash ready so a buy never waits for one. */

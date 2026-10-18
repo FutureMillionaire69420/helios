@@ -277,10 +277,12 @@ test("holder rule: the dev is taken from Decu's own trade event (written by pump
   const asked = [];
   const holderStats = async (mint, o) => { asked.push({mint, creator: o?.creator}); return {holders: 40, mcapUsd: 9000, valueUsd: 2500, devPct: 0.05, devKnown: true}; };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-holder-')); t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
-  const {r, ws} = await bot(t, {STUDY: 'true', STUDY_FILE: path.join(dir, 'study.jsonl'), STUDY_WINDOW_SEC: '1'}, async () => 0.11, {holderStats, b58encode});
+  const ctx = buyContextFromLogs(fx.buy.logs, config.leader, b58encode), expected = Number(tokensOut(ctx, Math.floor(0.1 * 0.995 * 1e9)));
+  const {r, ws} = await bot(t, {STUDY: 'true', STUDY_FILE: path.join(dir, 'study.jsonl'), STUDY_WINDOW_SEC: '1'}, async () => 0.11, {holderStats, b58encode, quoteBuy: async () => ({raw: expected})});
   await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
   await sleep(1500);
-  const dev = buyContextFromLogs(fx.buy.logs, config.leader, b58encode).creator;
+  const dev = ctx.creator;
+  assert.equal(r.engine.d.positions[MINT].raw, String(expected), 'bought (paper fill consistent with his trade event)');
   assert.ok(dev && asked.length >= 1, 'sampled');
   assert.equal(asked[0].mint, MINT); assert.equal(asked[0].creator, dev);
   const rec = r.study.records.at(-1);
@@ -353,4 +355,21 @@ test('dashboard power buttons: /api/power/off and /on need the token and switch 
   assert.equal((await fetch(base + '/api/power/on', {method: 'POST', headers: auth})).status, 200);
   assert.equal((await (await fetch(base + '/api/status', {headers: auth})).json()).power, 'on');
   assert.equal(watch, 2);
+});
+
+test('Solscan schedule: rare while Helius is healthy and nothing is held, often while holding, never when off or over budget', async (t) => {
+  let opts = null, usage = {requests: 10, budget: 2500, left: 2490};
+  const {r, ws} = await bot(t, {}, async () => 0.11, {startSolscanWatcher: (cb, o) => { opts = o; return () => {}; }, solscanUsage: () => usage});
+  const plan = () => opts.schedule();
+  opts.status.websocket = 'disconnected';
+  assert.deepEqual(plan(), {ms: 15000, mode: 'Helius websocket down: Solscan watching'});
+  opts.status.websocket = 'subscribed';
+  assert.equal(plan().ms, 600000, 'healthy and nothing held: every 10 min');
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  assert.equal(plan().ms, 30000, 'holding a coin: every 30 s (a missed sell of his matters)');
+  usage = {requests: 2500, budget: 2500, left: 0};
+  assert.equal(plan().ms, Infinity); assert.match(plan().mode, /daily budget used/);
+  usage = {requests: 10, budget: 2500, left: 2490};
+  r.setPower(false);
+  assert.equal(plan().ms, Infinity, 'power off: never');
 });

@@ -14,6 +14,7 @@ import {pathToFileURL,fileURLToPath} from 'node:url';
 import {spawn,spawnSync} from 'node:child_process';
 import {startRuntime,normalize} from './runtime.mjs';
 import {createStream} from './stream.mjs';
+import {decodeBondingCurve} from './pumpbuild.mjs';
 import {solscanClient,startSolscanWatcher,swapsFromActivities,leaderProfile,compareDetection} from './solscan.mjs';
 
 // ===== solana.js =====
@@ -87,19 +88,42 @@ function modPow(b, e) {
 function modInv(a) {
   return modPow(((a % P) + P) % P, P - 2n);
 }
+// Every new coin's buy derives ~5 addresses, each testing ~2 candidates: this check is on the buy path.
+// p = 2^255 - 19, so a product reduces with shifts (2^255 = 19 mod p) instead of a BigInt division.
+const MASK255 = (1n << 255n) - 1n;
+function red(a) { // 0 <= a < 2^510
+  a = (a & MASK255) + 19n * (a >> 255n);
+  a = (a & MASK255) + 19n * (a >> 255n);
+  return a >= P ? a - P : a;
+}
+function sqn(x, n) { while (n-- > 0) x = red(x * x); return x; }
+/** x^((p-1)/2) (Euler: 1 for a nonzero square) by ed25519's addition chain: 254 squarings, 13 multiplications. */
+function euler(x) {
+  const b2 = red(red(x * x) * x); // x^3
+  const b4 = red(sqn(b2, 2) * b2); // x^(2^4-1)
+  const b5 = red(sqn(b4, 1) * x);
+  const b10 = red(sqn(b5, 5) * b5);
+  const b20 = red(sqn(b10, 10) * b10);
+  const b40 = red(sqn(b20, 20) * b20);
+  const b80 = red(sqn(b40, 40) * b40);
+  const b160 = red(sqn(b80, 80) * b80);
+  const b240 = red(sqn(b160, 80) * b80);
+  const b250 = red(sqn(b240, 10) * b10); // x^(2^250-1)
+  return red(sqn(b250, 4) * red(b2 * b2)); // x^(2^254-16) * x^6 = x^((p-1)/2)
+}
 function isOnCurve(bytes) {
   const b = Uint8Array.from(bytes);
   b[31] &= 0x7f; // drop sign bit of x
   let y = 0n;
   for (let i = 31; i >= 0; i--) y = (y << 8n) | BigInt(b[i]);
   if (y >= P) return false;
-  const y2 = mod(y * y);
+  const y2 = red(y * y);
   const u = mod(y2 - 1n);
-  const v = mod(D * y2 + 1n);
-  // x^2 = u / v ; a square root exists iff (u/v)^((p-1)/2) is 0 or 1
-  const x2 = mod(u * modInv(v));
-  if (x2 === 0n) return true;
-  return modPow(x2, (P - 1n) / 2n) === 1n;
+  const v = red(D * y2 + 1n);
+  // x^2 = u / v has a root iff u*v is 0 or a square (u/v = u*v / v^2; v is never 0 on ed25519):
+  // one exponentiation instead of an inverse and an exponentiation
+  const uv = red(u * v);
+  return uv === 0n || euler(uv) === 1n;
 }
 
 const PDA_MARKER = Buffer.from('ProgramDerivedAddress');
@@ -368,7 +392,11 @@ async function rpc(method, params, timeoutMs = 10000) {
   }
 }
 
-const solscan = solscanClient({ apiKey: config.solscanKey, http: (...a) => http(...a) });
+// SOLSCAN_MAX_PER_DAY (2500): hard daily request budget (100 CU each), counted across restarts in
+// solscan-usage.json next to the state file. 2500/day x 31 days = 7.75M CU, inside a 20M CU plan.
+const solscanUsageFile = path.join(path.dirname(config.stateFile), 'solscan-usage.json');
+const solscan = solscanClient({ apiKey: config.solscanKey, http: (...a) => http(...a), budgetPerDay: num('SOLSCAN_MAX_PER_DAY', 2500),
+  load: () => JSON.parse(fs.readFileSync(solscanUsageFile, 'utf8')), save: (u) => fs.writeFileSync(solscanUsageFile, JSON.stringify(u), { mode: 0o600 }) });
 
 const getBalanceSol = async (pubkey) => (await rpc('getBalance', [pubkey, { commitment: 'confirmed' }])).value / 1e9;
 
@@ -921,19 +949,8 @@ const LAMPORTS = 1e9;
 const PP_FEE = 0.005;
 const paperSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function decodeCurve(base64) {
-  const buf = Buffer.from(base64, 'base64');
-  if (buf.length < 49) return null;
-  const r = new Reader(buf, 8);
-  const vTok = r.u64();
-  const vSol = r.u64();
-  r.u64();
-  r.u64();
-  const supply = r.u64();
-  const complete = r.bool();
-  // the coin's creator (the dev) follows `complete` in the current pump.fun layout
-  return { vTok, vSol, supply, complete, creator: buf.length >= 81 ? b58encode(buf.subarray(49, 81)) : null };
-}
+/** The coin's bonding curve (pumpbuild.decodeBondingCurve: reserves, complete, creator, mayhem / cashback, quote mint). */
+function decodeCurve(base64) { return decodeBondingCurve(base64, b58encode); }
 
 const poolFee = () => config.pumpFeePct / 100;
 
@@ -996,12 +1013,14 @@ async function holderStats(mint, { creator = null, upTo = 4000 } = {}) {
 // lands as early as possible: priority fee = Helius getPriorityFeeEstimate at PRIORITY_LEVEL (VeryHigh)
 // for the pump.fun program, tip = Jito's TIP_PERCENTILE (99th) of recently landed tips. Refreshed in the
 // background every FEE_REFRESH_SEC (10 s), never looked up on the trading path. Capped at
-// PRIORITY_FEE_MAX_SOL (0.003) and TIP_MAX_SOL (0.005); when an estimate is unavailable the cap is used.
+// PRIORITY_FEE_MAX_SOL (0.001) and TIP_MAX_SOL (0.002), so a side costs at most 0.003 SOL (the paper data:
+// fees are a fixed SOL cost, and at 0.1 SOL a trade the old 0.008 cap took over half of the profit);
+// when an estimate is unavailable the cap is used.
 // Paying above the top of the market does not land faster. FEE_MODE=fixed: PRIORITY_FEE_SOL / TIP_SOL.
 const fees = { priorityFeeSol: config.priorityFeeSol, tipSol: config.tipSol, at: 0, source: 'fixed' };
 async function refreshFees() {
   if (env('FEE_MODE', 'max') !== 'max') return fees;
-  const pMax = num('PRIORITY_FEE_MAX_SOL', 0.003), tMax = num('TIP_MAX_SOL', 0.005), cu = num('CU_LIMIT', 120_000);
+  const pMax = num('PRIORITY_FEE_MAX_SOL', 0.001), tMax = num('TIP_MAX_SOL', 0.002), cu = num('CU_LIMIT', 120_000);
   const [p, t] = await Promise.all([
     config.rpcIsPublic ? null : rpc('getPriorityFeeEstimate', [{ accountKeys: [PROGRAMS.PUMP], options: { priorityLevel: env('PRIORITY_LEVEL', 'VeryHigh') } }], 3000).then((r) => Number(r?.priorityFeeEstimate)).catch(() => null),
     http('https://bundles.jito.wtf/api/v1/bundles/tip_floor', { timeoutMs: 3000 }).then((r) => Number((Array.isArray(r) ? r[0] : r)?.[env('TIP_PERCENTILE', 'landed_tips_99th_percentile')])).catch(() => null),
@@ -1022,7 +1041,7 @@ function startSenderWarm({ intervalMs = num('SENDER_PING_SEC', 3) * 1000 } = {})
   const t = setInterval(hit, intervalMs); t.unref?.();
   return () => clearInterval(t);
 }
-function startFeeRefresh() { if (env('FEE_MODE', 'max') !== 'max') return () => {}; refreshFees().then((f) => console.log(`fees now: priority ${f.priorityFeeSol.toFixed(6)} + tip ${f.tipSol.toFixed(6)} SOL per trade (${f.source}); refreshed every ${num('FEE_REFRESH_SEC', 10)} s`)).catch(() => {}); const t = setInterval(refreshFees, num('FEE_REFRESH_SEC', 10) * 1000); t.unref?.(); return () => clearInterval(t); }
+function startFeeRefresh() { if (env('FEE_MODE', 'max') !== 'max') return () => {}; refreshFees().then((f) => console.log(`fees now: priority ${f.priorityFeeSol.toFixed(6)} + tip ${f.tipSol.toFixed(6)} SOL per trade (${f.source}); refreshed every ${num('FEE_REFRESH_SEC', 30)} s`)).catch(() => {}); const t = setInterval(refreshFees, num('FEE_REFRESH_SEC', 30) * 1000); t.unref?.(); return () => clearInterval(t); }
 const currentFees = () => ({ priorityFeeSol: fees.priorityFeeSol, tipSol: fees.tipSol, at: fees.at, source: fees.source });
 
 async function jupQuote(inputMint, outputMint, amount) {
@@ -1269,10 +1288,13 @@ async function validateTrade(bytes,job,balanceSol,feeSol=0) {
   const outflow=(before.value[0].lamports-v.accounts[0].lamports)/1e9;
   // Fees allowed: the priority fee + tip actually put in this transaction, never above the FEE_MODE=max
   // caps (PRIORITY_FEE_MAX_SOL + TIP_MAX_SOL), never below the fixed PRIORITY_FEE_SOL + TIP_SOL.
-  const fixedFee=config.tipSol+config.priorityFeeSol, feeCap=env('FEE_MODE','max')==='max'?num('PRIORITY_FEE_MAX_SOL',0.003)+num('TIP_MAX_SOL',0.005):fixedFee;
+  const fixedFee=config.tipSol+config.priorityFeeSol, feeCap=env('FEE_MODE','max')==='max'?num('PRIORITY_FEE_MAX_SOL',0.001)+num('TIP_MAX_SOL',0.002):fixedFee;
   const limit=(job.side==='buy'?job.sol*(1+config.slippagePct/100):0)+Math.max(fixedFee,Math.min(feeCap,Number(feeSol)||0))+0.005;
   if(outflow>limit || v.accounts[0].lamports/1e9<config.minSolReserve) throw new Error('simulation exceeds spend/reserve limit');
-  const sum=rows=>rows.slice(1).reduce((total,a)=>{if(!a)return total;const b=Buffer.from(a.data[0],'base64');if(b.length<72)throw new Error('invalid token account');return total+b.readBigUInt64LE(64);},0n);
+  // A token account closed by this transaction (CloseAccount after a full sell) comes back from the
+  // simulation as 0 lamports with no data (Token-2022, p-token) and holds nothing; the token program only
+  // closes an account that is already empty.
+  const sum=rows=>rows.slice(1).reduce((total,a)=>{if(!a)return total;const b=Buffer.from(a.data[0],'base64');if(b.length===0&&Number(a.lamports)===0)return total;if(b.length<72)throw new Error('invalid token account');return total+b.readBigUInt64LE(64);},0n);
   const delta=sum(v.accounts)-sum(before.value);
   if(job.side==='buy' ? delta<=0n : delta!==-BigInt(job.raw))throw new Error('simulation token balance differs from intended trade');
 }
@@ -1481,12 +1503,12 @@ let solPrice = { usd: null, at: 0 };
  *  SOL_PRICE_REFRESH_SEC). Used on the buy path, where a price lookup cost ~170 ms per buy (up to 4 s). */
 let dataOn = true; // power OFF (dashboard): no background lookups at all
 function solUsdNow() {
-  if (dataOn && (!solPrice.usd || Date.now() - solPrice.at > 20_000)) refreshSolUsd();
+  if (dataOn && (!solPrice.usd || Date.now() - solPrice.at > 90_000)) refreshSolUsd();
   return solPrice.usd || config.solPriceFallback;
 }
 let solRefreshing = null;
 function refreshSolUsd() { return (solRefreshing ||= fetchSolUsdLive().catch(() => null).finally(() => { solRefreshing = null; })); }
-function startSolPriceRefresh() { refreshSolUsd(); const t = setInterval(refreshSolUsd, num('SOL_PRICE_REFRESH_SEC', 15) * 1000); t.unref?.(); return () => clearInterval(t); }
+function startSolPriceRefresh() { refreshSolUsd(); const t = setInterval(refreshSolUsd, num('SOL_PRICE_REFRESH_SEC', 60) * 1000); t.unref?.(); return () => clearInterval(t); }
 
 async function getSolUsd() {
   if (solPrice.usd && Date.now() - solPrice.at < 60_000) return solPrice.usd;
@@ -1497,14 +1519,9 @@ async function getSolUsd() {
   }
 }
 
-/** SOL/USD sources in priority order: Solscan and Helius (DAS getAsset price_info) first, then Jupiter, DexScreener. */
+/** SOL/USD sources in priority order: the free ones first (Jupiter, DexScreener), then Helius (DAS
+ *  getAsset, uses Helius credits) and Solscan last (100 Solscan CU per call). */
 const SOL_PRICE_SOURCES = [
-  ['Solscan', async () => (solscan.enabled ? solscan.tokenPrice(WSOL) : null)],
-  ['Helius', async () => {
-    if (config.rpcIsPublic) return null;
-    const r = await rpc('getAsset', { id: WSOL }, 4000);
-    return Number(r?.token_info?.price_info?.price_per_token);
-  }],
   ['Jupiter', async () => {
     const base = config.jupiterApiKey ? 'https://api.jup.ag' : 'https://lite-api.jup.ag';
     const r = await http(`${base}/price/v3?ids=${WSOL}`, { headers: config.jupiterApiKey ? { 'x-api-key': config.jupiterApiKey } : {}, timeoutMs: 4000 });
@@ -1515,6 +1532,12 @@ const SOL_PRICE_SOURCES = [
     const p = (Array.isArray(r) ? r : []).filter((x) => x.baseToken?.symbol === 'SOL' && /USDC|USDT/.test(x.quoteToken?.symbol)).sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
     return Number(p?.priceUsd);
   }],
+  ['Helius', async () => {
+    if (config.rpcIsPublic) return null;
+    const r = await rpc('getAsset', { id: WSOL }, 4000);
+    return Number(r?.token_info?.price_info?.price_per_token);
+  }],
+  ['Solscan', async () => (solscan.enabled ? solscan.tokenPrice(WSOL) : null)],
 ];
 
 /** Live SOL/USD from the first source that answers. Throws if all are down. */
@@ -2537,10 +2560,10 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
     idle: () => {},
   };
   if (power) stopSol = stopFees = stopWarm = power.idle;
-  const r = await startRuntime({config,kp,notify,solUsdNow,fees:currentFees,power,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
-  for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();stopWarm();process.exit(0);});
+  const r = await startRuntime({config,kp,notify,solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();stopWarm();solscan.flush();process.exit(0);});
   // The settings that decide speed and filtering, as the bot actually uses them (no keys).
-  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'report')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.003)} + ${num('TIP_MAX_SOL', 0.005)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);
+  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'report')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.001)} + ${num('TIP_MAX_SOL', 0.002)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);
 }
 
 /** Backtest one day of the leader's trades with an imaginary wallet. */

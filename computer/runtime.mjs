@@ -5,7 +5,7 @@ import http from 'node:http';
 import {Engine} from './engine.mjs';
 import {PUMP_TOKEN,QUOTES} from './solscan.mjs';
 import {createStudy,summaryText} from './study.mjs';
-import {buyContextFromLogs,tokensOut,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache} from './pumpbuild.mjs';
+import {buyContextFromLogs,tokensOut,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache,createSellDesk,TOKEN,TOKEN_2022} from './pumpbuild.mjs';
 
 const val = (key, fallback) => process.env[key]?.trim() || fallback;
 const number = (key, fallback) => Number(val(key,String(fallback)));
@@ -13,7 +13,7 @@ export function runtimeConfig(c, demo=false) {
   const out = {mode:demo?'demo':c.dryRun?'paper':'live', timezone:c.timezone,
     sizing:val('SIZING_MODE','fixed'), multiplier:number('COPY_MULTIPLIER',1),
     buySol:c.buySol, maxBuy:number('MAX_BUY_SOL',c.buySol), minBuy:number('MIN_BUY_SOL',0.005),
-    reserve:c.minSolReserve, feeBudget:(val('FEE_MODE','max')==='max'?number('TIP_MAX_SOL',0.005)+number('PRIORITY_FEE_MAX_SOL',0.003):c.tipSol+c.priorityFeeSol)+0.005,
+    reserve:c.minSolReserve, feeBudget:(val('FEE_MODE','max')==='max'?number('TIP_MAX_SOL',0.002)+number('PRIORITY_FEE_MAX_SOL',0.001):c.tipSol+c.priorityFeeSol)+0.005,
     slippage:c.slippagePct, dailyCap:c.dailyCapSol>0?c.dailyCapSol:0, minLeaderUsd:c.minLeaderBuyUsd,
     maxAge:c.maxSignalAgeSec, maxSellAge:number('MAX_SELL_SIGNAL_AGE_SEC',300), pumpOnly:c.pumpOnly,
     oneBuy:c.oneBuyPerMint, autoSell:val('AUTO_SELL',demo?'true':'false')==='true', autoCopy:val('AUTO_COPY','true') === 'true', paperBalance:number('PAPER_BALANCE_SOL',1.65), dailyLossLimit:number('DAILY_LOSS_LIMIT_SOL',0),
@@ -159,7 +159,18 @@ export async function startRuntime(k, {demo=false}={}) {
     if (e.type==='confirmed' && e.side==='sell' && engine) { const p=engine.d.positions[e.mint], x=exits?.get(e.mint); if(p) { e.closed=BigInt(p.raw||'0')===0n; if(e.closed && p.costSol>0) e.pnl=(p.realizedSol-p.costSol)/p.costSol; } if(x) { e.rule=x.rule; e.trigger=x.trigger; } if(e.closed) exits?.delete(e.mint); }
     if (e.type==='submitted' && e.side==='sell' && exits?.has(e.mint)) e.rule=exits.get(e.mint).rule;
     if (e.type==='failed' && e.side==='sell' && engine) setTimeout(()=>{ if(!stopped) onSellFailed?.(e.mint,e.message); },0).unref?.();
-    if (e.type==='confirmed' && e.side==='buy') failedBuysInRow=0;
+    if (e.type==='confirmed' && e.side==='buy') {
+      failedBuysInRow=0;
+      // the sell is armed now (if the local buy did not already) and the coin's details are saved with the
+      // position, so a restart re-arms it without a lookup
+      const kit=armSell(e.mint), p=engine?.d.positions[e.mint];
+      if(p && kit) { if(kit.tokenProgram) p.tokenProgram??=kit.tokenProgram; if(kit.creator) p.creator??=kit.creator; }
+    }
+    if (e.type==='confirmed' && e.side==='sell' && e.closed) desk?.disarm(e.mint);
+    // a failed sell may have used a wrong pushed balance: the retry reads the chain. A failed buy leaves
+    // nothing to sell: its armed sell (and its token-account watch) goes too.
+    if (e.type==='failed' && e.side==='sell') desk?.forgetBalance(e.mint);
+    if (e.type==='failed' && e.side==='buy' && desk && engine && !(BigInt(engine.d.positions[e.mint]?.raw||'0')>0n)) desk.disarm(e.mint);
     if (e.type==='failed' && e.side==='buy' && !/entry premium|Decu price|current price|not bought/.test(e.message||'')) {
       if(++failedBuysInRow>=breakerFails && breakerFails>0) { failedBuysInRow=0; buyCooldownUntil=Date.now()+cooldownMs; setTimeout(()=>!stopped&&engine?.event('breaker',{message:`${breakerFails} buys failed in a row (last: ${String(e.message||'').slice(0,120)}). No new buys for ${cooldownMs/60000} min; sells and exit rules keep running.`}),0); }
     }
@@ -283,16 +294,37 @@ export async function startRuntime(k, {demo=false}={}) {
       if(job.quoteRaw && q.raw<job.quoteRaw/(1+k.config.slippagePct/100)) return {status:'failed',error:'paper landing price exceeded slippage limit'};
       return {status:'confirmed',rawDelta:BigInt(Math.floor(q.raw)).toString(),solDelta:-job.sol-fee};
     }
+    // PAPER: assemble the same local sell live would send (not signed, never sent): proves the sell desk
+    // works on every paper exit before any real money depends on it.
+    if(desk && !demo && desk.kit(job.mint)) { try { const f=fee(); desk.build({mint:job.mint,raw:job.raw,slippagePct:sellSlippagePct,blockhash:'11111111111111111111111111111111',priorityLamports:Math.round(f.priorityFeeSol*1e9),tipAccount:k.TIP_ACCOUNTS?.[0]||null,tipLamports:Math.round(f.tipSol*1e9),closeAccount:job.chainRaw!=null&&job.raw===job.chainRaw,global:null}); status.paperSellBuilds=(status.paperSellBuilds||0)+1; } catch(e) { desk.stats.lastError=String(e?.message||e).slice(0,160); } }
     const sol=demo?Number(job.raw)/1e9:await k.quoteSell(job.mint,Number(job.raw));
     if(sol===null || !Number.isFinite(sol)) return {status:'failed',error:'no paper sell quote'};
     return {status:'confirmed',rawDelta:(-BigInt(job.raw)).toString(),solDelta:sol*0.995-fee};
   };
   let cachedBalance=null;
   const buyCtx=new Map(), creators=new Map(); // creators: each coin's dev, from Decu's own trade event (for the holder rule)
-  const local = c.mode==='live' && val('LOCAL_BUILD','true')!=='false' && k.findProgramAddress ? {
-    helpers:{findProgramAddress:k.findProgramAddress,ata:k.ata,b58decode:k.b58decode,b58encode:k.b58encode},
-    blockhash:startBlockhashCache(k.rpc,{log:m=>status.lastError=m}), global:null,
+  const helpers = k.findProgramAddress ? {findProgramAddress:k.findProgramAddress,ata:k.ata,b58decode:k.b58decode,b58encode:k.b58encode} : null;
+  const local = c.mode==='live' && val('LOCAL_BUILD','true')!=='false' && helpers ? {
+    helpers, blockhash:startBlockhashCache(k.rpc,{intervalMs:number('BLOCKHASH_REFRESH_MS',3000),log:m=>status.lastError=m}), global:null,
   } : null;
+  // THE SELL DESK (pumpbuild.mjs): one for the whole run, shared with the local buy builder. A coin is armed
+  // the moment it is bought (same trade context as the buy), kept current by pushed prices and (live) a
+  // pushed token balance, and disarmed only when fully sold. LOCAL_SELL=false: PumpPortal builds every sell.
+  const desk = !demo && helpers && val('LOCAL_SELL','true')!=='false' ? createSellDesk({helpers, watchAccount: c.mode==='live' ? (pk,cb)=>k.stream?.watchAccount?.(pk,cb) ?? null : null}) : null;
+  // paper has no wallet key: its sells are only assembled (never signed or sent), with a placeholder address
+  const sellUser = c.mode==='live' ? k.kp?.publicKey : (k.b58encode ? k.b58encode(Buffer.alloc(32,1)) : null);
+  const kitFrom = mint => { const ctx=buyCtx.get(mint), p=engine?.d.positions[mint];
+    return {tokenProgram:ctx?.tokenProgram ?? p?.tokenProgram, creator:ctx?.creator ?? p?.creator, mayhem:ctx?.mayhem, feeBps:ctx?.feeBps, creatorFeeBps:ctx?.creatorFeeBps, user:sellUser,
+      ...(ctx ? {curve:{vSol:ctx.vSol,vTok:ctx.vTok,complete:false,creator:ctx.creator,mayhem:ctx.mayhem},curveAt:ctx.at} : {})}; };
+  const armSell = mint => (desk && sellUser ? desk.arm(mint, kitFrom(mint)) : null);
+  // a coin held from before (restart, or bought before this version): token program from its mint account,
+  // creator / flags / price from its curve. One or two reads, once.
+  const armFromChain = async mint => {
+    const kit=armSell(mint); if(!kit) return null;
+    if(!kit.tokenProgram) { const r=await k.rpc('getAccountInfo',[mint,{encoding:'base64',commitment:'confirmed'}],4000).catch(()=>null); const owner=r?.value?.owner; if(owner===TOKEN_2022||owner===TOKEN) desk.arm(mint,{tokenProgram:owner}); }
+    const cv=k.readCurve ? await k.readCurve(mint).catch(()=>null) : null; if(cv) { desk.update(mint,cv); desk.arm(mint,{creator:cv.creator}); }
+    return desk.kit(mint);
+  };
   const refreshGlobal=()=>local && !engine?.d.dataOff && readGlobal(k.rpc,local.helpers).then(g=>{local.global=g;}).catch(e=>{status.lastError='pump.fun global: '+e.message;});
   refreshGlobal();
   const globalTimer=local?setInterval(refreshGlobal,600_000):null; globalTimer?.unref?.();
@@ -301,6 +333,8 @@ export async function startRuntime(k, {demo=false}={}) {
     // The full simulation before every send still checks the real balance.
     balance:async()=>(cachedBalance && Date.now()-cachedBalance.at<15_000 ? cachedBalance.sol : (cachedBalance={sol:await k.getBalanceSol(k.kp.publicKey),at:Date.now()}).sol),
     tokens: async mint => {
+      // the wallet's balance of the coin is pushed while it is held: no round trip before a sell
+      const pushed=desk?.balance(mint); if(pushed!=null) { status.pushedBalances=(status.pushedBalances||0)+1; return pushed.toString(); }
       const r=await k.rpc('getTokenAccountsByOwner',[k.kp.publicKey,{mint},{encoding:'jsonParsed',commitment:'confirmed'}]);
       return r.value.reduce((a,x)=>a+BigInt(x.account.data.parsed.info.tokenAmount.amount),0n).toString();
     },
@@ -314,8 +348,12 @@ export async function startRuntime(k, {demo=false}={}) {
         if(job.side==='buy' && !demo && !(quoteRaw>0)) {const q=await k.quoteBuy(job.mint,job.sol*0.995);if(!q?.raw)throw new Error('no paper build quote');quoteRaw=q.raw;}
         return {signature:'paper-'+crypto.randomUUID(),quoteRaw};
       }
-      const balance=job.side==='buy' ? await adapter.balance() : await k.getBalanceSol(k.kp.publicKey);
+      // SOL balance from the 10 s cache for buys AND sells (a sell only checks it covers the fees; the
+      // simulation before sending checks the real wallet)
+      let balance=await adapter.balance();
       if(job.side==='buy' && balance-job.reserveSol<c.reserve) throw new Error('fresh balance insufficient for fees/reserve');
+      // a sell needs SOL for its fees (both builders): a short cached balance is read again before refusing
+      if(job.side==='sell') { const sf=fee(), need=c.reserve+sf.tipSol+sf.priorityFeeSol; if(balance<need) { cachedBalance=null; balance=await adapter.balance(); if(balance<need) throw new Error('insufficient SOL for sell fees'); } }
       // FASTEST: build the buy locally from his trade event (no PumpPortal round trip, no waiting
       // for a blockhash). Same safety check and full simulation as every other trade.
       if(job.side==='buy' && local) {
@@ -333,14 +371,41 @@ export async function startRuntime(k, {demo=false}={}) {
             stamp(job.mint,'feeFrac',feeFrac);
             const {bytes}=buildBuyTransaction({user:k.kp.publicKey,minTokensFloor,ctx:{...ctx,feeRecipient:pickFeeRecipient(local.global,ctx.mayhem),buybackRecipient:pickBuybackRecipient(local.global)},lamports:Math.floor(job.sol*1e9),slippagePct:k.config.slippagePct,blockhash,priorityLamports:Math.round(f.priorityFeeSol*1e9),tipAccount:tip,tipLamports:Math.round(f.tipSol*1e9)},local.helpers);
             const signed=k.signTransaction(bytes,k.kp);
+            // its sell is armed (and its token balance watched) while the safety check below waits on the
+            // network: ready before the buy lands, at no cost to the buy (not if the buy already failed)
+            setImmediate(()=>{ try { if(engine.d.jobs[job.mint] || BigInt(engine.d.positions[job.mint]?.raw||'0')>0n) armSell(job.mint); } catch {} });
             await k.validateTrade(signed.bytes,job,balance,f.priorityFeeSol+f.tipSol);
             status.localBuilds=(status.localBuilds||0)+1; status.lastLocalBuildMs=Date.now()-t0;
             return {signature:signed.signature,bytes:signed.bytes.toString('base64'),blockhash,built:'local'};
           } catch(e) { engine.event('connection',{message:'local build failed, using PumpPortal: '+e.message}); }
         }
       }
+      // LOCAL SELL: from the desk, no PumpPortal round trip. The freshest price: the pushed curve if under
+      // 3 s old, else read now (one RPC). Sells the whole on-chain balance -> also closes the token account
+      // (rent back); if that close is refused by the simulation, the same sell again without it; then PumpPortal.
+      if(job.side==='sell' && local && desk) {
+        try {
+          const t0=performance.now();
+          let kit=desk.kit(job.mint); if(!kit?.tokenProgram || !kit?.creator) kit=await armFromChain(job.mint);
+          if(['no curve state','curve state too old'].includes(desk.blocker(job.mint))) { const cv=k.readCurve?await k.readCurve(job.mint).catch(()=>null):null; if(cv) desk.update(job.mint,cv); }
+          const why=desk.blocker(job.mint); if(why) throw new Error(why);
+          const blockhash=local.blockhash?.get(); if(!blockhash) throw new Error('no fresh blockhash');
+          const f=fee(), tip=f.tipSol>0 ? k.TIP_ACCOUNTS[Math.floor(Math.random()*k.TIP_ACCOUNTS.length)] : null;
+          const empties=job.chainRaw!=null && BigInt(job.raw)===BigInt(job.chainRaw) && val('CLOSE_TOKEN_ACCOUNT','true')!=='false';
+          let lastErr=null;
+          for(const closeAccount of empties?[true,false]:[false]) {
+            try {
+              const b=desk.build({mint:job.mint,raw:job.raw,slippagePct:sellSlippagePct,blockhash,priorityLamports:Math.round(f.priorityFeeSol*1e9),tipAccount:tip,tipLamports:Math.round(f.tipSol*1e9),closeAccount,global:local.global});
+              const signed=k.signTransaction(b.bytes,k.kp);
+              await k.validateTrade(signed.bytes,job,balance,f.priorityFeeSol+f.tipSol);
+              status.localSells=(status.localSells||0)+1; status.lastLocalSellMs=Math.round(performance.now()-t0); if(closeAccount) desk.stats.closes++;
+              return {signature:signed.signature,bytes:signed.bytes.toString('base64'),blockhash,built:'local',closeAccount,minSolOut:String(b.minSolOut)};
+            } catch(e) { lastErr=e; if(!closeAccount) break; }
+          }
+          throw lastErr;
+        } catch(e) { desk.stats.fallbacks++; desk.stats.lastError=String(e?.message||e).slice(0,160); engine.event('connection',{message:'local sell build failed, using PumpPortal: '+desk.stats.lastError}); }
+      }
       const ppFee=fee();
-      if(job.side==='sell' && balance<c.reserve+ppFee.tipSol+ppFee.priorityFeeSol) throw new Error('insufficient SOL for sell fees');
       const decimals=job.decimals;
       if (job.side==='sell' && (!Number.isInteger(decimals) || decimals<0 || decimals>18)) throw new Error('unknown token decimals');
       // Exact token quantity in decimal text; never sell tokens outside the bot position.
@@ -456,9 +521,12 @@ export async function startRuntime(k, {demo=false}={}) {
     const m={peak:-Infinity,decided:false,fails:0,pushed:null,unwatch:null,busy:false,again:false}; monitors.set(mint,m);
     const alive=()=>monitors.get(mint)===m && !stopped;
     const unwatch=()=>{ try{ m.unwatch?.(); }catch{} m.unwatch=null; };
-    if(k.watchCurve) { try { m.unwatch=k.watchCurve(mint,(curve,at)=>{ if(!alive()) return unwatch(); m.pushed={curve,at}; if(!curve.complete) evaluate('push'); }); } catch { m.unwatch=null; } }
+    if(desk && !desk.kit(mint)) armSell(mint); // e.g. after a restart: re-armed from the saved position
+    if(k.watchCurve) { try { m.unwatch=k.watchCurve(mint,(curve,at)=>{ if(!alive()) return unwatch(); m.pushed={curve,at}; desk?.update(mint,curve,at); if(!curve.complete) evaluate('push'); }); } catch { m.unwatch=null; } }
     const valueNow=async(p)=>{
-      if(m.pushed && !m.pushed.curve.complete && m.unwatch?.ready?.() && k.curveSell) { status.priceChecks.push++; return k.curveSell(m.pushed.curve,Number(p.raw)); }
+      // a push from before a websocket reconnect may have missed trades made while it was down: poll until the next one
+      const since=m.unwatch?.readyAt?.();
+      if(m.pushed && !m.pushed.curve.complete && m.unwatch?.ready?.() && !(since!=null && m.pushed.at<since) && k.curveSell) { status.priceChecks.push++; return k.curveSell(m.pushed.curve,Number(p.raw)); }
       const t0=Date.now();
       const v=await Promise.race([k.quoteSell(mint,Number(p.raw)),new Promise(r=>setTimeout(()=>r(null),quoteTimeoutMs).unref?.())]).catch(()=>null);
       status.priceChecks.poll++; status.priceChecks.pollMsLast=Date.now()-t0;
@@ -470,7 +538,7 @@ export async function startRuntime(k, {demo=false}={}) {
       m.busy=true;
       try {
         const p=engine.d.positions[mint];
-        if(!p || BigInt(p.raw)<=0n) { monitors.delete(mint); return unwatch(); }
+        if(!p || BigInt(p.raw)<=0n) { monitors.delete(mint); if(!engine.d.jobs[mint] && !engine.d.queues[mint]?.length) desk?.disarm(mint); return unwatch(); }
         const auto=engine.d.autoCopy, age=Date.now()-(p.boughtAt||Date.now());
         // The 15 s gate counts from DECU'S buy (his on-chain time), not the bot's; bot time if unknown.
         const his=refFor(mint), bought=p.boughtAt||Date.now(), hisMs=his?.time>0 && bought-his.time*1000<=60e3 ? his.time*1000 : bought, sinceHis=Date.now()-hisMs; // >60 s apart: not his matching buy
@@ -618,7 +686,7 @@ export async function startRuntime(k, {demo=false}={}) {
     if(demo || dataRunning) return; dataRunning=true;
     k.power?.on();
     stopWatcher=k.startWatcher(onSignature,{log:message=>engine.event('connection',{message}),status});
-    stopSolscan=!k.startSolscanWatcher?()=>{}:k.startSolscanWatcher(onSignature,{log:message=>engine.event('connection',{message}),status});
+    stopSolscan=!k.startSolscanWatcher?()=>{}:k.startSolscanWatcher(onSignature,{log:message=>engine.event('connection',{message}),status,schedule:solscanSchedule});
     status.solscan = k.startSolscanWatcher ? {ok:null,note:'starting'} : {ok:false,note:'SOLSCAN_API_KEY not set: Helius only'};
     if(local && !local.blockhash) local.blockhash=startBlockhashCache(k.rpc,{log:m=>status.lastError=m});
     for(const [mint,p] of Object.entries(engine.d.positions)) if(BigInt(p.raw||'0')>0n) scheduleMaxHold(mint); // price checks again
@@ -632,6 +700,18 @@ export async function startRuntime(k, {demo=false}={}) {
     status.websocket='off (power off)'; status.solscan={ok:null,note:'off (power off)'};
   };
   const openNow=()=>Object.values(engine.d.positions).filter(p=>BigInt(p.raw||'0')>0n).length+Object.keys(engine.d.jobs).length;
+  // SOLSCAN SCHEDULE (100 CU per request; the plan has 20M CU a month). Solscan only adds something when
+  // Helius misses a trade, and a buy it finds is already 5-30 s old (too expensive to copy). What matters
+  // is a missed SELL of a coin the bot holds. So: every SOLSCAN_IDLE_SEC (600) while Helius is healthy and
+  // nothing is held, SOLSCAN_HOLDING_SEC (30) while coins are held or trades are in flight,
+  // SOLSCAN_DOWN_SEC (15) while the Helius websocket is down; nothing when off or the daily budget is used.
+  const solscanSchedule=()=>{
+    if(powerOff()) return {ms:Infinity,mode:'off (power off)'};
+    const u=k.solscanUsage?.(); if(u && u.left<=0) return {ms:Infinity,mode:`daily budget used (${u.requests}/${u.budget}): paused until 00:00 UTC`};
+    if(status.websocket!=='subscribed') return {ms:number('SOLSCAN_DOWN_SEC',15)*1000,mode:'Helius websocket down: Solscan watching'};
+    if(openNow()>0) return {ms:number('SOLSCAN_HOLDING_SEC',30)*1000,mode:'coins held: watching for a missed sell'};
+    return {ms:number('SOLSCAN_IDLE_SEC',600)*1000,mode:'standby (Helius healthy, nothing held)'};
+  };
   /** on: true / false. Refused in LIVE while coins are held or trades are in flight (their stop-loss and
    *  confirmation need data) unless force. Returns the problem, or null when done. */
   const setPower=(on,{force=false,by='dashboard'}={})=>{
@@ -688,7 +768,7 @@ export async function startRuntime(k, {demo=false}={}) {
       if(token && !authorized()) {res.writeHead(401);return res.end('Unauthorized');}
       if(!token && c.mode==='live') {res.writeHead(403);return res.end('Token required');}
       if(url.pathname==='/api/status' && req.method==='GET') {
-        const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
+        const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',solscanUsage:k.solscanUsage?.()||null,paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
           wallet:{publicKey:c.wallet||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true}};
         res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean(snap)));
       }
@@ -721,7 +801,7 @@ export async function startRuntime(k, {demo=false}={}) {
         engine.event('emergency-stop',{message:`sell everything from the dashboard: ${held.length} position(s)`}); res.writeHead(200); return res.end(String(held.length));
       }
       if(url.pathname==='/api/export.csv' && req.method==='GET') {const {toCsv}=await import('./study.mjs');res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':`attachment; filename="decu-trades-${c.mode}-${new Date().toISOString().slice(0,10)}.csv"`});return res.end(toCsv(study?study.records:[]));}
-      if(url.pathname==='/api/research' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({...(study?study.research():{trades:0}),live:{fees:fee(),feeMode:val('FEE_MODE','max'),push:!!k.stream?.connected?.(),priceChecks:status.priceChecks}}));}
+      if(url.pathname==='/api/research' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({...(study?study.research():{trades:0}),live:{fees:fee(),feeMode:val('FEE_MODE','max'),push:!!k.stream?.connected?.(),priceChecks:status.priceChecks,sellDesk:desk?{...desk.snapshot(),liveSells:status.localSells||0,lastLiveSellMs:status.lastLocalSellMs??null,paperSellBuilds:status.paperSellBuilds||0,pushedBalances:status.pushedBalances||0}:null,solscan:k.solscanUsage?.()||null}}));}
       if(req.method==='POST' && ['/api/autocopy/on','/api/autocopy/off'].includes(url.pathname)) {
         engine.autoCopy(url.pathname==='/api/autocopy/on');res.writeHead(200);return res.end('OK');
       }
@@ -734,5 +814,5 @@ export async function startRuntime(k, {demo=false}={}) {
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});
   engine.event('started',{mode:c.mode,dashboard:`http://${host}:${port}`,note:demo?'SYNTHETIC DEMO; no chain or wallet connection':'confirmed leader signals; paper estimates are not guaranteed fills'});
-  return {engine,server,study,latency:latencyOf,setPower,stop:()=>{stopped=true;if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,latency:latencyOf,setPower,desk,stop:()=>{stopped=true;desk?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }
