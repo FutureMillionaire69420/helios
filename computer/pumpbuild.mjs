@@ -89,8 +89,13 @@ export function tokensOut({ vSol, vTok, feeBps = 95n, creatorFeeBps = 30n }, lam
 }
 
 /** All 16 pump.fun accounts for buy_exact_sol_in, in IDL order. */
-export function buyAccounts({ user, mint, tokenProgram, creator, feeRecipient, buybackRecipient = null }, { findProgramAddress, ata }) {
-  const pda = (seeds, program = PUMP) => findProgramAddress(seeds, program)[0];
+// Derived addresses never change: remember them (most are the same on every buy: global, event
+// authority, fee config, your volume account; a coin's own are reused by its sell and by Decu's next buy).
+const pdaMemo = new Map();
+const memo = (key, f) => { let v = pdaMemo.get(key); if (v === undefined) { v = f(); pdaMemo.set(key, v); if (pdaMemo.size > 2000) pdaMemo.delete(pdaMemo.keys().next().value); } return v; };
+export function buyAccounts({ user, mint, tokenProgram, creator, feeRecipient, buybackRecipient = null }, { findProgramAddress, ata: ata0 }) {
+  const pda = (seeds, program = PUMP) => memo(program + ':' + seeds.map((x) => Buffer.from(x).toString('hex')).join(':'), () => findProgramAddress(seeds, program)[0]);
+  const ata = (owner, m, prog) => memo(`ata:${owner}:${m}:${prog}`, () => ata0(owner, m, prog));
   const b = (s) => Buffer.from(s);
   const d = (k) => decode58(k);
   const bondingCurve = pda([b('bonding-curve'), d(mint)]);

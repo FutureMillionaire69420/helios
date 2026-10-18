@@ -30,7 +30,11 @@ Do these in order. Don't skip a step because an earlier one passed.
 | `SIZING_MODE` / `BUY_SOL` / `DAILY_CAP_SOL` | `fixed` / `0.1` / `0` | `0` = no daily spending cap: only the wallet balance limits buys |
 | `AUTO_SELL` | `false` | you sell by hand from the SOLD alert |
 | `SLIPPAGE_PCT` | `20` | 10% failed often on his coins |
-| `MAX_PAY_ABOVE_DECU_PCT` | `30` (default) | entry-premium filter, fail-closed: skip buys over 30% above Decu's price, or when a price is missing |
+| `MAX_PAY_ABOVE_DECU_PCT` | `15` (default) | entry-premium filter (price vs price), fail-closed: skip buys over 15% above Decu's price, or when a price is missing |
+| `FILTER_REPORT_PCTS` | `10,25` | alerts also show what a 10% and a 25% limit would have done (report only) |
+| `FEE_MODE` | `max` (default) | top-of-market fees on every buy and sell, capped by `PRIORITY_FEE_MAX_SOL` `0.003` + `TIP_MAX_SOL` `0.005` (up to 0.008 SOL per side). `fixed` = `PRIORITY_FEE_SOL` + `TIP_SOL` |
+| `PUSH_STREAM` | `true` | blocks, confirmations and prices pushed over the websocket (faster stop-loss and confirmations) |
+| `NTFY_TOKEN` | optional | ntfy access token: lifts the free daily alert limit |
 | `MAX_OPEN_POSITIONS` | `2` | at most 2 coins at once |
 | `DAILY_CAP_USD` | `600` | at most $600 of buys a day |
 | `SELL_SLIPPAGE_PCT` | `35` | sells fill even on a falling coin |

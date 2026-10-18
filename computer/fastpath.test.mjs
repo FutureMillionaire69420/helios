@@ -26,7 +26,7 @@ test('decoder reads his real pump.fun buy and sell from the logs', () => {
 let confirmedSell = true;
 const confirmedSellTx = () => ({blockTime: Math.floor(Date.now() / 1000), slot: 9, transaction: {signatures: [fx.sell.signature], message: {accountKeys: [{pubkey: config.leader, signer: true}]}},
   meta: {err: null, fee: 5000, logMessages: fx.sell.logs, preBalances: [10e9], postBalances: [10e9 + 4.9e9], preTokenBalances: [{owner: config.leader, mint: MINT, uiTokenAmount: {amount: '2254826796163', decimals: 6, uiAmountString: '2254826.796163'}}], postTokenBalances: [{owner: config.leader, mint: MINT, uiTokenAmount: {amount: '0', decimals: 6, uiAmountString: '0'}}]}});
-async function bot(t, env = {}, quote = async () => 0.11) {
+async function bot(t, env = {}, quote = async () => 0.11, extra = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-fast-')), saved = {...process.env};
   Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: 'fastpath-test-token-24-characters', STUDY: 'false', PAPER_MAX_PAY_PCT: '0', STALE_DATA_SEC: '0', ...env});
   let ws; const fetches = [];
@@ -36,7 +36,7 @@ async function bot(t, env = {}, quote = async () => 0.11) {
     // Buys: full path unavailable, proving the fast path alone buys. His SELL: only the confirmed
     // transaction (full path) makes the bot sell, so the sell signature returns a confirmed tx.
     getTransaction: async (sig) => { fetches.push(sig); return sig === fx.sell.signature && confirmedSell ? confirmedSellTx() : null; },
-    startWatcher: (cb) => { ws = cb; return () => {}; }};
+    startWatcher: (cb) => { ws = cb; return () => {}; }, ...extra};
   const r = await startRuntime(k);
   t.after(() => { r.stop(); fs.rmSync(dir, {recursive: true, force: true}); for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]; Object.assign(process.env, saved); });
   return {r, ws: (...a) => ws(...a), fetches};
@@ -240,4 +240,33 @@ test('a later Decu buy that gets copied is measured against THAT buy, not his fi
   assert.equal(r.engine.d.positions[MINT].raw, '1000000');
   const L = r.latency(MINT);
   assert.ok(L.detectMs < 0, `measured from his second buy (its clock is 30 s ahead in this test): ${L.detectMs}`);
+});
+
+test('exits are push-driven: a curve change over the websocket triggers the stop at once (no polling wait)', async (t) => {
+  let push = null, unsubs = 0;
+  const watchCurve = (mint, cb) => { push = cb; const un = () => { unsubs++; }; un.ready = () => true; return un; };
+  const {r, ws} = await bot(t, {MAX_HOLD_SEC: '0', MONITOR_MS: '60000'}, async () => 0.11, {watchCurve, curveSell: (curve) => curve.v});
+  r.engine.style('auto');
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  await sleep(30);
+  assert.ok(push, 'held coin is watched over the websocket');
+  assert.equal(r.engine.d.positions[MINT].raw, '1000000');
+  const t0 = Date.now();
+  push({v: 0.06, complete: false}, Date.now()); // the coin falls ~45%: no poll is due for 60 s
+  await sleep(30); await r.engine.idle();
+  assert.equal(r.engine.d.positions[MINT].raw, '0', 'sold on the push');
+  assert.ok(Date.now() - t0 < 1000);
+  assert.ok(r.engine.d.events.some((e) => e.type === 'exit-rule' && e.rule === 'stoploss'));
+  assert.ok(unsubs >= 1, 'stopped watching the sold coin');
+});
+
+test('max fees: paper P&L pays the live fee of that moment; detection counted in exact blocks', async (t) => {
+  const stream = {slot: () => 105, connected: () => true};
+  const {r, ws} = await bot(t, {}, async () => 0.11, {fees: () => ({priorityFeeSol: 0.003, tipSol: 0.005}), stream});
+  await ws(fx.buy.signature, 'ws', fx.buy.logs, 100); await r.engine.idle();
+  const p = r.engine.d.positions[MINT];
+  assert.ok(Math.abs(p.costSol - (0.1 + 0.008005)) < 1e-9, `paper cost includes the max fee: ${p.costSol}`);
+  const L = r.latency(MINT);
+  assert.equal(L.detectBlocks, 5, 'seen in block 105, his trade in block 100');
+  assert.equal(L.blocksAfter, 5, 'landing block from the pushed slot');
 });

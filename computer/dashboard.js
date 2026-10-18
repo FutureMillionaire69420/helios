@@ -39,12 +39,17 @@ async function refresh(){try{
 const pc=x=>Number.isFinite(x)?(x>=0?'+':'')+(x*100).toFixed(1)+'%':'—', sl=x=>Number.isFinite(x)?(x>=0?'+':'')+x.toFixed(4)+' SOL':'—', sec=x=>Number.isFinite(x)?x.toFixed(2)+' s':'—', msf=x=>Number.isFinite(x)?Math.round(x)+' ms':'—';
 function renderResearch(r){
   const out=$('research'),rec=$('recent');out.replaceChildren();rec.replaceChildren();
-  if(!r||!r.trades){out.textContent='No studied trades yet.';rec.textContent='—';return;}
+  const lv=r&&r.live;
+  if(lv&&lv.fees)item(out,'Speed settings now',`fees per side ${Number(lv.fees.priorityFeeSol+lv.fees.tipSol).toFixed(4)} SOL (priority ${Number(lv.fees.priorityFeeSol).toFixed(4)} + tip ${Number(lv.fees.tipSol).toFixed(4)}, ${lv.feeMode==='max'?'live maximum':'fixed'}) · push stream ${lv.push?'ON':'off'}${lv.priceChecks?` · price checks ${lv.priceChecks.push} pushed / ${lv.priceChecks.poll} polled`:''}`);
+  if(!r||!r.trades){if(!out.childNodes.length)out.textContent='No studied trades yet.';rec.textContent='—';return;}
   const L=r.latency||{};
   item(out,'Results (paper/live as shown above)',`FCAT ${sl(r.fcatSol)} · win rate ${pc(r.winRate)} · profit factor ${Number.isFinite(r.profitFactor)?r.profitFactor.toFixed(2):'—'} · max drawdown ${sl(r.maxDrawdownSol)} · bought ${r.taken} / skipped ${r.skipped}`);
-  item(out,`With the ${r.filter.pct}% entry-premium filter`,`${r.filter.trades} trades · FCAT ${sl(r.filter.fcatSol)}`);
+  if(r.filters&&r.filters.length)item(out,'Entry-premium filters side by side (same trades)',r.filters.map(f=>`${f.pct}%${f.trading?' (trading)':''}: ${f.trades} trades, ${f.wins} won, ${sl(f.fcatSol)}`).join(' · '));
+  else item(out,`With the ${r.filter.pct}% entry-premium filter`,`${r.filter.trades} trades · FCAT ${sl(r.filter.fcatSol)}`);
+  if(r.holders&&(r.holders.safe.trades||r.holders.risky.trades))item(out,'Holder rule at buy',`SAFE ${r.holders.safe.trades} trades, ${r.holders.safe.wins} won, ${sl(r.holders.safe.fcatSol)} · RISKY ${r.holders.risky.trades} trades, ${r.holders.risky.wins} won, ${sl(r.holders.risky.fcatSol)}${r.holders.unknown?` · ${r.holders.unknown} without counts`:''}`);
+  for(const x of r.exitTests||[])if(x.trades)item(out,`Paper test: ${x.name}`,`${sl(x.pnlSol)} vs your rules ${sl(x.yoursSol)} on the same ${x.trades} trades${x.incomplete?` · ${x.incomplete} trades without data left out`:''}`);
   item(out,'Entry premium',`median ${pc(r.medianEntryPremium)} · average ${pc(r.avgEntryPremium)} over Decu's price`);
-  item(out,'Execution latency',`median ${sec(L.medianSec)} · p95 ${sec(L.p95Sec)} from his block · bot part median ${msf(L.botMedianMs)} (p95 ${msf(L.botP95Ms)}) · build ${msf(L.buildMedianMs)} · land ${msf(L.landMedianMs)}${L.simulatedMs?' (incl. '+msf(L.simulatedMs)+' simulated)':''} · blocks after Decu ${L.blocksMedian??'—'}`);
+  item(out,'Execution latency',`median ${sec(L.medianSec)} · p95 ${sec(L.p95Sec)} from his block · bot part median ${msf(L.botMedianMs)} (p95 ${msf(L.botP95Ms)}) · build ${msf(L.buildMedianMs)} · land ${msf(L.landMedianMs)}${L.simulatedMs?' (incl. '+msf(L.simulatedMs)+' simulated)':''} · blocks after Decu ${L.blocksMedian??'—'}${L.detectBlocksMedian!=null?` · seen ${L.detectBlocksMedian} blocks after him (p95 ${L.detectBlocksP95??'—'})`:''}`);
   const rs=Object.entries(r.skipReasons||{});if(rs.length)item(out,'Why buys were skipped',rs.map(([k,v])=>`${v}× ${k}`).join(' · '));
   if(r.brain)item(out,`Brain: L${r.brain.level} ${r.brain.name}`,`${r.brain.trades} trades · go-live ${r.brain.readiness.passed}/${r.brain.readiness.of}${r.brain.accuracy?' · predictions '+Math.round(r.brain.accuracy.rate*100)+'% right':''}`);
   for(const t of r.recent)item(rec,`${new Date(t.time).toLocaleTimeString()} · ${t.coin} · ${t.taken?'BOUGHT':'SKIPPED'}`,`premium ${pc(t.premium)} · latency ${sec(t.latencySec)}${t.blocks!=null?' · '+t.blocks+' blocks':''} · FCAT ${pc(t.fcat)}${t.reason?' · '+t.reason:''}`,!t.taken);

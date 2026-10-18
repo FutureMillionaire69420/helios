@@ -13,6 +13,7 @@ import nodeHttp from 'node:http';
 import {pathToFileURL,fileURLToPath} from 'node:url';
 import {spawn,spawnSync} from 'node:child_process';
 import {startRuntime,normalize} from './runtime.mjs';
+import {createStream} from './stream.mjs';
 import {solscanClient,startSolscanWatcher,swapsFromActivities,leaderProfile,compareDetection} from './solscan.mjs';
 
 // ===== solana.js =====
@@ -402,14 +403,22 @@ async function sendRaw(bytes, extraUrls = []) {
 }
 
 /** Poll until confirmed / failed / timeout. Returns {ok, err}. */
+/** Until confirmed / failed / timeout. Returns {ok, err}. The websocket push (signatureSubscribe)
+ *  usually answers first; polling (every CONFIRM_POLL_MS, 300 ms; 1 s while the push is live) is the
+ *  fallback, so a dead socket only makes confirmation slower, never wrong. */
+let stream = null;
 async function confirm(sig, timeoutMs = 45000) {
   const end = Date.now() + timeoutMs;
+  let pushed = null;
+  const push = stream?.connected() ? stream.waitSignature(sig, { timeoutMs }).then((r) => { pushed = r; }) : null;
   while (Date.now() < end) {
+    if (pushed) return pushed.err ? { ok: false, err: `failed on-chain: ${JSON.stringify(pushed.err)}`, landedFailed: true } : { ok: true };
     const r = await rpc('getSignatureStatuses', [[sig], { searchTransactionHistory: false }]).catch(() => null);
     const st = r?.value?.[0];
     if (st?.err) return { ok: false, err: `failed on-chain: ${JSON.stringify(st.err)}`, landedFailed: true };
     if (st && ['confirmed', 'finalized'].includes(st.confirmationStatus)) return { ok: true };
-    await new Promise((res) => setTimeout(res, 800));
+    const wait = push && stream?.connected() ? num('CONFIRM_POLL_MS_PUSH', 1000) : num('CONFIRM_POLL_MS', 300);
+    await Promise.race([new Promise((res) => setTimeout(res, wait)), ...(push ? [push] : [])]);
   }
   return { ok: false, err: 'not confirmed in time (may still land, check Solscan)' };
 }
@@ -815,6 +824,8 @@ async function notify({ title, body, priority = 3, tags = [], click, actions = [
   // ntfy turns messages over 4096 bytes into a file attachment: keep the alert readable instead.
   if (Buffer.byteLength(body) > 3900) { const tail = '\n…(cut: full report with node copybot.mjs study)'; body = Buffer.from(body).subarray(0, 3900 - tail.length).toString('utf8').replace(/\uFFFD+$/, '') + tail; }
   const headers = { Title: ascii(title), Priority: String(priority) };
+  // NTFY_TOKEN: an ntfy.sh account token, so the daily message limit is your account's, not shared per IP.
+  if (env('NTFY_TOKEN')) headers.Authorization = `Bearer ${env('NTFY_TOKEN')}`;
   if (tags.length) headers.Tags = tags.join(',');
   if (click) headers.Click = click;
   // A chart image (QuickChart URL) shows as a picture in the ntfy app. CHARTS=false turns it off.
@@ -940,6 +951,48 @@ async function readCurve(mint) {
   const r = await rpc('getAccountInfo', [bondingCurvePda(mint), { encoding: 'base64', commitment: 'processed' }], 5000);
   return r?.value?.data?.[0] ? decodeCurve(r.value.data[0]) : null;
 }
+
+/** Market cap in SOL from the bonding curve (1 billion tokens, 6 decimals). */
+function curveMcapSol(c) { return c && Number(c.vTok) > 0 ? (Number(c.vSol) / Number(c.vTok)) * 1e6 : null; }
+async function mcapUsdNow(mint) { const c = await readCurve(mint).catch(() => null); return c && !c.complete ? curveMcapSol(c) * solUsdNow() : null; }
+/** Every change of the coin's bonding curve, pushed over the websocket (null when no stream). */
+function watchCurve(mint, cb) { return stream ? stream.watchAccount(bondingCurvePda(mint), (b64, at) => { const c = decodeCurve(b64); if (c) cb(c, at); }) : null; }
+
+/** Holders of a pump.fun coin right now (Helius DAS), not counting the bonding curve itself. Counts up to
+ *  `upTo` (1000 per request), which is all the holder rule needs. */
+async function holderCount(mint, upTo = 4000) {
+  const curve = bondingCurvePda(mint), owners = new Set();
+  for (let page = 1; page <= Math.ceil(upTo / 1000); page++) {
+    const r = await rpc('getTokenAccounts', { mint, limit: 1000, page }, 4000);
+    const list = r?.token_accounts || [];
+    for (const a of list) if (a.owner && a.owner !== curve && Number(a.amount) > 0) owners.add(a.owner);
+    if (list.length < 1000) break;
+  }
+  return owners.size;
+}
+
+// ===== fees =====
+// FEE_MODE=max (default): every buy and every sell pays the top of the market at that moment so it
+// lands as early as possible: priority fee = Helius getPriorityFeeEstimate at PRIORITY_LEVEL (VeryHigh)
+// for the pump.fun program, tip = Jito's TIP_PERCENTILE (99th) of recently landed tips. Refreshed in the
+// background every FEE_REFRESH_SEC (10 s), never looked up on the trading path. Capped at
+// PRIORITY_FEE_MAX_SOL (0.003) and TIP_MAX_SOL (0.005); when an estimate is unavailable the cap is used.
+// Paying above the top of the market does not land faster. FEE_MODE=fixed: PRIORITY_FEE_SOL / TIP_SOL.
+const fees = { priorityFeeSol: config.priorityFeeSol, tipSol: config.tipSol, at: 0, source: 'fixed' };
+async function refreshFees() {
+  if (env('FEE_MODE', 'max') !== 'max') return fees;
+  const pMax = num('PRIORITY_FEE_MAX_SOL', 0.003), tMax = num('TIP_MAX_SOL', 0.005), cu = num('CU_LIMIT', 120_000);
+  const [p, t] = await Promise.all([
+    config.rpcIsPublic ? null : rpc('getPriorityFeeEstimate', [{ accountKeys: [PROGRAMS.PUMP], options: { priorityLevel: env('PRIORITY_LEVEL', 'VeryHigh') } }], 3000).then((r) => Number(r?.priorityFeeEstimate)).catch(() => null),
+    http('https://bundles.jito.wtf/api/v1/bundles/tip_floor', { timeoutMs: 3000 }).then((r) => Number((Array.isArray(r) ? r[0] : r)?.[env('TIP_PERCENTILE', 'landed_tips_99th_percentile')])).catch(() => null),
+  ]);
+  fees.priorityFeeSol = Number.isFinite(p) && p > 0 ? Math.min(pMax, Math.max(config.priorityFeeSol, (p * cu) / 1e6 / 1e9)) : pMax;
+  fees.tipSol = Number.isFinite(t) && t > 0 ? Math.min(tMax, Math.max(config.tipSol, t)) : tMax;
+  fees.at = Date.now(); fees.source = `max (priority ${Number.isFinite(p) ? 'estimate' : 'cap'}, tip ${Number.isFinite(t) ? 'Jito 99th pct' : 'cap'})`;
+  return fees;
+}
+function startFeeRefresh() { if (env('FEE_MODE', 'max') !== 'max') return () => {}; refreshFees(); const t = setInterval(refreshFees, num('FEE_REFRESH_SEC', 10) * 1000); t.unref?.(); return () => clearInterval(t); }
+const currentFees = () => ({ priorityFeeSol: fees.priorityFeeSol, tipSol: fees.tipSol, at: fees.at, source: fees.source });
 
 async function jupQuote(inputMint, outputMint, amount) {
   const base = config.jupiterApiKey ? 'https://api.jup.ag' : 'https://lite-api.jup.ag';
@@ -1126,7 +1179,7 @@ function transactionBlockhash(bytes) {
   const [n,z]=readShortVec(m,o);o+=z+n*32;return b58encode(m.subarray(o,o+32));
 }
 
-async function validateTrade(bytes,job,balanceSol) {
+async function validateTrade(bytes,job,balanceSol,feeSol=0) {
   const tx=parseTransaction(bytes);
   if(tx.nSig!==1 || tx.numRequiredSignatures!==1) throw new Error('unexpected additional signer');
   const wallet=tx.keys[0],m=tx.message;let o=(tx.versioned?1:0)+3;
@@ -1183,7 +1236,10 @@ async function validateTrade(bytes,job,balanceSol) {
   const v=simulation.value;
   if(v.err || !v.accounts?.[0])throw new Error('simulation refused: '+JSON.stringify(v.err));
   const outflow=(before.value[0].lamports-v.accounts[0].lamports)/1e9;
-  const limit=(job.side==='buy'?job.sol*(1+config.slippagePct/100):0)+config.tipSol+config.priorityFeeSol+0.005;
+  // Fees allowed: the priority fee + tip actually put in this transaction, never above the FEE_MODE=max
+  // caps (PRIORITY_FEE_MAX_SOL + TIP_MAX_SOL), never below the fixed PRIORITY_FEE_SOL + TIP_SOL.
+  const fixedFee=config.tipSol+config.priorityFeeSol, feeCap=env('FEE_MODE','max')==='max'?num('PRIORITY_FEE_MAX_SOL',0.003)+num('TIP_MAX_SOL',0.005):fixedFee;
+  const limit=(job.side==='buy'?job.sol*(1+config.slippagePct/100):0)+Math.max(fixedFee,Math.min(feeCap,Number(feeSol)||0))+0.005;
   if(outflow>limit || v.accounts[0].lamports/1e9<config.minSolReserve) throw new Error('simulation exceeds spend/reserve limit');
   const sum=rows=>rows.slice(1).reduce((total,a)=>{if(!a)return total;const b=Buffer.from(a.data[0],'base64');if(b.length<72)throw new Error('invalid token account');return total+b.readBigUInt64LE(64);},0n);
   const delta=sum(v.accounts)-sum(before.value);
@@ -1388,6 +1444,16 @@ async function executeBuy(kp, mint, balanceSol, prepared = null) {
 // Decision engine: for each leader transaction, decide copy / skip, then execute.
 
 let solPrice = { usd: null, at: 0 };
+/** SOL/USD right now WITHOUT waiting: the last known price (refreshed in the background every
+ *  SOL_PRICE_REFRESH_SEC). Used on the buy path, where a price lookup cost ~170 ms per buy (up to 4 s). */
+function solUsdNow() {
+  if (!solPrice.usd || Date.now() - solPrice.at > 20_000) refreshSolUsd();
+  return solPrice.usd || config.solPriceFallback;
+}
+let solRefreshing = null;
+function refreshSolUsd() { return (solRefreshing ||= fetchSolUsdLive().catch(() => null).finally(() => { solRefreshing = null; })); }
+function startSolPriceRefresh() { refreshSolUsd(); const t = setInterval(refreshSolUsd, num('SOL_PRICE_REFRESH_SEC', 15) * 1000); t.unref?.(); return () => clearInterval(t); }
+
 async function getSolUsd() {
   if (solPrice.usd && Date.now() - solPrice.at < 60_000) return solPrice.usd;
   try {
@@ -2424,8 +2490,10 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
   if (!config.dryRun && !demo && config.executor!=='pumpportal') throw new Error('v2 live execution supports EXECUTOR=pumpportal only; legacy Jupiter remains for quotes/backtests');
   const solscanWatch = solscan.enabled && config.solscanPollMs > 0 ? (onSignature, opts) => startSolscanWatcher({ client: solscan, leader: config.leader, intervalMs: config.solscanPollMs, horizonSec: Math.max(config.maxSignalAgeSec, num('MAX_SELL_SIGNAL_AGE_SEC', 300)), onSignature, ...opts }) : null;
   const tokenLabel = solscan.enabled ? async (mint) => { const m = await solscan.tokenMeta(mint); return m?.symbol ? `$${m.symbol}` : null; } : null;
-  const r = await startRuntime({config,kp,notify,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
-  for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();process.exit(0);});
+  stream = !demo && config.wsUrl && env('PUSH_STREAM', 'true') !== 'false' ? createStream({ url: config.wsUrl, log: (m) => console.error(redact(m)) }) : null;
+  const stopSol = demo ? () => {} : startSolPriceRefresh(), stopFees = demo ? () => {} : startFeeRefresh();
+  const r = await startRuntime({config,kp,notify,solUsdNow,fees:currentFees,stream,watchCurve,curveSell,curveMcapSol,mcapUsdNow,holderCount,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();process.exit(0);});
 }
 
 /** Backtest one day of the leader's trades with an imaginary wallet. */
@@ -2740,5 +2808,7 @@ async function main(argv = process.argv) {
 
 
 // ===== entry =====
+const setStream = (s) => (stream = s); // tests
+export {refreshFees,currentFees,solUsdNow,confirm,holderCount,setStream};
 export {config,setFetch,rpc,relevantLogs,venueOf,quoteSell,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,findProgramAddress,associatedTokenAddress as ata,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);

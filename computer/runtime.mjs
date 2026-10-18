@@ -13,7 +13,7 @@ export function runtimeConfig(c, demo=false) {
   const out = {mode:demo?'demo':c.dryRun?'paper':'live', timezone:c.timezone,
     sizing:val('SIZING_MODE','fixed'), multiplier:number('COPY_MULTIPLIER',1),
     buySol:c.buySol, maxBuy:number('MAX_BUY_SOL',c.buySol), minBuy:number('MIN_BUY_SOL',0.005),
-    reserve:c.minSolReserve, feeBudget:c.tipSol+c.priorityFeeSol+0.005,
+    reserve:c.minSolReserve, feeBudget:(val('FEE_MODE','max')==='max'?number('TIP_MAX_SOL',0.005)+number('PRIORITY_FEE_MAX_SOL',0.003):c.tipSol+c.priorityFeeSol)+0.005,
     slippage:c.slippagePct, dailyCap:c.dailyCapSol>0?c.dailyCapSol:0, minLeaderUsd:c.minLeaderBuyUsd,
     maxAge:c.maxSignalAgeSec, maxSellAge:number('MAX_SELL_SIGNAL_AGE_SEC',300), pumpOnly:c.pumpOnly,
     oneBuy:c.oneBuyPerMint, autoSell:val('AUTO_SELL',demo?'true':'false')==='true', autoCopy:val('AUTO_COPY','true') === 'true', paperBalance:number('PAPER_BALANCE_SOL',1.65), dailyLossLimit:number('DAILY_LOSS_LIMIT_SOL',0),
@@ -121,7 +121,17 @@ export async function startRuntime(k, {demo=false}={}) {
   // own price. FAIL-CLOSED: with no Decu price or no current price the bot does not buy. PAPER uses the
   // same filter (PAPER_MAX_PAY_PCT, default = the live value) so paper behaves like live; every buy it
   // skips is still studied (SKIPPED alerts), so the research keeps all of Decu's trades.
-  const filterPct = number('MAX_PAY_ABOVE_DECU_PCT',30);
+  const filterPct = number('MAX_PAY_ABOVE_DECU_PCT',15);
+  // Extra filters only REPORTED (alerts, reports): "10%" and "25%". Skipped buys within the widest one are alerted.
+  const reportPcts = String(val('FILTER_REPORT_PCTS','10,25')).split(',').map(Number).filter(x=>x>0);
+  // FEES: current priority fee + tip (FEE_MODE=max: top of the market, refreshed in the background).
+  const fee = () => k.fees ? k.fees() : {priorityFeeSol:k.config.priorityFeeSol, tipSol:k.config.tipSol};
+  const sideFee = () => { const f=fee(); return f.priorityFeeSol+f.tipSol+0.000005; };
+  // PRICE vs PRICE: the price per token that went into the curve, fees excluded, the same basis as
+  // Decu's own trade event (his sol_amount is net of the pool fee). Fees are reported separately.
+  const poolFee = (k.config.pumpFeePct ?? 1.25)/100;
+  const netPrice = (solIn, raw, feeFrac=poolFee) => raw>0 ? solIn*(1-feeFrac)/raw : null;
+  const solUsd = () => k.solUsdNow ? k.solUsdNow() : null;
   const maxPayPct = demo ? 0 : c.mode==='live' ? filterPct : number('PAPER_MAX_PAY_PCT',filterPct);
   const sellSlippagePct=number('SELL_SLIPPAGE_PCT',35), fastSells=val('FAST_PATH_SELLS','false')==='true';
   // CIRCUIT BREAKERS (new buys only; sells always run): BUY_FAIL_BREAKER (3) failed buys in a row ->
@@ -163,19 +173,18 @@ export async function startRuntime(k, {demo=false}={}) {
     if (c.mode==='paper') paperExits(e);
     // Every bot buy (paper or live) gets a 15 s study: re-priced each second, then one detailed alert.
     if (e.type==='confirmed' && e.side==='buy') scheduleMaxHold?.(e.mint);
-    if (study && e.type==='confirmed' && e.side==='buy') study.start({mint:e.mint,cost:-e.solDelta,raw:e.rawDelta,his:{...(refFor(e.mint)||{}),first:leaderBuys.get(e.mint)||null,latency:latencyOf(e.mint)}});
+    if (study && e.type==='confirmed' && e.side==='buy') { const fo=fillOf(e.mint); study.start({mint:e.mint,cost:-e.solDelta,raw:e.rawDelta,entryPrice:fo.entryPrice,fill:fo,his:{...(refFor(e.mint)||{}),first:leaderBuys.get(e.mint)||null,latency:latencyOf(e.mint)}}); }
     // RESEARCH: a Decu buy the bot did NOT take is still studied (no trade): what it would have done.
     if (study && !demo && ((e.type==='skip' && e.side!=='sell' && e.mint && !/below minimum|already|no bot position|not a pump/.test(e.reason||'')) || (e.type==='failed' && e.side==='buy'))) shadowStudy(e.mint, e.reason||e.message||'not bought');
   };
   // PAPER ONLY: value each paper position at several sell timings (never sends anything).
   const QUICK=String(val('PAPER_QUICK_SELL_SEC','4,5')).split(',').map(Number).filter(x=>x>0);
   const AFTER=String(val('PAPER_AFTER_HIS_SELL_SEC','0,10')).split(',').map(Number).filter(x=>x>=0);
-  const fee=k.config.tipSol+k.config.priorityFeeSol;
   const valueAt=(mint,label,delayMs)=>setTimeout(async()=>{
     try{
       const st=engine.d.paperStats?.[mint]; if(!st) return;
       const sol=await k.quoteSell(mint,Number(st.raw));
-      st.exits[label]= sol==null||!Number.isFinite(sol) ? null : sol*0.995-fee; engine.save();
+      st.exits[label]= sol==null||!Number.isFinite(sol) ? null : sol*0.995-sideFee(); engine.save();
       if (!study && label===`buy+${QUICK.at(-1)}s` && k.notify && k.config.notifyPaper!==false && !engine.d.alertsOff) {
         const v=st.exits[label], s=paperSummary(engine.d.paperStats).find(x=>x.exit===label);
         Promise.resolve(k.notify({title:`[PAPER] ${v==null?'no price':`${v-st.cost>=0?'+':''}${((v/st.cost-1)*100).toFixed(0)}%`} selling ${QUICK.at(-1)}s after buy`,body:`${mint}\nRunning total (${label}): ${s?`${s.pnlSol>=0?'+':''}${s.pnlSol.toFixed(4)} SOL over ${s.trades} trades, ${s.wins} wins`:'-'}\nNo real money used.`,priority:2,tags:['test_tube']})).catch(()=>{});
@@ -204,6 +213,7 @@ export async function startRuntime(k, {demo=false}={}) {
   const stamp=(mint,key,v=Date.now())=>stampSig(copiedSig.get(mint)||lastSig.get(mint)||'unknown',mint,key,v);
   // The Decu buy a bot buy refers to: the one it copied, else his latest seen buy, else his first copyable one.
   const refFor=mint=>{ const sig=copiedSig.get(mint)||lastSig.get(mint); return (sig&&hisBySig.get(hisKey(sig,mint)))||leaderBuys.get(mint)||null; };
+  const fillOf=mint=>{ const p=pipe.get(hisKey(copiedSig.get(mint)||lastSig.get(mint)||'unknown',mint))||{}; return {entryPrice:p.entryPrice??null, premiumAtBuild:p.premiumAtBuild??null, premiumAtFill:p.premiumAtFill??null, buyFeeSol:p.buyFeeSol??null, actualFill:!!p.actualFill}; };
   const latencyOf=mint=>{
     const p=pipe.get(hisKey(copiedSig.get(mint)||lastSig.get(mint)||'unknown',mint)); if(!p) return null;
     const d=(a,b)=>p[a]!=null&&p[b]!=null?Math.round(p[b]-p[a]):null;
@@ -211,12 +221,18 @@ export async function startRuntime(k, {demo=false}={}) {
       detectMs:p.hisTime&&p.seenAt?Math.round(p.seenAt-p.hisTime*1000):null, // his clock is whole seconds: about ±500 ms
       decodeMs:d('seenAt','decodedAt'), decideMs:d('decodedAt','buildStart'), buildMs:d('buildStart','builtAt'),
       sendMs:d('builtAt','sentAt'), landMs:d(p.sentAt!=null?'sentAt':'builtAt','landedAt'), botMs:d('seenAt','landedAt'),
-      blocksAfter:p.hisSlot&&p.landSlot?p.landSlot-p.hisSlot:null, blocksEstimated:!!p.slotEstimated};
+      blocksAfter:p.hisSlot&&p.landSlot?p.landSlot-p.hisSlot:null, blocksEstimated:!!p.slotEstimated,
+      // detection in BLOCKS (exact; no clock rounding): the block the bot was on when it saw his trade
+      detectBlocks:p.hisSlot&&p.seenSlot!=null?Math.max(0,p.seenSlot-p.hisSlot):null};
   };
+  // HOLDER RULE (your strategy): a market cap needs enough holders to hold up. HOLDER_RULES
+  // "mcapUsd:holders": at/above $10k needs 1000 holders, $20k 2500, $30k 4000. Below that = RISKY.
+  const holderRuleCfg = String(val('HOLDER_RULES','10000:1000,20000:2500,30000:4000')).split(',').map(x=>x.split(':').map(Number)).filter(([a,b])=>a>0&&b>0).sort((a,b)=>a[0]-b[0]);
+  const holderSample = async mint => { const [holders, mcapUsd] = await Promise.all([k.holderCount(mint).catch(()=>null), k.mcapUsdNow?k.mcapUsdNow(mint).catch(()=>null):null]); return {holders, mcapUsd}; };
   const study = demo || val('STUDY','true')==='false' || !k.quoteSell ? null : createStudy({
     file:val('STUDY_FILE',path.resolve(`study-${c.mode}.jsonl`)), quoteSell:k.quoteSell, mode:c.mode, buySol:c.buySol,
-    feeSol:k.config.tipSol+k.config.priorityFeeSol, windowSec:number('STUDY_WINDOW_SEC',15), bandPct:number('BAND_PCT',10)/100, notesOpts:{stopLossPct:number('STOP_LOSS_PCT',20),gainGatePct:number('GAIN_GATE_PCT',15),maxPayPct:filterPct}, learnOpts:{gateSec:number('MAX_HOLD_SEC',15),maxPayPct:filterPct,reportEvery:number('LEARN_REPORT_EVERY',10),digestHours:number('LEARN_DIGEST_HOURS',24)}, label:k.config.leaderLabel,
-    skippedAlerts:val('SKIPPED_ALERTS','false')==='true', meta:k.tokenMeta||null, notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, log:m=>engine?.event('connection',{message:m})});
+    feeSol:()=>sideFee(), reportPcts, holderRule:holderRuleCfg, sampleHolders:k.holderCount&&!demo?holderSample:null, windowSec:number('STUDY_WINDOW_SEC',15), bandPct:number('BAND_PCT',10)/100, notesOpts:{stopLossPct:number('STOP_LOSS_PCT',20),gainGatePct:number('GAIN_GATE_PCT',15),maxPayPct:filterPct}, learnOpts:{gateSec:number('MAX_HOLD_SEC',15),maxPayPct:filterPct,reportEvery:number('LEARN_REPORT_EVERY',10),digestHours:number('LEARN_DIGEST_HOURS',24)}, label:k.config.leaderLabel,
+    skippedAlerts:val('SKIPPED_ALERTS','report'), meta:k.tokenMeta||null, notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, log:m=>engine?.event('connection',{message:m})});
   // A Decu buy the bot did not take (filtered, paused, style off, too late, failed): still priced
   // every second for 15 s from a quote of the same size, so the research data has no survivor bias.
   // Read-only; one quote per skipped buy, never on the trading path.
@@ -228,7 +244,7 @@ export async function startRuntime(k, {demo=false}={}) {
       shadowDone.add(mint); if(shadowDone.size>2000) shadowDone.delete(shadowDone.values().next().value);
       const q=await k.quoteBuy(mint,c.buySol*0.995);
       if(!q?.raw) return;
-      study.start({mint,cost:c.buySol+k.config.tipSol+k.config.priorityFeeSol,raw:String(q.raw),his:{...his,first:leaderBuys.get(mint)||null,latency:latencyOf(mint)},shadow:String(reason).slice(0,160)});
+      study.start({mint,cost:c.buySol+sideFee(),raw:String(q.raw),entryPrice:netPrice(c.buySol*0.995,q.raw),his:{...his,first:leaderBuys.get(mint)||null,latency:latencyOf(mint)},shadow:String(reason).slice(0,160)});
     } catch {}
   };
   const receipt = async job => {
@@ -241,20 +257,25 @@ export async function startRuntime(k, {demo=false}={}) {
     const rawDelta=sum(tx.meta.postTokenBalances)-sum(tx.meta.preTokenBalances);
     if ((job.side==='buy' && rawDelta<=0n) || (job.side==='sell' && (rawDelta>=0n || -rawDelta>BigInt(job.raw)))) return {status:'unresolved',error:'receipt token delta does not match intended trade'};
     if(job.side==='buy' && Number.isInteger(tx.slot)) stamp(job.mint,'landSlot',tx.slot);
+    // ACTUAL fill (live): the bot spends exactly job.sol into the trade, so its real price vs price is
+    // job.sol after the pool fee / tokens received. Wallet change minus that = fees actually paid.
+    if(job.side==='buy' && rawDelta>0n) { const lp=pipe.get(hisKey(copiedSig.get(job.mint)||lastSig.get(job.mint)||'unknown',job.mint)); const p=stamp(job.mint,'entryPrice',netPrice(job.sol,Number(rawDelta),lp?.feeFrac??poolFee)); p.buyFeeSol??=Math.max(0,-(tx.meta.postBalances[idx]-tx.meta.preBalances[idx])/1e9-job.sol); p.actualFill=true; }
     return {status:'confirmed',rawDelta:rawDelta.toString(),solDelta:(tx.meta.postBalances[idx]-tx.meta.preBalances[idx])/1e9};
   };
   const paperFill = async job => {
     const waitMs=demo?20:k.config.paperLandMs;
     await new Promise(r=>setTimeout(r,waitMs));
-    const fee=k.config.tipSol+k.config.priorityFeeSol+0.000005;
+    const fee=sideFee();
     if(job.side==='buy') {
-      const slotP=!demo&&k.rpc?k.rpc('getSlot',[{commitment:'processed'}]).catch(()=>null):Promise.resolve(null);
+      const liveSlot=k.stream?.slot?.();
+      const slotP=!demo&&liveSlot==null&&k.rpc?k.rpc('getSlot',[{commitment:'processed'}]).catch(()=>null):Promise.resolve(liveSlot??null);
       const q=demo?{raw:Math.floor(job.sol*1e9)}:await k.quoteBuy(job.mint,job.sol*0.995);
       if(!q?.raw) return {status:'failed',error:'no paper buy quote'};
       const pp=stamp(job.mint,'landedAt'); pp.simulatedMs=waitMs; const sl=await slotP; if(Number.isInteger(sl)) { pp.landSlot??=sl; pp.slotEstimated=true; }
       const ref=refFor(job.mint), maxPay=maxPayPct/100;
       if(maxPay>0 && !(ref?.sol>0 && ref.raw>0)) return {status:'failed',error:"no Decu price to check the entry premium against: not bought (fail-closed)"};
-      if(maxPay>0) { const gap=(job.sol/q.raw)/(ref.sol/ref.raw)-1; if(gap>maxPay) return {status:'failed',error:`entry premium ${Math.round(gap*100)}% above Decu's price (limit ${Math.round(maxPay*100)}%): not bought`}; }
+      const entry=netPrice(job.sol*0.995,q.raw); pp.entryPrice=entry; pp.buyFeeSol=fee;
+      if(maxPay>0) { const gap=entry/(ref.sol/ref.raw)-1; pp.premiumAtFill=gap; if(gap>maxPay) return {status:'failed',error:`entry premium ${Math.round(gap*100)}% above Decu's price (limit ${Math.round(maxPay*100)}%): not bought`}; }
       if(job.quoteRaw && q.raw<job.quoteRaw/(1+k.config.slippagePct/100)) return {status:'failed',error:'paper landing price exceeded slippage limit'};
       return {status:'confirmed',rawDelta:BigInt(Math.floor(q.raw)).toString(),solDelta:-job.sol-fee};
     }
@@ -294,20 +315,24 @@ export async function startRuntime(k, {demo=false}={}) {
         if(ctx && blockhash && local.global) {
           try {
             const t0=Date.now();
-            const tip=k.config.tipSol>0 ? k.TIP_ACCOUNTS[Math.floor(Math.random()*k.TIP_ACCOUNTS.length)] : null;
+            const f=fee(), tip=f.tipSol>0 ? k.TIP_ACCOUNTS[Math.floor(Math.random()*k.TIP_ACCOUNTS.length)] : null;
             const ref=refFor(job.mint), maxPay=maxPayPct/100;
             // the chain enforces the max-pay guard: the buy fails (fee only) if the price ran past it
             if(maxPay>0 && !(ref?.sol>0 && ref.raw>0)) throw new Error('no Decu price to check the entry premium against: not bought (fail-closed)');
-            const minTokensFloor=maxPay>0 ? BigInt(Math.floor(job.sol/((ref.sol/ref.raw)*(1+maxPay)))) : 0n;
-            const {bytes}=buildBuyTransaction({user:k.kp.publicKey,minTokensFloor,ctx:{...ctx,feeRecipient:pickFeeRecipient(local.global,ctx.mayhem),buybackRecipient:pickBuybackRecipient(local.global)},lamports:Math.floor(job.sol*1e9),slippagePct:k.config.slippagePct,blockhash,priorityLamports:Math.round(k.config.priorityFeeSol*1e9),tipAccount:tip,tipLamports:Math.round(k.config.tipSol*1e9)},local.helpers);
+            // price vs price: the SOL that reaches the curve (after the pool + creator fee in HIS trade event)
+            const feeFrac=Number((ctx.feeBps??0n)+(ctx.creatorFeeBps??0n))/10000 || poolFee;
+            const minTokensFloor=maxPay>0 ? BigInt(Math.floor(job.sol*(1-feeFrac)/((ref.sol/ref.raw)*(1+maxPay)))) : 0n;
+            stamp(job.mint,'feeFrac',feeFrac);
+            const {bytes}=buildBuyTransaction({user:k.kp.publicKey,minTokensFloor,ctx:{...ctx,feeRecipient:pickFeeRecipient(local.global,ctx.mayhem),buybackRecipient:pickBuybackRecipient(local.global)},lamports:Math.floor(job.sol*1e9),slippagePct:k.config.slippagePct,blockhash,priorityLamports:Math.round(f.priorityFeeSol*1e9),tipAccount:tip,tipLamports:Math.round(f.tipSol*1e9)},local.helpers);
             const signed=k.signTransaction(bytes,k.kp);
-            await k.validateTrade(signed.bytes,job,balance);
+            await k.validateTrade(signed.bytes,job,balance,f.priorityFeeSol+f.tipSol);
             status.localBuilds=(status.localBuilds||0)+1; status.lastLocalBuildMs=Date.now()-t0;
             return {signature:signed.signature,bytes:signed.bytes.toString('base64'),blockhash,built:'local'};
           } catch(e) { engine.event('connection',{message:'local build failed, using PumpPortal: '+e.message}); }
         }
       }
-      if(job.side==='sell' && balance<c.reserve+k.config.tipSol+k.config.priorityFeeSol) throw new Error('insufficient SOL for sell fees');
+      const ppFee=fee();
+      if(job.side==='sell' && balance<c.reserve+ppFee.tipSol+ppFee.priorityFeeSol) throw new Error('insufficient SOL for sell fees');
       const decimals=job.decimals;
       if (job.side==='sell' && (!Number.isInteger(decimals) || decimals<0 || decimals>18)) throw new Error('unknown token decimals');
       // Exact token quantity in decimal text; never sell tokens outside the bot position.
@@ -316,18 +341,18 @@ export async function startRuntime(k, {demo=false}={}) {
       const ref=refFor(job.mint), checkPrem=job.side==='buy' && maxPayPct>0;
       if(checkPrem && !(ref?.sol>0 && ref.raw>0)) throw new Error('no Decu price to check the entry premium against: not bought (fail-closed)');
       const premQ=checkPrem ? k.quoteBuy(job.mint,job.sol*0.995).catch(()=>null) : null;
-      let bytes=await k.http('https://pumpportal.fun/api/trade-local',{method:'POST',raw:true,body:{publicKey:k.kp.publicKey,action:job.side,mint:job.mint,amount,denominatedInSol:job.side==='buy'?'true':'false',slippage:job.side==='sell'?sellSlippagePct:k.config.slippagePct,priorityFee:k.config.priorityFeeSol,pool:'auto'}});
+      let bytes=await k.http('https://pumpportal.fun/api/trade-local',{method:'POST',raw:true,body:{publicKey:k.kp.publicKey,action:job.side,mint:job.mint,amount,denominatedInSol:job.side==='buy'?'true':'false',slippage:job.side==='sell'?sellSlippagePct:k.config.slippagePct,priorityFee:ppFee.priorityFeeSol,pool:'auto'}});
       const pq=await premQ;
       if(checkPrem && !pq?.raw) throw new Error('no current price to check the entry premium: not bought (fail-closed)');
-      if(checkPrem) { const prem=(job.sol/pq.raw)/(ref.sol/ref.raw)-1; if(prem>maxPayPct/100) throw new Error(`entry premium ${Math.round(prem*100)}% above Decu's price (MAX_PAY_ABOVE_DECU_PCT ${maxPayPct}%): not bought`); }
-      if(k.config.tipSol>0) bytes=k.addTransferInstruction(bytes,k.TIP_ACCOUNTS[Math.floor(Math.random()*k.TIP_ACCOUNTS.length)],Math.round(k.config.tipSol*1e9));
+      if(checkPrem) { const prem=netPrice(job.sol*0.995,pq.raw)/(ref.sol/ref.raw)-1; stamp(job.mint,'premiumAtBuild',prem); if(prem>maxPayPct/100) throw new Error(`entry premium ${Math.round(prem*100)}% above Decu's price (MAX_PAY_ABOVE_DECU_PCT ${maxPayPct}%): not bought`); }
+      if(ppFee.tipSol>0) bytes=k.addTransferInstruction(bytes,k.TIP_ACCOUNTS[Math.floor(Math.random()*k.TIP_ACCOUNTS.length)],Math.round(ppFee.tipSol*1e9));
       const signed=k.signTransaction(bytes,k.kp);
-      await k.validateTrade(signed.bytes,job,balance);
+      await k.validateTrade(signed.bytes,job,balance,ppFee.priorityFeeSol+ppFee.tipSol);
       return {signature:signed.signature,bytes:signed.bytes.toString('base64'),blockhash:k.transactionBlockhash(bytes)};
     },
     send: async job => {
       if(c.mode!=='live') return paperFill(job);
-      await k.sendRaw(Buffer.from(job.bytes,'base64'),k.config.tipSol>0?[k.senderUrl()]:[]);
+      await k.sendRaw(Buffer.from(job.bytes,'base64'),fee().tipSol>0?[k.senderUrl()]:[]);
       if(job.side==='buy') stamp(job.mint,'sentAt');
       const r=await k.confirm(job.signature);
       if(job.side==='buy') stamp(job.mint,'landedAt');
@@ -353,7 +378,13 @@ export async function startRuntime(k, {demo=false}={}) {
   // Time the build stage of every buy (execution-latency breakdown).
   const buildTx=adapter.build;
   adapter.build=async job=>{
-    if(job.side==='buy') { if(job.sig) copiedSig.set(job.mint,job.sig); if(copiedSig.size>2000) copiedSig.delete(copiedSig.keys().next().value); stamp(job.mint,'buildStart'); }
+    if(job.side==='buy') {
+      if(job.sig) copiedSig.set(job.mint,job.sig); if(copiedSig.size>2000) copiedSig.delete(copiedSig.keys().next().value);
+      // a new attempt starts with clean timings (an earlier attempt's stamps once made a buy look 111 s slow)
+      const pe=pipe.get(hisKey(copiedSig.get(job.mint)||lastSig.get(job.mint)||'unknown',job.mint));
+      if(pe?.buildStart!=null) for(const key of ['buildStart','builtAt','sentAt','landedAt','landSlot','slotEstimated','route','simulatedMs','entryPrice','premiumAtFill','premiumAtBuild','buyFeeSol','actualFill','feeFrac']) delete pe[key];
+      stamp(job.mint,'buildStart');
+    }
     const out=await buildTx(job);
     if(job.side==='buy') { const p=stamp(job.mint,'builtAt'); p.route??=out.built||(c.mode==='live'?'pumpportal':'paper'); }
     return out;
@@ -379,7 +410,7 @@ export async function startRuntime(k, {demo=false}={}) {
   // the bot's buy ("organic"), ignoring the fees and price impact already paid. =cost: from cost.
   const stopLoss=number('STOP_LOSS_PCT',20)/100, gainGate=number('GAIN_GATE_PCT',15)/100, stopFromEntry=val('STOP_LOSS_FROM','entry')!=='cost';
   const holdLimitMs=number('HOLD_LIMIT_SEC',600)*1000, stopLossManual=val('STOP_LOSS_MANUAL','true')==='true';
-  const exitFee=k.config.tipSol+k.config.priorityFeeSol, monitors=new Map();
+  const monitors=new Map();
   // STOP-LOSS RELIABILITY:
   //  - priced every MONITOR_MS (500 ms), each price check gives up after QUOTE_TIMEOUT_MS (1500 ms)
   //  - PRICE_FAIL_ALERT (3) failed checks in a row -> alert; PRICE_FAIL_SELL (6) -> sell anyway
@@ -407,37 +438,57 @@ export async function startRuntime(k, {demo=false}={}) {
     if(Date.now()-x.unsellableAt>300_000) { x.unsellableAt=Date.now(); engine.event('unsellable',{mint,attempts:x.attempts+1,message}); }
     x.attempts=0; setTimeout(()=>{ if(!stopped) scheduleMaxHold(mint); },10_000).unref?.(); // keep watching; the stop re-triggers the sell
   };
+  // PRICE WATCH per held coin. PUSH first: every change of its bonding curve arrives over the websocket
+  // and is evaluated at once (no waiting for the next check). The curve only changes when someone trades,
+  // so a pushed state stays current while its subscription is live. POLL as the backup every MONITOR_MS
+  // (and for coins that left the curve for PumpSwap, priced by Jupiter).
+  status.priceChecks={push:0,poll:0,pollMsLast:null};
   scheduleMaxHold=(mint)=>{
     if(monitors.has(mint) || !k.quoteSell) return;
-    const m={peak:-Infinity,decided:false,fails:0}; monitors.set(mint,m);
-    const tick=async()=>{
-      if(monitors.get(mint)!==m) return;
-      const p=engine.d.positions[mint];
-      if(!p || BigInt(p.raw)<=0n) { monitors.delete(mint); return; }
-      const auto=engine.d.autoCopy, age=Date.now()-(p.boughtAt||Date.now());
-      // The 15 s gate counts from DECU'S buy (his on-chain time), not the bot's; bot time if unknown.
-      const his=refFor(mint), bought=p.boughtAt||Date.now(), hisMs=his?.time>0 && bought-his.time*1000<=60e3 ? his.time*1000 : bought, sinceHis=Date.now()-hisMs; // >60 s apart: not his matching buy
-      let pnl=null;
-      try {
-        const v=await Promise.race([k.quoteSell(mint,Number(p.raw)),new Promise(r=>setTimeout(()=>r(null),quoteTimeoutMs).unref?.())]);
-        if(Number.isFinite(v) && p.costSol>0) pnl=(v*0.995-exitFee-p.costSol)/p.costSol;
-      } catch {}
-      if(pnl!=null) { m.peak=Math.max(m.peak,pnl); m.last=pnl; m.base??=pnl; m.fails=0; status.lastPriceOkAt=Date.now(); }
-      else {
-        m.fails++;
-        if(m.fails===priceFailAlert) engine.event('price-check-failing',{mint,fails:m.fails,last:m.last??null});
-        if(priceFailSell>0 && m.fails>=priceFailSell && (auto||stopLossManual)) return exitNow(mint,p,'no-price',m.last??null,null);
-      }
-      const move=pnl==null?null:stopFromEntry?(1+pnl)/(1+m.base)-1:pnl;
-      if(move!=null && stopLoss>0 && move<=-stopLoss && (auto||stopLossManual)) return exitNow(mint,p,'stoploss',pnl,move);
-      if(auto && maxHoldMs>0 && sinceHis>=maxHoldMs && !m.decided) {
-        m.decided=true;
-        if(m.peak>=gainGate) return exitNow(mint,p,'gain-target',pnl);
-        engine.event('exit-rule',{mint,rule:'hold-until-his-sell',pnl,peak:Number.isFinite(m.peak)?m.peak:null});
-      }
-      if(auto && holdLimitMs>0 && age>=holdLimitMs) return exitNow(mint,p,'hold-limit',pnl);
-      setTimeout(tick,monitorMs).unref?.();
+    const m={peak:-Infinity,decided:false,fails:0,pushed:null,unwatch:null,busy:false,again:false}; monitors.set(mint,m);
+    const alive=()=>monitors.get(mint)===m && !stopped;
+    const unwatch=()=>{ try{ m.unwatch?.(); }catch{} m.unwatch=null; };
+    if(k.watchCurve) { try { m.unwatch=k.watchCurve(mint,(curve,at)=>{ if(!alive()) return unwatch(); m.pushed={curve,at}; if(!curve.complete) evaluate('push'); }); } catch { m.unwatch=null; } }
+    const valueNow=async(p)=>{
+      if(m.pushed && !m.pushed.curve.complete && m.unwatch?.ready?.() && k.curveSell) { status.priceChecks.push++; return k.curveSell(m.pushed.curve,Number(p.raw)); }
+      const t0=Date.now();
+      const v=await Promise.race([k.quoteSell(mint,Number(p.raw)),new Promise(r=>setTimeout(()=>r(null),quoteTimeoutMs).unref?.())]).catch(()=>null);
+      status.priceChecks.poll++; status.priceChecks.pollMsLast=Date.now()-t0;
+      return v;
     };
+    const evaluate=async(trigger)=>{
+      if(!alive()) return unwatch();
+      if(m.busy) { m.again=true; return; }
+      m.busy=true;
+      try {
+        const p=engine.d.positions[mint];
+        if(!p || BigInt(p.raw)<=0n) { monitors.delete(mint); return unwatch(); }
+        const auto=engine.d.autoCopy, age=Date.now()-(p.boughtAt||Date.now());
+        // The 15 s gate counts from DECU'S buy (his on-chain time), not the bot's; bot time if unknown.
+        const his=refFor(mint), bought=p.boughtAt||Date.now(), hisMs=his?.time>0 && bought-his.time*1000<=60e3 ? his.time*1000 : bought, sinceHis=Date.now()-hisMs; // >60 s apart: not his matching buy
+        let pnl=null;
+        const v=await valueNow(p);
+        if(Number.isFinite(v) && p.costSol>0) pnl=(v*0.995-sideFee()-p.costSol)/p.costSol;
+        if(!alive()) return unwatch();
+        if(pnl!=null) { m.peak=Math.max(m.peak,pnl); m.last=pnl; m.base??=pnl; m.fails=0; status.lastPriceOkAt=Date.now(); }
+        else if(trigger==='tick') {
+          m.fails++;
+          if(m.fails===priceFailAlert) engine.event('price-check-failing',{mint,fails:m.fails,last:m.last??null});
+          if(priceFailSell>0 && m.fails>=priceFailSell && (auto||stopLossManual)) { unwatch(); return exitNow(mint,p,'no-price',m.last??null,null); }
+        }
+        const move=pnl==null?null:stopFromEntry?(1+pnl)/(1+m.base)-1:pnl;
+        // The stop-loss ALWAYS sells, in both trading styles.
+        if(move!=null && stopLoss>0 && move<=-stopLoss && (auto||stopLossManual)) { unwatch(); return exitNow(mint,p,'stoploss',pnl,move); }
+        if(auto && maxHoldMs>0 && sinceHis>=maxHoldMs && !m.decided) {
+          m.decided=true;
+          if(m.peak>=gainGate) { unwatch(); return exitNow(mint,p,'gain-target',pnl); }
+          engine.event('exit-rule',{mint,rule:'hold-until-his-sell',pnl,peak:Number.isFinite(m.peak)?m.peak:null});
+        }
+        if(auto && holdLimitMs>0 && age>=holdLimitMs) { unwatch(); return exitNow(mint,p,'hold-limit',pnl); }
+      } finally { m.busy=false; }
+      if(m.again && alive()) { m.again=false; return evaluate('push'); }
+    };
+    const tick=async()=>{ if(!alive()) return unwatch(); await evaluate('tick'); if(alive()) setTimeout(tick,monitorMs).unref?.(); else unwatch(); };
     tick();
   };
   // after a restart, keep watching coins still held (peak unknown: treated as never reached +15%)
@@ -472,7 +523,7 @@ export async function startRuntime(k, {demo=false}={}) {
   const recordLeaderBuy=s=>{ remember(hisBySig,hisKey(s.sig,s.mint),{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time,sig:s.sig}); remember(lastSig,s.mint,s.sig); const old=leaderBuys.get(s.mint); if(!old || (old.usd<c.minLeaderUsd && s.usd>=c.minLeaderUsd)) remember(leaderBuys,s.mint,{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time}); };
   let lastErrorEventAt=0, hiddenErrors=0;
   const onSignature=async(sig,source='poll',logs,slot)=>{
-    const seenAt=Date.now();
+    const seenAt=Date.now(), seenSlot=k.stream?.slot?.() ?? null;
     // Which provider saw each leader transaction first. Solscan arriving first means both Helius
     // paths (websocket and polling) missed it: count it and alert, then process it normally.
     if(!delivered.has(sig)) {
@@ -489,8 +540,8 @@ export async function startRuntime(k, {demo=false}={}) {
         if(local) { const ctx=buyContextFromLogs(logs,k.config.leader,k.b58encode); if(ctx) remember(buyCtx,ctx.mint,ctx); }
         for(const ev of k.leaderPumpBuys(logs,k.config.leader)) {
           const s={sig,time:ev.timestamp||Date.now()/1000,side:'buy',mint:ev.mint,sol:ev.solAmount/1e9,raw:String(ev.tokenAmount),pump:true,decimals:6,fast:true};
-          const tp=stampSig(sig,ev.mint,'seenAt',seenAt); stampSig(sig,ev.mint,'hisTime',ev.timestamp); if(Number.isInteger(slot)) stampSig(sig,ev.mint,'hisSlot',slot); stampSig(sig,ev.mint,'decodedAt'); tp.source??='websocket (fast path)';
-          s.usd=s.sol*await k.getSolUsd(); recordLeaderBuy(s); remember(mintDecimals,s.mint,6); status.fastSignals=(status.fastSignals||0)+1;
+          const tp=stampSig(sig,ev.mint,'seenAt',seenAt); if(seenSlot!=null) stampSig(sig,ev.mint,'seenSlot',seenSlot); stampSig(sig,ev.mint,'hisTime',ev.timestamp); if(Number.isInteger(slot)) stampSig(sig,ev.mint,'hisSlot',slot); stampSig(sig,ev.mint,'decodedAt'); tp.source??='websocket (fast path)';
+          s.usd=s.sol*(solUsd() ?? await k.getSolUsd()); recordLeaderBuy(s); remember(mintDecimals,s.mint,6); status.fastSignals=(status.fastSignals||0)+1;
           await engine.ingest(s);
         }
         // His SELL is only acted on once it is confirmed on-chain (full path below, ~0.4 s later), so an
@@ -524,7 +575,7 @@ export async function startRuntime(k, {demo=false}={}) {
       }
       for(const s of signals) {
         if(Number.isInteger(s.decimals)) remember(mintDecimals,s.mint,s.decimals);
-        if(s.side==='buy') { s.usd=s.sol*await k.getSolUsd(); recordLeaderBuy(s); const tp=stampSig(sig,s.mint,'seenAt',seenAt); stampSig(sig,s.mint,'hisTime',tx.blockTime); if(Number.isInteger(tx.slot)) stampSig(sig,s.mint,'hisSlot',tx.slot); stampSig(sig,s.mint,'decodedAt'); tp.source??=source==='ws'?'websocket':source; }
+        if(s.side==='buy') { s.usd=s.sol*(solUsd() ?? await k.getSolUsd()); recordLeaderBuy(s); const tp=stampSig(sig,s.mint,'seenAt',seenAt); if(seenSlot!=null) stampSig(sig,s.mint,'seenSlot',seenSlot); stampSig(sig,s.mint,'hisTime',tx.blockTime); if(Number.isInteger(tx.slot)) stampSig(sig,s.mint,'hisSlot',tx.slot); stampSig(sig,s.mint,'decodedAt'); tp.source??=source==='ws'?'websocket':source; }
         else { study?.leaderSell(s.mint,s); if(sellAll) { s.soldRaw='1'; s.beforeRaw='1'; } }
         await engine.ingest(s);
       }
@@ -611,7 +662,7 @@ export async function startRuntime(k, {demo=false}={}) {
         engine.event('emergency-stop',{message:`sell everything from the dashboard: ${held.length} position(s)`}); res.writeHead(200); return res.end(String(held.length));
       }
       if(url.pathname==='/api/export.csv' && req.method==='GET') {const {toCsv}=await import('./study.mjs');res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':`attachment; filename="decu-trades-${c.mode}-${new Date().toISOString().slice(0,10)}.csv"`});return res.end(toCsv(study?study.records:[]));}
-      if(url.pathname==='/api/research' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?study.research():{trades:0}));}
+      if(url.pathname==='/api/research' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({...(study?study.research():{trades:0}),live:{fees:fee(),feeMode:val('FEE_MODE','max'),push:!!k.stream?.connected?.(),priceChecks:status.priceChecks}}));}
       if(req.method==='POST' && ['/api/autocopy/on','/api/autocopy/off'].includes(url.pathname)) {
         engine.autoCopy(url.pathname==='/api/autocopy/on');res.writeHead(200);return res.end('OK');
       }
@@ -624,5 +675,5 @@ export async function startRuntime(k, {demo=false}={}) {
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});
   engine.event('started',{mode:c.mode,dashboard:`http://${host}:${port}`,note:demo?'SYNTHETIC DEMO; no chain or wallet connection':'confirmed leader signals; paper estimates are not guaranteed fills'});
-  return {engine,server,study,latency:latencyOf,stop:()=>{stopped=true;monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,latency:latencyOf,stop:()=>{stopped=true;for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }

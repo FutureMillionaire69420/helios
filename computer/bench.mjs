@@ -14,7 +14,10 @@ console.log(`Node ${process.version} on ${process.platform}; ${fx.buy.logs.lengt
 time('decode his buy from websocket logs', 2000, () => leaderPumpBuys(fx.buy.logs, config.leader));
 time('read full trade context (local builder)', 2000, () => P.buyContextFromLogs(fx.buy.logs, config.leader, b58encode));
 const ctx = {...P.buyContextFromLogs(fx.buy.logs, config.leader, b58encode), ...g};
-time('build buy transaction (18 accounts)', 500, () => P.buildBuyTransaction({user: kp.publicKey, ctx, lamports: 100_000_000, slippagePct: 20, blockhash: BH, tipAccount: ctx.feeRecipient, tipLamports: 1_000_000}, h));
+// a coin the bot has never seen (its own addresses are new; the shared ones are remembered)
+let coin = 0; const freshCtx = () => ({...ctx, mint: b58encode(Buffer.alloc(32, (++coin % 250) + 1).fill(coin >> 8, 0, 1)), creator: b58encode(Buffer.alloc(32, (coin % 200) + 3))});
+time('build buy, NEW coin (18 accounts)', 200, () => P.buildBuyTransaction({user: kp.publicKey, ctx: freshCtx(), lamports: 100_000_000, slippagePct: 20, blockhash: BH, tipAccount: ctx.feeRecipient, tipLamports: 1_000_000}, h));
+time('build buy, same coin again (18 accounts)', 500, () => P.buildBuyTransaction({user: kp.publicKey, ctx, lamports: 100_000_000, slippagePct: 20, blockhash: BH, tipAccount: ctx.feeRecipient, tipLamports: 1_000_000}, h));
 const {bytes} = P.buildBuyTransaction({user: kp.publicKey, ctx, lamports: 100_000_000, slippagePct: 20, blockhash: BH}, h);
 time('sign it (ed25519)', 500, () => signTransaction(bytes, kp));
 console.log('\nNot measured here (network round trips): the safety simulation, Sender submit, landing. The bot times those live.');

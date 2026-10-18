@@ -75,3 +75,51 @@ Your current exit rules are unchanged.
 - **Circuit breakers** (new buys only): 3 failed buys in a row → 10-minute pause. Helius websocket down for 30 s → no new buys until it is back.
 - **Dashboard:** open coins out of the maximum, spending against the $ cap, and why buys are blocked.
 - **Tests:** 97/97 pass (new: max positions, $ cap, breaker gate, confirmed-only sells, price-failure sell, sell retries and CAN'T SELL, close alerts).
+
+## v3.2 (speed, 15% filter, fees at the maximum, tests c and d, holder rule)
+
+**Speed (every item measured in the bot):**
+1. **SOL price in the background.** It is refreshed every 15 s and never looked up during a buy. This took about 170 ms per buy before, and once took 4.2 s.
+2. **Confirmations are pushed.** The websocket says "confirmed" the moment it happens. Polling every 0.3 s stays on as the backup; it was 0.8 s before.
+3. **Detection in exact blocks.** Each alert says "seen N blocks after his". The old seconds number was rounded by his whole-second clock.
+4. **One entry premium:** the bot's price per token vs Decu's (price vs price). Fees show separately on the same line ("fees X SOL, Y% of the trade"). Old records keep the old (cost) basis.
+5. **Filters side by side:** every alert shows `Filters: 10% … · 15% (trading) … · 25% …`. The dashboard compares them on the same trades.
+6. **Fees at the top of the market** (`FEE_MODE=max`):
+   - priority fee = the Helius estimate at VeryHigh
+   - tip = Jito's 99th percentile of landed tips
+   - refreshed every 10 s in the background
+   - capped at 0.003 + 0.005 SOL per side (up to ~16% round trip on 0.1 SOL)
+   - the safety check allows exactly the fee put in the transaction, never above the caps
+7. **Prices pushed for exits.** Every change of a held coin's bonding curve arrives over the websocket and is checked at once, including the stop-loss. Polling every 0.5 s stays as the backup.
+8. **Stop-loss alternatives in paper:**
+   - test **c**: -20% counted on your money
+   - test **d**: sell when holders fall behind the market cap
+
+   The real stop always sells.
+9. **Fair exit comparison:** every exit is compared with your rules on the same trades, chosen on older trades and checked on newer ones.
+10. **Incomplete results are not zeros.** A trade without data for a test is left out and counted as such.
+11. **Timing bug fixed:** a second build attempt starts with clean timings. An earlier attempt's stamps once made a buy look 111 s slow.
+
+**Also:**
+- **Holder rule**, on every alert (SAFE / RISKY) and as a brain pattern:
+  - above $10k needs 1,000 holders
+  - above $20k needs 2,500
+  - above $30k needs 4,000
+
+  Set with `HOLDER_RULES`. Report only.
+- **Skipped buys:** a phone alert only when the buy was inside 25% (`SKIPPED_ALERTS=report`).
+- **Local build:** derived addresses are remembered. Building a buy for a new coin dropped from ~6 ms to ~3.5 ms, and to ~0.2 ms for a repeat.
+- **`NTFY_TOKEN`:** an ntfy access token lifts the free daily alert limit.
+- **Spreadsheet:** new columns for detect blocks, premium basis, fees, holder rule, and tests c and d.
+- **Tests:** 111/111 pass. New tests cover:
+  - the push stream (reconnect and a stalled socket included)
+  - the holder rule
+  - tests c and d
+  - the filter labels
+  - a push-driven stop
+  - max fees in paper P&L
+  - exact blocks
+  - fee caps
+  - the non-blocking SOL price
+  - pushed confirmation
+  - the holder count

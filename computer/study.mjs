@@ -17,7 +17,7 @@
 // Read-only: a study never signs or sends anything.
 
 import fs from 'node:fs';
-import { DIMENSIONS, createBrain, curveShape, simulateRules } from './learn.mjs';
+import { DIMENSIONS, createBrain, curveShape, simulateRules, exitSim, holderVerdict, HOLDER_RULES } from './learn.mjs';
 
 // CHARTS: a QuickChart.io image URL (rendered on demand, only % numbers are sent) attached to alerts.
 const chartUrl = (cfg) => `https://quickchart.io/chart?w=600&h=320&bkg=white&c=${encodeURIComponent(JSON.stringify(cfg))}`;
@@ -98,14 +98,14 @@ export function summarize(records, { buySol = 0.1, filterPct = 60 } = {}) {
 export function latencyLine(L) {
   if (!L) return null;
   const ms = (x) => (x == null ? '—' : x >= 1000 ? `${(x / 1000).toFixed(2)} s` : `${x} ms`);
-  const parts = [`seen ${ms(L.detectMs)} after his block (his clock is whole seconds: ±0.5 s)`, `decode ${ms(L.decodeMs)}`, `decide ${ms(L.decideMs)}`, `build ${ms(L.buildMs)}${L.route ? ` (${L.route})` : ''}`];
+  const parts = [L.detectBlocks != null ? `seen ${L.detectBlocks} block${L.detectBlocks === 1 ? '' : 's'} after his (exact; ≈${ms(L.detectMs)} by his whole-second clock)` : `seen ${ms(L.detectMs)} after his block (his clock is whole seconds: ±0.5 s)`, `decode ${ms(L.decodeMs)}`, `decide ${ms(L.decideMs)}`, `build ${ms(L.buildMs)}${L.route ? ` (${L.route})` : ''}`];
   if (L.sendMs != null) parts.push(`send ${ms(L.sendMs)}`);
   parts.push(L.simulatedMs != null ? `land ${ms(L.landMs)} (incl. ${ms(L.simulatedMs)} SIMULATED paper wait)` : `land ${ms(L.landMs)}`);
   return `Latency: ${parts.join(' · ')} · bot total ${ms(L.botMs)}${L.blocksAfter != null ? ` · ${L.blocksAfter} blocks after Decu${L.blocksEstimated ? ' (≈, paper)' : ''}` : ''}`;
 }
 const pctl = (xs, p) => { const s = xs.filter(Number.isFinite).sort((a, b) => a - b); return s.length ? s[Math.min(s.length - 1, Math.floor(p * s.length))] : null; };
 /** Research summary for the dashboard: latency, premium, accepted vs rejected, risk numbers. */
-export function research(records, { buySol = 0.1, filterPct = 60 } = {}) {
+export function research(records, { buySol = 0.1, filterPct = 60, reportPcts = [] } = {}) {
   const rs = records.filter((r) => Number.isFinite(r.fcat));
   const taken = rs.filter((r) => r.taken !== false), skipped = rs.filter((r) => r.taken === false);
   const L = (k) => taken.map((r) => r.latency?.[k]).filter(Number.isFinite);
@@ -120,18 +120,27 @@ export function research(records, { buySol = 0.1, filterPct = 60 } = {}) {
     profitFactor: losses > 0 ? gains / losses : null, maxDrawdownSol: dd,
     medianEntryPremium: median(rs.map((r) => r.entryGap)), avgEntryPremium: rs.filter((r) => Number.isFinite(r.entryGap)).reduce((a, r, _, l) => a + r.entryGap / l.length, 0) || null,
     filter: { pct: filterPct, trades: fl.length, fcatSol: fl.reduce((a, r) => a + r.fcat * buySol, 0) },
-    latency: { medianSec: median(rs.map((r) => r.delaySec)), p95Sec: pctl(rs.map((r) => r.delaySec), 0.95), botMedianMs: median(L('botMs')), botP95Ms: pctl(L('botMs'), 0.95), detectMedianMs: median(L('detectMs')), buildMedianMs: median(L('buildMs')), landMedianMs: median(L('landMs')), blocksMedian: median(L('blocksAfter')), simulatedMs: median(L('simulatedMs')) },
+    // Same trades, three premium limits side by side (only trades with a known premium count).
+    filters: [...new Set([...reportPcts, filterPct])].sort((a, b) => a - b).map((p) => { const k = rs.filter((r) => Number.isFinite(r.entryGap) && r.entryGap <= p / 100 + 1e-9); return { pct: p, trading: p === filterPct, trades: k.length, wins: k.filter((r) => r.fcat > 0).length, fcatSol: k.reduce((a, r) => a + r.fcat * buySol, 0) }; }),
+    holders: (() => { const g = (safe) => { const k = rs.filter((r) => r.holderVerdict && r.holderVerdict.safe === safe); return { trades: k.length, wins: k.filter((r) => r.fcat > 0).length, fcatSol: k.reduce((a, r) => a + r.fcat * buySol, 0) }; }; return { safe: g(true), risky: g(false), unknown: rs.filter((r) => !r.holderVerdict).length }; })(),
+    // Paper tests c and d vs your rules, on the SAME trades (a trade without data for a test is left out of both).
+    exitTests: ['costStop', 'holders'].map((k) => { const both = rs.filter((r) => r.exitAlt?.[k] && r.ruleSim && Number.isFinite(r.exitAlt[k].pnl) && Number.isFinite(r.ruleSim.pnl)); const sum = (f) => both.reduce((a, r) => a + f(r) * buySol, 0);
+      return { name: k === 'costStop' ? 'stop -20% on your money' : 'holder momentum', trades: both.length, pnlSol: sum((r) => r.exitAlt[k].pnl), yoursSol: sum((r) => r.ruleSim.pnl), incomplete: rs.filter((r) => r.exitAlt?.[k] == null).length }; }),
+    latency: { medianSec: median(rs.map((r) => r.delaySec)), p95Sec: pctl(rs.map((r) => r.delaySec), 0.95), botMedianMs: median(L('botMs')), botP95Ms: pctl(L('botMs'), 0.95), detectMedianMs: median(L('detectMs')), buildMedianMs: median(L('buildMs')), landMedianMs: median(L('landMs')), blocksMedian: median(L('blocksAfter')), detectBlocksMedian: median(L('detectBlocks')), detectBlocksP95: pctl(L('detectBlocks'), 0.95), simulatedMs: median(L('simulatedMs')) },
     recent: records.slice(-15).reverse().map((r) => ({ time: r.time, coin: r.symbol || r.mint.slice(0, 6), taken: r.taken !== false, reason: r.skipReason, premium: r.entryGap, latencySec: r.delaySec, blocks: r.latency?.blocksAfter ?? null, fcat: r.fcat })),
   };
 }
 
 /** Every studied trade as CSV (one row per Decu buy, bought or skipped), for a spreadsheet. */
 export function toCsv(records) {
-  const cols = ['time_utc', 'coin', 'mint', 'bought', 'skip_reason', 'decu_sol', 'decu_usd', 'execution_latency_s', 'blocks_after_decu', 'entry_premium_pct', 'fcat_pct', 'fcat_exit', 'cat3_pct', 'cat5_pct', 'cat10_pct', 'btsab_s', 'peak_pct', 'worst_pct', 'pcat_pct', 'your_rules_pct', 'your_rules_exit', 'shape', 'predicted_pct', 'holders', 'mcap_usd', 'coin_age_min', ...Array.from({ length: 16 }, (_, s) => `s${s}_pct`)];
+  const cols = ['time_utc', 'coin', 'mint', 'bought', 'skip_reason', 'decu_sol', 'decu_usd', 'execution_latency_s', 'blocks_after_decu', 'entry_premium_pct', 'fcat_pct', 'fcat_exit', 'cat3_pct', 'cat5_pct', 'cat10_pct', 'btsab_s', 'peak_pct', 'worst_pct', 'pcat_pct', 'your_rules_pct', 'your_rules_exit', 'shape', 'predicted_pct', 'holders', 'mcap_usd', 'coin_age_min', 'detect_blocks', 'premium_basis', 'cost_premium_pct', 'buy_fee_sol', 'sell_fee_sol', 'holder_rule', 'holders_needed', 'test_c_stop_on_money_pct', 'test_c_exit', 'test_d_holder_momentum_pct', 'test_d_exit', ...Array.from({ length: 16 }, (_, s) => `s${s}_pct`)];
   const p = (x) => (x == null || !Number.isFinite(x) ? '' : (x * 100).toFixed(2));
   const q = (v) => { const t = v == null ? '' : String(v); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const ex = (x) => (x == null ? '' : x.open ? 'holding at 15 s' : `${x.how} at ${x.sec}s`);
   const rows = records.map((r) => [r.time, r.symbol || '', r.mint, r.taken === false ? 'no' : 'yes', r.skipReason || '', r.hisSol ?? '', r.hisUsd != null ? Math.round(r.hisUsd) : '', r.delaySec ?? '', r.latency?.blocksAfter ?? '', p(r.entryGap), p(r.fcat), r.fcatExit || '',
     p(r.curve?.[3]), p(r.curve?.[5]), p(r.curve?.[10]), r.btsab ?? '', p(r.peak), p(r.worst), p(r.pcat), p(r.ruleSim?.pnl), r.ruleSim ? (r.ruleSim.open ? 'holding at 15 s' : `${r.ruleSim.how} at ${r.ruleSim.sec}s`) : '', r.shape || '', p(r.prediction?.fcat), r.coin?.holders ?? '', r.coin?.marketCapUsd != null ? Math.round(r.coin.marketCapUsd) : '', r.coin?.ageSec != null ? Math.round(r.coin.ageSec / 60) : '',
+    r.latency?.detectBlocks ?? '', r.premiumDef || 'cost', p(r.costPremium), r.buyFeeSol ?? '', r.sellFeeSol ?? '', r.holderVerdict ? (r.holderVerdict.safe ? 'SAFE' : 'RISKY') : '', r.holderVerdict?.required ?? '',
+    p(r.exitAlt?.costStop?.pnl), ex(r.exitAlt?.costStop), p(r.exitAlt?.holders?.pnl), ex(r.exitAlt?.holders),
     ...Array.from({ length: 16 }, (_, s) => p(r.curve?.[s]))].map(q).join(','));
   return [cols.join(','), ...rows].join('\n') + '\n';
 }
@@ -169,6 +178,12 @@ export function tradeNotes(rec, records, { stopLossPct = 20, gainGatePct = 15, m
   const base = c.find((v) => v != null);
   if (base != null) { const hit = c.findIndex((v) => v != null && (1 + v) / (1 + base) - 1 <= -stopLossPct / 100); n.push(hit >= 0 ? `Organic -${stopLossPct}% stop would sell at ${hit}s.` : `Organic -${stopLossPct}% stop not hit in 15s.`); }
   if (rec.entryGap != null) n.push(`The ${maxPayPct}% entry-premium filter would have ${rec.entryGap > maxPayPct / 100 ? 'SKIPPED' : 'TAKEN'} this buy (FCAT ${pct(rec.fcat)}).`);
+  const rs = rec.ruleSim, alt = (x) => (x == null ? null : x.open ? `still holding at 15 s (${pct(x.pnl)})` : `${x.how} at ${x.sec}s → ${pct(x.pnl)}`);
+  const vs = (x) => (x && rs && Number.isFinite(x.pnl) && Number.isFinite(rs.pnl) ? ` (${x.pnl >= rs.pnl ? '+' : ''}${((x.pnl - rs.pnl) * 100).toFixed(1)} pts vs your rules)` : '');
+  if (rec.exitAlt?.costStop) n.push(`Test c, stop -20% on your money: ${alt(rec.exitAlt.costStop)}${vs(rec.exitAlt.costStop)}.`);
+  if (rec.exitAlt) n.push(rec.exitAlt.holders ? `Test d, holder momentum: ${alt(rec.exitAlt.holders)}${vs(rec.exitAlt.holders)}.` : 'Test d, holder momentum: no holder counts for this coin (left out, not counted as zero).');
+  const hv = rec.holderVerdict;
+  if (hv) n.push(hv.safe ? `Holders ${hv.holders} support this mcap ($${Math.round(hv.mcapUsd).toLocaleString('en-US')})${hv.ceilingUsd ? `; above $${hv.ceilingUsd / 1000}k it needs more` : ''}: SAFE.` : `Holders ${hv.holders} are behind this mcap ($${Math.round(hv.mcapUsd).toLocaleString('en-US')} needs ${hv.required}): RISKY.`);
   const size = BUCKETS['Decu buy size'](rec);
   if (size) { const g = memoryBank(records).find((x) => x.dimension === 'Decu buy size' && x.bucket === size); if (g && g.trades >= 3) n.push(`Memory: Decu buys of ${size} → ${g.wins}/${g.trades} won, avg FCAT ${pct(g.avgFcat)}.`); }
   return n;
@@ -195,10 +210,13 @@ export function summaryText(sm) {
  * leaderSell(mint, {time, sol, soldRaw}) records his first sell during the window.
  * learnOpts go to the brain (learn.mjs): stopLossPct, gainGatePct, gateSec, maxPayPct, reportEvery.
  */
-export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, notesOpts = {}, learnOpts = {}, skippedAlerts = true, log = () => {} }) {
+export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, notesOpts = {}, learnOpts = {}, skippedAlerts = true, reportPcts = [], holderRule = HOLDER_RULES, sampleHolders = null, holderEverySec = 5, log = () => {} }) {
+  const sellFee = () => (typeof feeSol === 'function' ? feeSol() : feeSol);
   const filterPct = notesOpts.maxPayPct ?? 60;
   const ruleOpts = { stopLossPct: notesOpts.stopLossPct ?? 20, gainGatePct: notesOpts.gainGatePct ?? 15, gateSec: learnOpts.gateSec ?? windowSec };
-  const brain = createBrain({ buySol, ...ruleOpts, maxPayPct: learnOpts.maxPayPct ?? 0, reportEvery: learnOpts.reportEvery ?? 10, digestHours: learnOpts.digestHours ?? 24 });
+  const brain = createBrain({ buySol, ...ruleOpts, maxPayPct: learnOpts.maxPayPct ?? 0, reportEvery: learnOpts.reportEvery ?? 10, digestHours: learnOpts.digestHours ?? 24, holderRules: holderRule, filterPcts: reportPcts });
+  const filterLabels = (gap) => [...new Set([...reportPcts, filterPct])].sort((a, b) => a - b).map((p) => `${p}%${p === filterPct ? ' (trading)' : ''} ${gap == null ? '—' : gap <= p / 100 + 1e-9 ? 'TAKE' : 'SKIP'}`).join(' · ');
+  const alertSkipped = (gap) => skippedAlerts === true || skippedAlerts === 'true' || (skippedAlerts === 'report' && gap != null && reportPcts.length > 0 && gap <= Math.max(...reportPcts) / 100 + 1e-9);
   const records = [];
   try {
     for (const line of fs.readFileSync(file, 'utf8').split('\n')) if (line.trim()) records.push(JSON.parse(line));
@@ -220,7 +238,8 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
 
   async function finish(st) {
     active.delete(st.mint);
-    const curve = st.values.map((v) => (v == null ? null : (v * (1 - slip) - feeSol - st.cost) / st.cost));
+    const curve = st.values.map((v) => (v == null ? null : (v * (1 - slip) - st.sellFee - st.cost) / st.cost));
+    if (st.holderPending.length) await Promise.race([Promise.allSettled(st.holderPending), new Promise((r) => setTimeout(r, quoteTimeoutMs))]);
     const known = curve.map((v, s) => [v, s]).filter(([v]) => v != null);
     const [peak, btsab] = known.length ? known.reduce((a, b) => (b[0] > a[0] ? b : a)) : [null, null];
     const [worst, worstAt] = known.length ? known.reduce((a, b) => (b[0] < a[0] ? b : a)) : [null, null];
@@ -233,7 +252,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
     if (firstPrice) {
       const hs = st.hisSell;
       const exitPrice = hs && hs.sol > 0 && hs.soldRaw > 1000 ? hs.sol / hs.soldRaw /* a placeholder amount ('1') is never a price */ : st.values.findLast((v) => v != null) / st.raw;
-      if (Number.isFinite(exitPrice)) { pcat = exitPrice / firstPrice - 1 - (2 * feeSol) / buySol; pcatExit = hs ? `his sell at ${hs.atSec}s` : '15s mark'; }
+      if (Number.isFinite(exitPrice)) { pcat = exitPrice / firstPrice - 1 - (2 * st.sellFee) / buySol; pcatExit = hs ? `his sell at ${hs.atSec}s` : '15s mark'; }
     }
     // FCAT: exit at the first full second after his first sell, else 15 s after DECU'S buy (the bot
     // lands ~2 s after him, so that is ~13 s after the bot's buy). Both inside the study window.
@@ -246,13 +265,23 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
     const rec = {
       time: new Date(st.startedAt).toISOString(), mint: st.mint, symbol: m?.symbol || null, mode,
       hisSol: st.his.sol, hisUsd: st.his.usd, delaySec,
-      entryGap: hisPrice ? botPrice / hisPrice - 1 : null, cost: st.cost, curve, fcat, fcatSec, fcatExit, btsab, peak, worst, worstAt, pcat, pcatExit,
+      // Entry premium is PRICE vs PRICE (the bot's price into the curve vs Decu's, both without fees);
+      // costPremium includes every fee. Older records (premiumDef missing) used the cost basis.
+      entryGap: hisPrice ? (st.entryPrice > 0 ? st.entryPrice : botPrice) / hisPrice - 1 : null, premiumDef: st.entryPrice > 0 ? 'price' : 'cost',
+      costPremium: hisPrice ? botPrice / hisPrice - 1 : null, buyFeeSol: st.fill?.buyFeeSol ?? null, sellFeeSol: st.sellFee, actualFill: !!st.fill?.actualFill,
+      holderPath: st.holderPath.length ? st.holderPath.sort((a, b) => a.s - b.s) : null, cost: st.cost, curve, fcat, fcatSec, fcatExit, btsab, peak, worst, worstAt, pcat, pcatExit,
       hisSoldAtSec: st.hisSell?.atSec ?? null, bandSol: st.his.sol > 0 ? st.his.sol * bandPct : null,
       taken: !st.shadow, skipReason: st.shadow || null, latency: st.his.latency || null, hisTime: st.his.time ?? null,
       copiedLaterBuy: !!(f && f.time && st.his.time && st.his.time - f.time > 1), hisFirstTime: f?.time ?? null,
       coin: m ? { holders: m.holders ?? null, marketCapUsd: m.marketCapUsd ?? null, ageSec: m.createdTime ? Math.round(st.startedAt / 1000 - m.createdTime) : null } : null,
     };
     enrich(rec, records);
+    const h0 = rec.holderPath?.find((x) => Number.isFinite(x.holders) && Number.isFinite(x.mcapUsd));
+    rec.holderVerdict = h0 ? holderVerdict(h0.holders, h0.mcapUsd, holderRule) : null;
+    // Paper tests of two other exits on this same trade: (c) the -20% stop counted on your money,
+    // (d) your holder rule as a momentum exit. Both still keep his sell; the stop always sells.
+    const xo = { ...ruleOpts, holderRules: holderRule };
+    rec.exitAlt = { costStop: exitSim(rec, { costStop: 0.2 }, xo), holders: exitSim(rec, { holders: true }, xo) };
     rec.notes = tradeNotes(rec, [...records, rec], notesOpts);
     records.push(rec);
     if (records.length > 5000) records.shift();
@@ -267,7 +296,9 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
       const body = [
         rec.copiedLaterBuy ? `Copied a LATER buy of Decu's (his first buy of this coin was ${Math.round((rec.hisTime - rec.hisFirstTime) / 60)} min earlier). Latency and entry premium are vs the copied buy; PCAT is vs his first buy.` : null,
         st.shadow ? `NOT BOUGHT (${st.shadow}). Studied anyway with a ${buySol} SOL quote: what it would have done.` : null,
-        `${label} bought ${st.his.sol?.toFixed(3) ?? '?'} SOL${st.his.usd ? ` ($${Math.round(st.his.usd)})` : ''} · execution latency ${rec.delaySec ?? '?'} s · entry premium ${pct(rec.entryGap)} · ${filterPct}% filter: ${rec.entryGap == null ? '—' : rec.entryGap <= filterPct / 100 ? 'TAKE' : 'SKIP'}`,
+        `${label} bought ${st.his.sol?.toFixed(3) ?? '?'} SOL${st.his.usd ? ` ($${Math.round(st.his.usd)})` : ''} · execution latency ${rec.delaySec ?? '?'} s · entry premium ${pct(rec.entryGap)}${rec.premiumDef === 'price' ? ' (price vs price)' : ''}${rec.buyFeeSol != null ? ` · fees ${sol(-(rec.buyFeeSol + rec.sellFeeSol))} SOL (${((rec.buyFeeSol + rec.sellFeeSol) / buySol * 100).toFixed(1)}% of the trade, buy+sell)` : ''}`,
+        `Filters: ${filterLabels(rec.entryGap)}`,
+        rec.holderVerdict ? `Holders: ${rec.holderVerdict.holders} · mcap $${Math.round(rec.holderVerdict.mcapUsd).toLocaleString('en-US')} → ${rec.holderVerdict.safe ? 'SAFE' : 'RISKY'}${rec.holderVerdict.ceilingUsd ? ` (holders support up to $${(rec.holderVerdict.ceilingUsd / 1000).toFixed(0)}k)` : ' (holders support any market cap in your rule)'}` : null,
         latencyLine(rec.latency),
         `FCAT ${pct(fcat)} (${sol(fcat == null ? null : fcat * buySol)} SOL) · sold at ${fcatExit}${rec.bandSol ? ` · BAND ${sol(fcat == null ? null : fcat * rec.bandSol)} SOL` : ''}`,
         `3CAT ${at(3)} | 5CAT ${at(5)} | 10CAT ${at(10)}`,
@@ -286,7 +317,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
         mode === 'live' ? '' : 'No real money used.',
         `Token: ${st.mint}`,
       ].filter((x) => x != null).join('\n');
-      if (!st.shadow || skippedAlerts) send({ title: `${tag}${st.shadow ? 'SKIPPED ' : ''}${name} FCAT ${pct(fcat)} | BTSAB ${btsab ?? '—'}s ${pct(peak)}`, body, priority: st.shadow ? 2 : 3, tags: ['bar_chart'], click: `https://pump.fun/coin/${st.mint}`, image: tradeChart(rec, ruleOpts.gainGatePct, ruleOpts.stopLossPct) });
+      if (!st.shadow || alertSkipped(rec.entryGap)) send({ title: `${tag}${st.shadow ? 'SKIPPED ' : ''}${name} FCAT ${pct(fcat)} | BTSAB ${btsab ?? '—'}s ${pct(peak)}`, body, priority: st.shadow ? 2 : 3, tags: ['bar_chart'], click: `https://pump.fun/coin/${st.mint}`, image: tradeChart(rec, ruleOpts.gainGatePct, ruleOpts.stopLossPct) });
       // What the brain decided is worth its own alert: new / confirmed / faded patterns, streaks,
       // level-ups, the learning report every 10 trades and the daily digest.
       for (const e of learned.events) send({ title: `${tag}${e.title}`, body: e.body + (mode === 'live' ? '' : '\nNo real money used.'), priority: e.priority, tags: e.tags, image: ['report', 'level', 'digest', 'streak'].includes(e.kind) ? historyChart(records) : undefined });
@@ -299,17 +330,19 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
     active,
     brain,
     summary: () => summarize(records, { buySol, filterPct }),
-    research: () => ({ ...research(records, { buySol, filterPct }), brain: brain.snapshot(records).journey }),
+    research: () => ({ ...research(records, { buySol, filterPct, reportPcts }), brain: brain.snapshot(records).journey }),
     learning: () => brain.snapshot(records),
     /** Begin a 15 s study of a position the bot just bought. Returns a promise of the record. */
-    start({ mint, cost, raw, his = {}, shadow = null }) {
+    start({ mint, cost, raw, his = {}, shadow = null, entryPrice = null, fill = null }) {
       if (active.has(mint) || active.size >= maxConcurrent || !(cost > 0) || !(Number(raw) > 0)) return null;
-      const st = { mint, cost, raw: Number(raw), his, values: [], startedAt: Date.now(), hisSell: null, shadow };
+      const st = { mint, cost, raw: Number(raw), his, values: [], startedAt: Date.now(), hisSell: null, shadow, entryPrice, fill, sellFee: sellFee(), holderPath: [], holderPending: [] };
       active.set(mint, st);
       return new Promise((resolve) => {
         let s = 0;
         const tick = async () => {
           const due = st.startedAt + s * stepMs;
+          // holders + market cap every holderEverySec (in parallel; never delays the price samples)
+          if (sampleHolders && s % holderEverySec === 0) { const at = s; st.holderPending.push(timed(sampleHolders(mint)).then((h) => { if (h) st.holderPath.push({ s: at, holders: h.holders ?? null, mcapUsd: h.mcapUsd ?? null }); }).catch(() => {})); }
           st.values[s] = await timed(quoteSell(mint, st.raw).then((v) => (Number.isFinite(v) ? v : null)).catch(() => null));
           s++;
           if (s > windowSec) return resolve(await finish(st)); // hard stop: never studies a coin longer than the window
