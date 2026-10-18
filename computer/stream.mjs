@@ -44,7 +44,7 @@ export function createStream({ url, WebSocketImpl = globalThis.WebSocket, log = 
     // every handler ignores a socket that was already replaced (a late close of a stalled one)
     sock.onopen = () => {
       if (ws !== sock) return;
-      open = true; backoff = 500; lastMsgAt = Date.now();
+      open = true; backoff = 500; lastMsgAt = Date.now(); log('stream: connected (blocks, confirmations and prices are pushed)');
       for (const key of subs.keys()) subscribe(key);
     };
     sock.onmessage = (ev) => {

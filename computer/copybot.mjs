@@ -991,7 +991,7 @@ async function refreshFees() {
   fees.at = Date.now(); fees.source = `max (priority ${Number.isFinite(p) ? 'estimate' : 'cap'}, tip ${Number.isFinite(t) ? 'Jito 99th pct' : 'cap'})`;
   return fees;
 }
-function startFeeRefresh() { if (env('FEE_MODE', 'max') !== 'max') return () => {}; refreshFees(); const t = setInterval(refreshFees, num('FEE_REFRESH_SEC', 10) * 1000); t.unref?.(); return () => clearInterval(t); }
+function startFeeRefresh() { if (env('FEE_MODE', 'max') !== 'max') return () => {}; refreshFees().then((f) => console.log(`fees now: priority ${f.priorityFeeSol.toFixed(6)} + tip ${f.tipSol.toFixed(6)} SOL per trade (${f.source}); refreshed every ${num('FEE_REFRESH_SEC', 10)} s`)).catch(() => {}); const t = setInterval(refreshFees, num('FEE_REFRESH_SEC', 10) * 1000); t.unref?.(); return () => clearInterval(t); }
 const currentFees = () => ({ priorityFeeSol: fees.priorityFeeSol, tipSol: fees.tipSol, at: fees.at, source: fees.source });
 
 async function jupQuote(inputMint, outputMint, amount) {
@@ -2494,6 +2494,8 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
   const stopSol = demo ? () => {} : startSolPriceRefresh(), stopFees = demo ? () => {} : startFeeRefresh();
   const r = await startRuntime({config,kp,notify,solUsdNow,fees:currentFees,stream,watchCurve,curveSell,curveMcapSol,mcapUsdNow,holderCount,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();process.exit(0);});
+  // The settings that decide speed and filtering, as the bot actually uses them (no keys).
+  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'report')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.003)} + ${num('TIP_MAX_SOL', 0.005)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · holder rule ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · paper land ${config.paperLandMs} ms`);
 }
 
 /** Backtest one day of the leader's trades with an imaginary wallet. */
