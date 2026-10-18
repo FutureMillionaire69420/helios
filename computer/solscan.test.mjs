@@ -109,7 +109,7 @@ test('runtime counts which provider saw each trade first and alerts on Helius ga
   await ws('seenByHelius', 'ws'); await ss('seenByHelius', 'solscan');
   await ss('missedByHelius', 'solscan'); await ws('missedByHelius', 'poll');
   const s = await (await fetch(`http://127.0.0.1:${r.server.address().port}/api/status`, {headers: {Authorization: 'Bearer ' + process.env.DASHBOARD_TOKEN}})).json();
-  assert.deepEqual(s.connection.firstSeen, {ws: 1, poll: 0, solscan: 1});
+  assert.deepEqual(s.connection.firstSeen, {ws: 1, poll: 0, solscan: 1, pumpportal: 0});
   assert.equal(s.connection.gaps, 1); assert.equal(s.connection.unsupported, 2);
   assert.equal(s.events.filter((e) => e.type === 'provider-gap').length, 1);
   assert.ok(s.events.some((e) => e.type === 'unsupported' && e.kind === 'paid-with-pump'));

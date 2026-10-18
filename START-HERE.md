@@ -45,6 +45,9 @@ the same coin. It runs on your computer, and your phone gets a message when some
 Go to **https://solscan.io/apis**, pick a plan, and copy your API key. You can skip this and add it
 later by running setup again.
 
+### Step 4b. (Optional) PumpPortal key: a second way to see Decu's trades
+On **https://pumpportal.fun**, create an API key. Put it in `PUMPPORTAL_API_KEY` (in `.env`, or in Render's Environment). Never put it in a file you share: the key can trade from the PumpPortal wallet linked to it. PumpPortal charges 0.01 SOL per 10,000 of Decu's trades it streams, taken from that linked wallet, so keep at least 0.02 SOL there.
+
 ### Step 5. Run setup
 - **Mac:** right-click **setup-mac.command** → **Open** → **Open**.
   (If there's no Open button: System Settings → Privacy & Security → scroll down → **Open Anyway**.)
@@ -123,6 +126,8 @@ A Decu buy the bot did not take (filtered, 2 coins already open, daily cap, paus
 **Stop-loss alerts, in order:** STOP TRIGGERED → SELL SENT (live) → POSITION CLOSED (with the trigger vs the real fill). If prices can't be read 3 times in a row you get *Price checks failing*; after 6 it sells anyway. If a sell fails it retries at once; after 3 failures you get **CAN'T SELL** and it keeps trying.
 
 **Solscan credits:** Solscan is asked only when it helps: every 10 min while Helius works and nothing is held, every 30 s while coins are held, every 15 s if Helius is down, and never more than 2,500 requests a day (the dashboard shows today's count).
+
+**PumpPortal feed (second way to see Decu's trades):** with `PUMPPORTAL_API_KEY` set, PumpPortal pushes each of his trades too. If it is first, the bot copies his buy right away; Helius' copy of the same trade is ignored, so it never buys twice. His sells are still acted on only once confirmed. The dashboard counts which feed was first and by how many ms. Once per run, the bot also asks PumpPortal's builder for a sample buy (never signed or sent) and shows whether the safety check accepts it. PumpPortal charges **0.5% per trade it builds**, so the bot uses it only as a fallback.
 
 **Bot power ON / OFF (dashboard, top):** OFF stops everything that uses your Helius and Solscan credits. The bot stops watching Decu, stops checking prices and stops all background lookups. The dashboard keeps working, and ON starts it all again. The choice is kept after restarts. In LIVE, OFF asks first if coins are still held, because their stop-loss can't run while it's off.
 

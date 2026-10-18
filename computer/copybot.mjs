@@ -14,6 +14,7 @@ import {pathToFileURL,fileURLToPath} from 'node:url';
 import {spawn,spawnSync} from 'node:child_process';
 import {startRuntime,normalize} from './runtime.mjs';
 import {createStream} from './stream.mjs';
+import {createPumpPortalFeed} from './pumpportal.mjs';
 import {decodeBondingCurve} from './pumpbuild.mjs';
 import {solscanClient,startSolscanWatcher,swapsFromActivities,leaderProfile,compareDetection} from './solscan.mjs';
 
@@ -307,6 +308,9 @@ const config = {
   // Solscan Pro API (v2): independent second watcher, parser cross-check, token names, SOL price.
   solscanKey: env('SOLSCAN_API_KEY'),
   solscanPollMs: num('SOLSCAN_POLL_MS', 5000), // 0 = no Solscan watcher
+  // PumpPortal API key: its live trade feed of Decu's wallet (second way to see his trades). Secret: the key
+  // is tied to a PumpPortal wallet. Set it in Render's environment (or .env), never in a file you share.
+  pumpPortalKey: env('PUMPPORTAL_API_KEY'),
 
   ntfyTopic: env('NTFY_TOPIC'),
   ntfyServer: env('NTFY_SERVER', 'https://ntfy.sh'),
@@ -1229,7 +1233,13 @@ function transactionBlockhash(bytes) {
   const [n,z]=readShortVec(m,o);o+=z+n*32;return b58encode(m.subarray(o,o+32));
 }
 
-async function validateTrade(bytes,job,balanceSol,feeSol=0) {
+/**
+ * The instruction rules of the safety check (no simulation): one signer (the wallet), compute budget /
+ * memo, SOL transfers only to a Jito tip account or the wallet's own wrapped-SOL account, the wallet's own
+ * token accounts, and exactly one pump.fun / PumpSwap trade of the intended coin, side and size.
+ * Throws with the reason; returns the wallet and its two possible token accounts for the coin.
+ */
+async function checkTradeInstructions(bytes,job) {
   const tx=parseTransaction(bytes);
   if(tx.nSig!==1 || tx.numRequiredSignatures!==1) throw new Error('unexpected additional signer');
   const wallet=tx.keys[0],m=tx.message;let o=(tx.versioned?1:0)+3;
@@ -1256,7 +1266,7 @@ async function validateTrade(bytes,job,balanceSol,feeSol=0) {
     if(program===COMPUTE_BUDGET || program===MEMO) continue;
     if(program===SYSTEM_PROGRAM) {
       if(data.length!==12 || data.readUInt32LE(0)!==2) throw new Error('unsupported system instruction');
-      if(accounts[0]!==wallet || !(TIP_ACCOUNTS.includes(accounts[1]) || accounts[1]===wrapped)) throw new Error('unexpected SOL transfer recipient');
+      if(accounts[0]!==wallet || !(TIP_ACCOUNTS.includes(accounts[1]) || accounts[1]===wrapped)) throw new Error(`unexpected SOL transfer recipient ${accounts[1]} (${data.readBigUInt64LE(4)} lamports)`);
     } else if(program===PROGRAMS.ATA) {
       if(accounts[0]!==wallet || accounts[2]!==wallet || ![job.mint,WSOL].includes(accounts[3])) throw new Error('unexpected token account creation');
     } else if(program===PROGRAMS.TOKEN || program===PROGRAMS.TOKEN_2022) {
@@ -1278,6 +1288,11 @@ async function validateTrade(bytes,job,balanceSol,feeSol=0) {
     } else throw new Error('unapproved execution program '+program);
   }
   if(tradeCount!==1) throw new Error('expected exactly one pump trade instruction');
+  return {wallet,atas};
+}
+
+async function validateTrade(bytes,job,balanceSol,feeSol=0) {
+  const {wallet,atas}=await checkTradeInstructions(bytes,job);
   // Pre-trade balances and the simulation are independent reads: run them together (one round trip).
   const [before,simulation]=await Promise.all([
     rpc('getMultipleAccounts',[[wallet,...atas],{encoding:'base64',commitment:'confirmed'}]),
@@ -1297,6 +1312,34 @@ async function validateTrade(bytes,job,balanceSol,feeSol=0) {
   const sum=rows=>rows.slice(1).reduce((total,a)=>{if(!a)return total;const b=Buffer.from(a.data[0],'base64');if(b.length===0&&Number(a.lamports)===0)return total;if(b.length<72)throw new Error('invalid token account');return total+b.readBigUInt64LE(64);},0n);
   const delta=sum(v.accounts)-sum(before.value);
   if(job.side==='buy' ? delta<=0n : delta!==-BigInt(job.raw))throw new Error('simulation token balance differs from intended trade');
+}
+
+/** Every instruction of a transaction: its program, and for a SOL transfer the recipient and lamports
+ *  (accounts from an address lookup table show as lookup#n). */
+function describeInstructions(bytes) {
+  const tx=parseTransaction(bytes),m=tx.message;let o=(tx.versioned?1:0)+3;
+  const [n,z]=readShortVec(m,o);o+=z+n*32+32;
+  const [ni,zi]=readShortVec(m,o);o+=zi;const out=[];
+  const key=(i)=>tx.keys[i]??`lookup#${i-tx.keys.length}`;
+  for(let i=0;i<ni;i++) {
+    const pid=m[o++];const [na,za]=readShortVec(m,o);o+=za;const accts=[...m.subarray(o,o+na)];o+=na;const [len,zl]=readShortVec(m,o);o+=zl;const data=Buffer.from(m.subarray(o,o+len));o+=len;
+    const program=key(pid), ix={program};
+    if(program===SYSTEM_PROGRAM && data.length===12 && data.readUInt32LE(0)===2) Object.assign(ix,{transferTo:key(accts[1]),lamports:Number(data.readBigUInt64LE(4))});
+    out.push(ix);
+  }
+  return {versioned:tx.versioned,instructions:out};
+}
+
+/**
+ * What PumpPortal's own builder (trade-local, the fallback for coins the bot can't build) puts in a trade.
+ * Asks it for a 0.01 SOL buy of `mint` for `wallet`; the transaction is never signed or sent. Returns its
+ * instructions (programs, SOL transfers) and whether the bot's safety rules accept it.
+ */
+async function checkPumpPortalBuild(mint,wallet) {
+  const bytes=await http('https://pumpportal.fun/api/trade-local',{method:'POST',raw:true,body:{publicKey:wallet,action:'buy',mint,amount:0.01,denominatedInSol:'true',slippage:config.slippagePct,priorityFee:0.0001,pool:'auto'},timeoutMs:8000});
+  const d=describeInstructions(bytes);
+  try { await checkTradeInstructions(bytes,{side:'buy',mint,sol:0.01}); return {ok:true,verdict:'accepted by the safety rules',...d}; }
+  catch(e) { return {ok:false,verdict:'refused by the safety rules: '+e.message,...d}; }
 }
 
 /**
@@ -2549,6 +2592,9 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
   }
   if (!config.dryRun && !demo && config.executor!=='pumpportal') throw new Error('v2 live execution supports EXECUTOR=pumpportal only; legacy Jupiter remains for quotes/backtests');
   const solscanWatch = solscan.enabled && config.solscanPollMs > 0 ? (onSignature, opts) => startSolscanWatcher({ client: solscan, leader: config.leader, intervalMs: config.solscanPollMs, horizonSec: Math.max(config.maxSignalAgeSec, num('MAX_SELL_SIGNAL_AGE_SEC', 300)), onSignature, ...opts }) : null;
+  // PumpPortal live trade feed (PUMPPORTAL_API_KEY; PUMPPORTAL_FEED=false turns it off): one socket, his wallet only
+  const pumpPortalWatch = !demo && config.pumpPortalKey && env('PUMPPORTAL_FEED', 'true') !== 'false'
+    ? (onTrade, { log } = {}) => createPumpPortalFeed({ apiKey: config.pumpPortalKey, accounts: [config.leader], onTrade, log: (m) => log?.(redact(m)) }) : null;
   const tokenLabel = solscan.enabled ? async (mint) => { const m = await solscan.tokenMeta(mint); return m?.symbol ? `$${m.symbol}` : null; } : null;
   // Created paused: the runtime turns every data source on (or leaves them off) with the power switch.
   stream = !demo && config.wsUrl && env('PUSH_STREAM', 'true') !== 'false' ? createStream({ url: config.wsUrl, log: (m) => console.error(redact(m)), paused: true }) : null;
@@ -2560,10 +2606,10 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
     idle: () => {},
   };
   if (power) stopSol = stopFees = stopWarm = power.idle;
-  const r = await startRuntime({config,kp,notify,solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  const r = await startRuntime({config,kp,notify,solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,startPumpPortalWatcher:pumpPortalWatch,checkPumpPortalBuild,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();stopWarm();solscan.flush();process.exit(0);});
   // The settings that decide speed and filtering, as the bot actually uses them (no keys).
-  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'report')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.001)} + ${num('TIP_MAX_SOL', 0.002)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);
+  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'report')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.001)} + ${num('TIP_MAX_SOL', 0.002)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · PumpPortal feed ${pumpPortalWatch ? 'on' : 'off (no PUMPPORTAL_API_KEY)'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);
 }
 
 /** Backtest one day of the leader's trades with an imaginary wallet. */
@@ -2879,6 +2925,6 @@ async function main(argv = process.argv) {
 
 // ===== entry =====
 const setStream = (s) => (stream = s); // tests
-export {refreshFees,currentFees,solUsdNow,confirm,holderStats,setStream,startSenderWarm,senderUrl};
+export {refreshFees,currentFees,solUsdNow,confirm,holderStats,setStream,startSenderWarm,senderUrl,checkTradeInstructions,checkPumpPortalBuild,describeInstructions};
 export {config,setFetch,rpc,relevantLogs,venueOf,quoteSell,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,findProgramAddress,associatedTokenAddress as ata,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);

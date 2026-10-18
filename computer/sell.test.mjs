@@ -24,7 +24,7 @@ const instructionsOf = (bytes) => {
   return out;
 };
 
-async function liveBot(t, {refuseLocal = 0, balances = null} = {}) {
+async function liveBot(t, {refuseLocal = 0, balances = null, cashback = false} = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-sell-'));
   const file = path.join(dir, 'engine-live.json');
   // a coin bought earlier (saved with its token program and creator, as the bot now does)
@@ -43,7 +43,7 @@ async function liveBot(t, {refuseLocal = 0, balances = null} = {}) {
       return null; // pump.fun global not readable here: the desk uses the SDK's fee recipients
     },
     getBalanceSol: async () => { seen.balanceReads++; return balances ? balances[Math.min(seen.balanceReads, balances.length) - 1] : 1; },
-    readCurve: async () => ({vSol: 40_000_000_000n, vTok: 500_000_000_000_000n, complete: false, creator: CREATOR, mayhem: false, cashback: false, quoteMint: null}),
+    readCurve: async () => ({vSol: 40_000_000_000n, vTok: 500_000_000_000_000n, complete: false, creator: CREATOR, mayhem: false, cashback, quoteMint: null}),
     quoteSell: async () => (n++ < 2 ? 0.11 : 0.04), // the coin falls ~60%: stop-loss
     // pushes: the wallet's token account (balance) and the coin's curve
     stream: {watchAccount: (pk, cb) => { seen.accountWatches.push(pk); setTimeout(() => cb(tokenAcct(HELD), Date.now()), 0); const un = () => {}; un.ready = () => true; return un; }, slot: () => null, connected: () => true},
@@ -126,11 +126,15 @@ const globalAccount = (() => { // pump.fun Global with the SDK's fee and buyback
 })();
 const BOUGHT = 2_000_000_000_000n;
 
+// the coin's bonding curve account as the chain returns it (reserves, creator, flags, SOL quote)
+const curveAccount = (ctx) => { const b = Buffer.alloc(115); b.writeBigUInt64LE(ctx.vTok, 8); b.writeBigUInt64LE(ctx.vSol, 16); b.writeBigUInt64LE(ctx.realTok, 24); b.writeBigUInt64LE(ctx.realSol, 32); b.writeBigUInt64LE(1_000_000_000_000_000n, 40); Buffer.from(b58decode(ctx.creator)).copy(b, 49); return b.toString('base64'); };
+
 async function liveBuyBot(t, {failAll = false} = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-buy-'));
   Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine-live.json'), PORT: '0', DASHBOARD_TOKEN: 'sell-test-token-24-characters-x', STUDY: 'false', STALE_DATA_SEC: '0', MAX_HOLD_SEC: '0', MONITOR_MS: '50', FULL_PATH_DELAY_MS: '0', BOT_POWER: ''});
-  const seen = {validated: [], sent: [], pumpportal: 0, watches: [], unwatched: [], armedAtSend: null, watchedAtSend: null};
-  let r = null, ws = null, ataPush = null;
+  const seen = {validated: [], sent: [], pumpportal: 0, watches: [], unwatched: [], armedAtSend: null, watchedAtSend: null, chainReads: []};
+  let r = null, ws = null, ataPush = null, ppFeed = null;
+  const ctx = P.buyContextFromLogs(fx.buy.logs, config.leader, b58encode);
   const k = {
     config: {...config, dryRun: false, logFile: path.join(dir, 'log'), tipSol: 0.001, priorityFeeSol: 0.0005, slippagePct: 20, minLeaderBuyUsd: 1}, kp, redact: (x) => x,
     findProgramAddress, ata, b58decode, b58encode, signTransaction, addTransferInstruction, transactionBlockhash, TIP_ACCOUNTS,
@@ -138,6 +142,7 @@ async function liveBuyBot(t, {failAll = false} = {}) {
     rpc: async (method, params) => {
       if (method === 'getLatestBlockhash') return {value: {blockhash: BH}};
       if (method === 'getAccountInfo' && params?.[0] === GLOBAL) return {value: {data: [globalAccount, 'base64'], owner: P.PUMP}};
+      if (method === 'getMultipleAccounts') { seen.chainReads.push(params[0]); return {value: [{data: [curveAccount(ctx), 'base64'], owner: P.PUMP}, {data: ['', 'base64'], owner: P.TOKEN_2022}]}; }
       return null;
     },
     getBalanceSol: async () => 1,
@@ -153,12 +158,13 @@ async function liveBuyBot(t, {failAll = false} = {}) {
     getTransaction: async (sig) => (sig === fx.buy.signature || sig === fx.sell.signature ? null
       : {slot: 7, transaction: {message: {accountKeys: [{pubkey: kp.publicKey}]}}, meta: {err: null, preBalances: [1e9], postBalances: [1e9 - 0.1e9 - 3_500_000], preTokenBalances: [], postTokenBalances: [{owner: kp.publicKey, mint: MINT, uiTokenAmount: {amount: BOUGHT.toString()}}]}}),
     startWatcher: (cb) => { ws = cb; return () => {}; },
+    startPumpPortalWatcher: (cb) => { ppFeed = cb; return {stop: () => {}, status: () => ({connected: true})}; },
   };
   r = await startRuntime(k);
   t.after(() => { r.stop(); fs.rmSync(dir, {recursive: true, force: true}); for (const key of Object.keys(process.env)) if (!(key in PRISTINE)) delete process.env[key]; Object.assign(process.env, PRISTINE); });
   for (let i = 0; i < 50 && !r.desk; i++) await sleep(5);
   await sleep(30); // the pump.fun global and the first blockhash are read at start
-  return {r, seen, ws: (...a) => ws(...a)};
+  return {r, seen, ws: (...a) => ws(...a), pp: (...a) => ppFeed(...a)};
 }
 
 test('LIVE buy -> sell desk: the local buy arms its sell before it is sent; once landed it sells with no lookups', async (t) => {
@@ -174,7 +180,9 @@ test('LIVE buy -> sell desk: the local buy arms its sell before it is sent; once
   const p = r.engine.d.positions[MINT];
   assert.equal(p.tokenProgram, P.TOKEN_2022); assert.equal(p.creator, ctx.creator, 'saved with the position (a restart re-arms with no lookup)');
   assert.equal(r.desk.balance(MINT), BOUGHT, 'the landed balance arrived by push');
-  // the sell is pure assembly now: priced from his trade event's curve, every address worked out at the buy
+  assert.equal(r.desk.blocker(MINT), 'curve flags unknown', 'until the first curve push (or one read) says whether it is a cashback coin');
+  r.desk.update(MINT, {vSol: ctx.vSol, vTok: ctx.vTok, complete: false, creator: ctx.creator, mayhem: false, cashback: false, quoteMint: null}); // the first push
+  // the sell is pure assembly now: every address worked out at the buy, the price from the push
   const t0 = performance.now();
   const b = r.desk.build({mint: MINT, raw: BOUGHT, slippagePct: 35, blockhash: BH, priorityLamports: 500_000, tipAccount: TIP_ACCOUNTS[0], tipLamports: 1_000_000, closeAccount: true, global: null});
   const ms = performance.now() - t0;
@@ -191,4 +199,32 @@ test('LIVE buy that fails: nothing is held, so its armed sell and token-account 
   assert.deepEqual(seen.watches, [ata(kp.publicKey, MINT, P.TOKEN_2022)], 'it was armed during the attempt');
   assert.equal(r.desk.kit(MINT), null, 'disarmed');
   assert.deepEqual(seen.unwatched, seen.watches, 'and its token-account watch closed');
+});
+
+test('LIVE: a cashback coin (only its curve says so) is sold with its extra account, locally', async (t) => {
+  const {r, seen} = await liveBot(t, {cashback: true});
+  for (let i = 0; i < 100 && r.engine.d.positions[MINT].raw !== '0'; i++) await sleep(20);
+  await r.engine.idle();
+  assert.equal(r.engine.d.positions[MINT].raw, '0', 'sold');
+  assert.equal(seen.pumpportal, 0, 'built locally');
+  const sell = instructionsOf(seen.validated[0].bytes).find((x) => x.program === P.PUMP);
+  const uva = findProgramAddress([Buffer.from('user_volume_accumulator'), b58decode(kp.publicKey)], P.PUMP)[0];
+  assert.equal(sell.acc.length, 17, '14 + volume account + bonding-curve-v2 + buyback');
+  assert.equal(sell.acc[14], uva, "the user's volume account comes first after the IDL accounts");
+});
+
+test('LIVE: PumpPortal saw his buy first (no Helius trade event yet): one chain read, then the bot builds the buy itself', async (t) => {
+  const {r, seen, pp} = await liveBuyBot(t);
+  const [b] = leaderPumpBuys(fx.buy.logs, config.leader);
+  pp({sig: fx.buy.signature, mint: MINT, trader: config.leader, side: 'buy', sol: b.solAmount / 1e9, raw: b.tokenAmount, pool: 'pump', vSol: null, vTok: null});
+  for (let i = 0; i < 100 && !r.engine.d.positions[MINT]; i++) await sleep(10);
+  await r.engine.idle();
+  assert.equal(r.engine.d.positions[MINT]?.raw, BOUGHT.toString(), 'bought');
+  assert.equal(seen.pumpportal, 0, 'built locally: no PumpPortal round trip, no 0.5% fee');
+  assert.equal(seen.chainReads.length, 1, 'one read of the curve and the mint');
+  assert.deepEqual(seen.chainReads[0], [findProgramAddress([Buffer.from('bonding-curve'), b58decode(MINT)], P.PUMP)[0], MINT]);
+  const ctx = P.buyContextFromLogs(fx.buy.logs, config.leader, b58encode);
+  const p = r.engine.d.positions[MINT];
+  assert.equal(p.tokenProgram, P.TOKEN_2022, 'token program from the mint'); assert.equal(p.creator, ctx.creator, 'creator from the curve');
+  assert.equal(r.desk.kit(MINT).cashback, false, 'the curve read also told it is not a cashback coin');
 });

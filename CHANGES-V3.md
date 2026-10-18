@@ -203,3 +203,34 @@ Earlier v3.3 tests:
 - a LIVE end-to-end stop-loss sell (local, no PumpPortal, pushed balance, account closed, disarmed)
 - the fallback chain
 - the Solscan budget and schedule
+
+## v3.4 (PumpPortal feed: a second way to see Decu's trades)
+
+**PumpPortal live trade feed** (`PUMPPORTAL_API_KEY`):
+- One socket to PumpPortal, subscribed to Decu's wallet only, so every buy and sell of his is pushed alongside the Helius websocket.
+- If PumpPortal is first, the bot copies his bonding-curve buy right away. Helius' copy of the same trade is ignored, so a trade is never bought twice.
+- His sells are still acted on only once confirmed, and PumpSwap buys still wait for the confirmed transaction, as before. The 15% filter and every safety check apply unchanged.
+- If PumpPortal starts a buy before Helius has delivered his trade details, one chain read gets the coin's creator, flags, price and token program, so the bot still builds the buy itself (no PumpPortal round trip, no 0.5% fee).
+- **Feed race on the dashboard:** for each trade both feeds saw, which was first and the median lead in ms. That is real data on whether PumpPortal beats Helius.
+- OFF closes the feed; ON opens it again. Reconnects are slow (2 s doubling to 60 s) because PumpPortal bans clients that open many connections. The key is never logged or saved in a file, and it is hidden in every event.
+- Cost: PumpPortal bills 0.01 SOL per 10,000 trades it streams, to the wallet linked to the key. That's only Decu's trades, a fraction of a cent a day. Keep at least 0.02 SOL in that wallet.
+
+**PumpPortal builder check:**
+- PumpPortal charges 0.5% on every trade its builder makes (its fee page). The bot builds its own buys and sells and uses PumpPortal only as a fallback, mainly to sell coins that graduated to PumpSwap.
+- Once per run while ON, a few seconds after one of Decu's buys, the bot asks PumpPortal's builder for a sample 0.01 SOL buy of that coin. It is never signed or sent.
+- The bot records every instruction (programs, SOL transfers with recipient and amount) and whether the safety check accepts it. The result is on the dashboard and in the log.
+- If PumpPortal charges its fee as a separate SOL transfer, the safety check refuses it, so PumpPortal can't be the fallback in LIVE. The pre-live `check` command fails the same way, and its error now names the recipient and amount.
+
+**Sell desk fix:** Decu's trade event doesn't say whether a coin is a cashback coin, and a cashback coin's sell needs one more account. A live sell now reads the curve first when that flag isn't known yet; usually the first price push already tells. Older curve accounts without the flag bytes count as not cashback.
+
+**Safety check:** the instruction rules are now a separate function shared by the full check and the builder check, with no change to what they accept.
+
+**Tests: 146/146.** New:
+- the feed (subscription, parsing, slow reconnects, the key never logged)
+- PumpPortal-first buys (paper and LIVE with one chain read and a local build)
+- no double buy
+- his sells waiting for confirmation
+- PumpSwap and other wallets not fast-copied
+- OFF closing the feed
+- the builder check
+- a cashback coin sold with its extra account

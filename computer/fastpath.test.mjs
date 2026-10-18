@@ -373,3 +373,63 @@ test('Solscan schedule: rare while Helius is healthy and nothing is held, often 
   r.setPower(false);
   assert.equal(plan().ms, Infinity, 'power off: never');
 });
+
+// ---- PumpPortal's live trade feed as the second way to see his trades
+const ppBuy = () => { const [b] = leaderPumpBuys(fx.buy.logs, config.leader); return {sig: fx.buy.signature, mint: MINT, trader: config.leader, side: 'buy', sol: b.solAmount / 1e9, raw: b.tokenAmount, pool: 'pump', vSol: null, vTok: null}; };
+const statusOf = async (r) => (await fetch(`http://127.0.0.1:${r.server.address().port}/api/status`, {headers: {Authorization: 'Bearer ' + process.env.DASHBOARD_TOKEN}})).json();
+function ppHooks() {
+  const h = {feed: null, starts: 0, stops: 0, checks: []};
+  h.extra = {
+    startPumpPortalWatcher: (cb) => { h.feed = cb; h.starts++; return {stop: () => { h.stops++; }, status: () => ({connected: true, subscribed: true})}; },
+    checkPumpPortalBuild: async (mint, wallet) => { h.checks.push({mint, wallet}); return {ok: false, verdict: 'refused by the safety rules: unexpected SOL transfer recipient Fee111 (1250000 lamports)', versioned: false, instructions: [{program: 'ComputeBudget111111111111111111111111111111'}, {program: 'SomePumpPortalProgram'}]}; },
+  };
+  return h;
+}
+
+test('PumpPortal first: his buy is copied at once from its numbers; the Helius copy of the same trade is not bought again', async (t) => {
+  const h = ppHooks();
+  const {r, ws} = await bot(t, {PP_BUILDER_CHECK_DELAY_MS: '0'}, async () => 0.11, h.extra);
+  assert.equal(h.starts, 1, 'the feed starts with the bot');
+  h.feed(ppBuy());
+  for (let i = 0; i < 50 && !r.engine.d.positions[MINT]; i++) await sleep(5);
+  await r.engine.idle();
+  assert.equal(r.engine.d.positions[MINT]?.raw, '1000000', 'bought from PumpPortal alone');
+  await sleep(30);
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  assert.equal(r.engine.d.events.filter((e) => e.type === 'confirmed' && e.side === 'buy').length, 1, 'bought once');
+  const s = await statusOf(r);
+  assert.equal(s.connection.firstSeen.pumpportal, 1, 'PumpPortal saw it first');
+  assert.equal(s.connection.feedRace.pumpportalFirst, 1); assert.equal(s.connection.feedRace.heliusFirst, 0);
+  assert.ok(s.connection.feedRace.medianPumpPortalLeadMs > 0, 'how much earlier, in ms');
+  assert.equal(s.connection.pumpportal.on, true);
+  // the PumpPortal builder check ran once, on the coin he bought, and its verdict is recorded
+  for (let i = 0; i < 50 && !h.checks.length; i++) await sleep(5);
+  await sleep(5);
+  assert.equal(h.checks.length, 1); assert.equal(h.checks[0].mint, MINT);
+  const ev = r.engine.d.events.find((e) => e.type === 'pumpportal-builder-check');
+  assert.equal(ev.accepted, false); assert.match(ev.verdict, /unexpected SOL transfer recipient/);
+  assert.equal((await statusOf(r)).connection.pumpportalBuilder.ok, false);
+});
+
+test('PumpPortal: his sells still wait for the confirmed transaction; PumpSwap buys and other wallets are not fast-copied; OFF stops the feed', async (t) => {
+  const h = ppHooks();
+  const {r, ws} = await bot(t, {MAX_HOLD_SEC: '0'}, async () => 0.11, h.extra);
+  r.engine.style('auto');
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  assert.equal(r.engine.d.positions[MINT].raw, '1000000');
+  h.feed({...ppBuy(), sig: 'ammBuy', mint: 'Amm1111111111111111111111111111111111111111', pool: 'pump-amm'});
+  h.feed({...ppBuy(), sig: 'someoneElse', mint: 'Oth1111111111111111111111111111111111111111', trader: 'Someone1111111111111111111111111111111111111'});
+  await sleep(20); await r.engine.idle();
+  assert.equal(Object.keys(r.engine.d.positions).length, 1, 'neither copied from the feed alone');
+  const [sv] = leaderPumpSells(fx.sell.logs, config.leader);
+  confirmedSell = false;
+  h.feed({sig: fx.sell.signature, mint: MINT, trader: config.leader, side: 'sell', sol: sv.solAmount / 1e9, raw: sv.tokenAmount, pool: 'pump'});
+  await sleep(30); await r.engine.idle();
+  assert.equal(r.engine.d.positions[MINT].raw, '1000000', 'not sold on the feed message alone');
+  confirmedSell = true;
+  await ws(fx.sell.signature, 'poll'); await r.engine.idle();
+  assert.equal(r.engine.d.positions[MINT].raw, '0', 'sold once his sell is confirmed');
+  assert.equal(r.setPower(false), null); assert.equal(h.stops, 1, 'OFF closes the feed');
+  assert.equal((await statusOf(r)).connection.pumpportal.on, false);
+  assert.equal(r.setPower(true), null); assert.equal(h.starts, 2, 'ON opens it again');
+});

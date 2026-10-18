@@ -175,7 +175,8 @@ export function decodeBondingCurve(data, b58encode) {
   const u = (o) => b.readBigUInt64LE(o);
   const out = { vTok: u(8), vSol: u(16), realTok: u(24), realSol: u(32), supply: u(40), complete: b[48] === 1 };
   if (b.length >= 81) out.creator = b58encode(b.subarray(49, 81));
-  if (b.length >= 83) { out.mayhem = b[81] === 1; out.cashback = b[82] === 1; }
+  // an older, shorter curve account has no flag bytes: not mayhem, not cashback
+  out.mayhem = b.length >= 82 && b[81] === 1; out.cashback = b.length >= 83 && b[82] === 1;
   // SOL coins store an all-zero quote mint (pump-sdk normalizeQuoteMint); anything else is token-quoted.
   if (b.length >= 115) { const q = b.subarray(83, 115); out.quoteMint = q.every((x) => x === 0) ? null : b58encode(q); }
   return out;
@@ -317,11 +318,14 @@ export function createSellDesk({ helpers, watchAccount = null, now = () => Date.
   /** Drop the pushed balance (a sell failed): the next sell reads the chain. */
   function forgetBalance(mint) { const k = kits.get(mint); if (k) { k.tokenBalance = null; k.tokenBalanceAt = 0; } }
   /** Why this coin can't be sold locally right now (null = ready). */
-  function blocker(mint, { curveMaxAgeMs = 3000 } = {}) {
+  function blocker(mint, { curveMaxAgeMs = 3000, needFlags = true } = {}) {
     const k = kits.get(mint);
     if (!k) return 'not armed';
     if (!k.tokenProgram || !k.creator || !k.user) return 'kit incomplete';
     if (!k.curve) return 'no curve state';
+    // his trade event doesn't say whether it is a cashback coin (its sell needs one more account): the
+    // curve does, from the first push or one read
+    if (needFlags && k.cashback == null) return 'curve flags unknown';
     if (k.curve.complete) return 'coin left the curve (PumpSwap)';
     if (!quotedInSol(k)) return 'coin is not quoted in SOL';
     if (now() - (k.curveAt || 0) > curveMaxAgeMs) return 'curve state too old';
@@ -331,10 +335,10 @@ export function createSellDesk({ helpers, watchAccount = null, now = () => Date.
    * Build (unsigned) the sell of `raw` tokens: min SOL out = the current curve's SOL out less slippagePct.
    * global: the pump.fun Global account (fee and buyback recipients); without it only non-mayhem coins.
    */
-  function build({ mint, raw, slippagePct, blockhash, priorityLamports, tipAccount = null, tipLamports = 0, closeAccount = false, global = null, cuLimit }) {
+  function build({ mint, raw, slippagePct, blockhash, priorityLamports, tipAccount = null, tipLamports = 0, closeAccount = false, global = null, cuLimit, unknownFlagsOk = false }) {
     const t0 = performance.now();
     const k = kits.get(mint);
-    const why = blocker(mint, { curveMaxAgeMs: Infinity });
+    const why = blocker(mint, { curveMaxAgeMs: Infinity, needFlags: !unknownFlagsOk });
     if (why) throw new Error('local sell: ' + why);
     if (k.mayhem && !global?.reservedFeeRecipients?.length) throw new Error('local sell: mayhem coin needs the reserved fee recipients (global not read)');
     const feeRecipient = global ? pickFeeRecipient(global, !!k.mayhem) : STATIC_FEE_RECIPIENTS[Math.floor(Math.random() * STATIC_FEE_RECIPIENTS.length)];

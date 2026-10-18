@@ -26,6 +26,7 @@ Do these in order. Don't skip a step because an earlier one passed.
 | `DASHBOARD_TOKEN` | 24+ random characters | required for live |
 | `HELIUS_API_KEY` | your key | fast detection + Helius Sender |
 | `SOLSCAN_API_KEY` | your key | second watcher, gap alerts, coin names |
+| `PUMPPORTAL_API_KEY` | your key (secret) | PumpPortal's live feed of Decu's trades, a second way to see them; keep at least 0.02 SOL in the key's linked PumpPortal wallet (0.01 SOL per 10,000 of his trades) |
 | `NTFY_TOPIC` | your topic | buy / SOLD / failure alerts |
 | `SIZING_MODE` / `BUY_SOL` / `DAILY_CAP_SOL` | `fixed` / `0.1` / `0` | `0` = no daily spending cap: only the wallet balance limits buys |
 | `AUTO_SELL` | `false` | you sell by hand from the SOLD alert |

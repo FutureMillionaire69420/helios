@@ -20,6 +20,8 @@ services:
         sync: false
       - key: SOLSCAN_API_KEY
         sync: false
+      - key: PUMPPORTAL_API_KEY
+        sync: false
       - key: PHANTOM_WALLET_ADDRESS
         sync: false
       - key: PHANTOM_PRIVATE_KEY

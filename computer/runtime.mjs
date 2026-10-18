@@ -5,7 +5,7 @@ import http from 'node:http';
 import {Engine} from './engine.mjs';
 import {PUMP_TOKEN,QUOTES} from './solscan.mjs';
 import {createStudy,summaryText} from './study.mjs';
-import {buyContextFromLogs,tokensOut,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache,createSellDesk,TOKEN,TOKEN_2022} from './pumpbuild.mjs';
+import {buyContextFromLogs,tokensOut,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache,createSellDesk,decodeBondingCurve,quotedInSol,PUMP,TOKEN,TOKEN_2022} from './pumpbuild.mjs';
 
 const val = (key, fallback) => process.env[key]?.trim() || fallback;
 const number = (key, fallback) => Number(val(key,String(fallback)));
@@ -117,7 +117,7 @@ export function paperSummary(stats={}) {
 }
 
 export async function startRuntime(k, {demo=false}={}) {
-  const c = runtimeConfig(k.config,demo), status={websocket:'starting',lastPoll:null,lastSignal:null,errors:0,firstSeen:{ws:0,poll:0,solscan:0},gaps:0,unsupported:0,otherWallets:0};
+  const c = runtimeConfig(k.config,demo), status={websocket:'starting',lastPoll:null,lastSignal:null,errors:0,firstSeen:{ws:0,poll:0,solscan:0,pumpportal:0},gaps:0,unsupported:0,otherWallets:0};
   c.wallet=c.mode==='live'?k.kp.publicKey:null;
   // ENTRY-PREMIUM FILTER: skip a buy priced more than MAX_PAY_ABOVE_DECU_PCT (default 30) above Decu's
   // own price. FAIL-CLOSED: with no Decu price or no current price the bot does not buy. PAPER uses the
@@ -152,7 +152,7 @@ export async function startRuntime(k, {demo=false}={}) {
   try { if (fs.statSync(k.config.logFile).size > 50e6) fs.renameSync(k.config.logFile, k.config.logFile+'.1'); } catch {}
   const token = val('DASHBOARD_TOKEN','');
   if (!demo && !k.config.dryRun && token.length<24) throw new Error('LIVE requires DASHBOARD_TOKEN of at least 24 characters');
-  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey].filter(Boolean);
+  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey,k.config.pumpPortalKey].filter(Boolean);
   const clean = v => { let s=JSON.stringify(v); for(const secret of secrets) s=s.split(secret).join('[REDACTED]'); return JSON.parse(k.redact(s)); };
   const log = e => {
     // Sell outcomes: was the position closed, and how did the fill compare with the exit trigger?
@@ -296,7 +296,7 @@ export async function startRuntime(k, {demo=false}={}) {
     }
     // PAPER: assemble the same local sell live would send (not signed, never sent): proves the sell desk
     // works on every paper exit before any real money depends on it.
-    if(desk && !demo && desk.kit(job.mint)) { try { const f=fee(); desk.build({mint:job.mint,raw:job.raw,slippagePct:sellSlippagePct,blockhash:'11111111111111111111111111111111',priorityLamports:Math.round(f.priorityFeeSol*1e9),tipAccount:k.TIP_ACCOUNTS?.[0]||null,tipLamports:Math.round(f.tipSol*1e9),closeAccount:job.chainRaw!=null&&job.raw===job.chainRaw,global:null}); status.paperSellBuilds=(status.paperSellBuilds||0)+1; } catch(e) { desk.stats.lastError=String(e?.message||e).slice(0,160); } }
+    if(desk && !demo && desk.kit(job.mint)) { try { const f=fee(); desk.build({mint:job.mint,raw:job.raw,slippagePct:sellSlippagePct,blockhash:'11111111111111111111111111111111',priorityLamports:Math.round(f.priorityFeeSol*1e9),tipAccount:k.TIP_ACCOUNTS?.[0]||null,tipLamports:Math.round(f.tipSol*1e9),closeAccount:job.chainRaw!=null&&job.raw===job.chainRaw,global:null,unknownFlagsOk:true}); status.paperSellBuilds=(status.paperSellBuilds||0)+1; } catch(e) { desk.stats.lastError=String(e?.message||e).slice(0,160); } }
     const sol=demo?Number(job.raw)/1e9:await k.quoteSell(job.mint,Number(job.raw));
     if(sol===null || !Number.isFinite(sol)) return {status:'failed',error:'no paper sell quote'};
     return {status:'confirmed',rawDelta:(-BigInt(job.raw)).toString(),solDelta:sol*0.995-fee};
@@ -314,7 +314,7 @@ export async function startRuntime(k, {demo=false}={}) {
   // paper has no wallet key: its sells are only assembled (never signed or sent), with a placeholder address
   const sellUser = c.mode==='live' ? k.kp?.publicKey : (k.b58encode ? k.b58encode(Buffer.alloc(32,1)) : null);
   const kitFrom = mint => { const ctx=buyCtx.get(mint), p=engine?.d.positions[mint];
-    return {tokenProgram:ctx?.tokenProgram ?? p?.tokenProgram, creator:ctx?.creator ?? p?.creator, mayhem:ctx?.mayhem, feeBps:ctx?.feeBps, creatorFeeBps:ctx?.creatorFeeBps, user:sellUser,
+    return {tokenProgram:ctx?.tokenProgram ?? p?.tokenProgram, creator:ctx?.creator ?? p?.creator, mayhem:ctx?.mayhem, cashback:ctx?.cashback, feeBps:ctx?.feeBps, creatorFeeBps:ctx?.creatorFeeBps, user:sellUser,
       ...(ctx ? {curve:{vSol:ctx.vSol,vTok:ctx.vTok,complete:false,creator:ctx.creator,mayhem:ctx.mayhem},curveAt:ctx.at} : {})}; };
   const armSell = mint => (desk && sellUser ? desk.arm(mint, kitFrom(mint)) : null);
   // a coin held from before (restart, or bought before this version): token program from its mint account,
@@ -324,6 +324,20 @@ export async function startRuntime(k, {demo=false}={}) {
     if(!kit.tokenProgram) { const r=await k.rpc('getAccountInfo',[mint,{encoding:'base64',commitment:'confirmed'}],4000).catch(()=>null); const owner=r?.value?.owner; if(owner===TOKEN_2022||owner===TOKEN) desk.arm(mint,{tokenProgram:owner}); }
     const cv=k.readCurve ? await k.readCurve(mint).catch(()=>null) : null; if(cv) { desk.update(mint,cv); desk.arm(mint,{creator:cv.creator}); }
     return desk.kit(mint);
+  };
+  // A buy with no trade event of his yet (PumpPortal's feed saw it first): the coin's creator, flags, price
+  // and token program from ONE read of its curve and mint (processed: includes his buy). Saves PumpPortal's
+  // round trip and its 0.5% fee.
+  const ctxFromChain=async mint=>{
+    if(!helpers) return null;
+    const curvePk=k.findProgramAddress([Buffer.from('bonding-curve'),Buffer.from(k.b58decode(mint))],PUMP)[0];
+    const r=await k.rpc('getMultipleAccounts',[[curvePk,mint],{encoding:'base64',commitment:'processed'}],1500);
+    const [cv,mi]=r?.value||[], curve=cv?.data?.[0]?decodeBondingCurve(cv.data[0],k.b58encode):null;
+    if(!curve || curve.complete || !quotedInSol(curve) || !curve.creator || ![TOKEN,TOKEN_2022].includes(mi?.owner)) return null;
+    const ctx={mint,creator:curve.creator,tokenProgram:mi.owner,mayhem:!!curve.mayhem,cashback:!!curve.cashback,vSol:curve.vSol,vTok:curve.vTok,
+      feeBps:local?.global?.feeBps,creatorFeeBps:local?.global?.creatorFeeBps,at:Date.now(),from:'chain'};
+    if(!buyCtx.has(mint)) remember(buyCtx,mint,ctx); if(!creators.has(mint)) remember(creators,mint,curve.creator);
+    return buyCtx.get(mint);
   };
   const refreshGlobal=()=>local && !engine?.d.dataOff && readGlobal(k.rpc,local.helpers).then(g=>{local.global=g;}).catch(e=>{status.lastError='pump.fun global: '+e.message;});
   refreshGlobal();
@@ -357,7 +371,8 @@ export async function startRuntime(k, {demo=false}={}) {
       // FASTEST: build the buy locally from his trade event (no PumpPortal round trip, no waiting
       // for a blockhash). Same safety check and full simulation as every other trade.
       if(job.side==='buy' && local) {
-        const ctx=buyCtx.get(job.mint), blockhash=local.blockhash?.get();
+        let ctx=buyCtx.get(job.mint); const blockhash=local.blockhash?.get();
+        if(!ctx && blockhash && local.global) { ctx=await ctxFromChain(job.mint).catch(()=>null); if(ctx) status.chainCtx=(status.chainCtx||0)+1; }
         if(ctx && blockhash && local.global) {
           try {
             const t0=Date.now();
@@ -387,7 +402,7 @@ export async function startRuntime(k, {demo=false}={}) {
         try {
           const t0=performance.now();
           let kit=desk.kit(job.mint); if(!kit?.tokenProgram || !kit?.creator) kit=await armFromChain(job.mint);
-          if(['no curve state','curve state too old'].includes(desk.blocker(job.mint))) { const cv=k.readCurve?await k.readCurve(job.mint).catch(()=>null):null; if(cv) desk.update(job.mint,cv); }
+          if(['no curve state','curve state too old','curve flags unknown'].includes(desk.blocker(job.mint))) { const cv=k.readCurve?await k.readCurve(job.mint).catch(()=>null):null; if(cv) desk.update(job.mint,cv); }
           const why=desk.blocker(job.mint); if(why) throw new Error(why);
           const blockhash=local.blockhash?.get(); if(!blockhash) throw new Error('no fresh blockhash');
           const f=fee(), tip=f.tipSol>0 ? k.TIP_ACCOUNTS[Math.floor(Math.random()*k.TIP_ACCOUNTS.length)] : null;
@@ -599,9 +614,37 @@ export async function startRuntime(k, {demo=false}={}) {
   const recordLeaderBuy=s=>{ remember(hisBySig,hisKey(s.sig,s.mint),{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time,sig:s.sig}); remember(lastSig,s.mint,s.sig); const old=leaderBuys.get(s.mint); if(!old || (old.usd<c.minLeaderUsd && s.usd>=c.minLeaderUsd)) remember(leaderBuys,s.mint,{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time}); };
   let lastErrorEventAt=0, hiddenErrors=0;
   const fullPathDelayMs=number('FULL_PATH_DELAY_MS',500);
-  const onSignature=async(sig,source='poll',logs,slot)=>{
+  // FEED RACE: for each of his trades seen by both, which live feed delivered it first and by how many ms
+  // (Helius websocket vs PumpPortal). Decides from real data whether PumpPortal ever beats Helius.
+  const firstArrival=new Map(), race={pumpportalFirst:0,heliusFirst:0,leads:[]};
+  const noteArrival=(sig,source,at)=>{
+    if(source!=='ws' && source!=='pumpportal') return;
+    const a=firstArrival.get(sig);
+    if(!a) { firstArrival.set(sig,{source,at}); if(firstArrival.size>2000) firstArrival.delete(firstArrival.keys().next().value); return; }
+    if(a.source===source || a.done) return;
+    a.done=true; if(a.source==='pumpportal') race.pumpportalFirst++; else race.heliusFirst++;
+    race.leads.push(a.source==='pumpportal' ? at-a.at : a.at-at); if(race.leads.length>200) race.leads.shift(); // > 0: PumpPortal earlier
+    const sorted=[...race.leads].sort((x,y)=>x-y);
+    status.feedRace={pumpportalFirst:race.pumpportalFirst,heliusFirst:race.heliusFirst,samples:race.leads.length,medianPumpPortalLeadMs:sorted[sorted.length>>1]};
+  };
+  // PUMPPORTAL BUILDER CHECK (once per run, while ON): PumpPortal's own builder is the fallback for coins the
+  // bot can't build itself (PumpSwap coins). It is asked for a sample 0.01 SOL buy of a coin Decu just bought,
+  // never signed or sent, to record what it puts in a trade (its 0.5% fee, any transfer) and whether the
+  // safety rules accept it: known before live money ever depends on it.
+  const ppCheck={tries:0,busy:false,result:null};
+  const checkPumpPortalBuilder=mint=>{
+    if(demo || !k.checkPumpPortalBuild || ppCheck.busy || ppCheck.tries>=3 || ppCheck.result?.ok!=null || powerOff()) return;
+    ppCheck.busy=true; ppCheck.tries++;
+    const wallet=c.mode==='live' ? k.kp.publicKey : (k.config.phantomWalletAddress || sellUser);
+    k.checkPumpPortalBuild(mint,wallet).then(r=>{ ppCheck.result={...r,mint,at:new Date().toISOString()}; engine.event('pumpportal-builder-check',{mint,accepted:r.ok,verdict:r.verdict,instructions:r.instructions}); })
+      .catch(e=>{ ppCheck.result={ok:null,error:String(e?.message||e).slice(0,200),at:new Date().toISOString()}; })
+      .finally(()=>{ ppCheck.busy=false; });
+  };
+  const afterHisBuy=mint=>{ if(ppCheck.result?.ok==null && !ppCheck.busy && k.checkPumpPortalBuild) setTimeout(()=>{ if(!stopped) checkPumpPortalBuilder(mint); },number('PP_BUILDER_CHECK_DELAY_MS',5000)).unref?.(); };
+  const onSignature=async(sig,source='poll',logs,slot,pp=null)=>{
     const seenAt=Date.now(), seenSlot=k.stream?.slot?.() ?? null;
     let fastBuyOnly=false;
+    noteArrival(sig,source,seenAt);
     // Which provider saw each leader transaction first. Solscan arriving first means both Helius
     // paths (websocket and polling) missed it: count it and alert, then process it normally.
     if(!delivered.has(sig)) {
@@ -612,11 +655,12 @@ export async function startRuntime(k, {demo=false}={}) {
     }
     // FAST PATH: his pump.fun trade decoded straight from the websocket logs (processed commitment),
     // before the transaction is confirmed or downloaded. The full path below still runs and is deduplicated.
+    // his full trade context (local builder) and the coin's dev (holder rule): kept even when PumpPortal's
+    // feed already started the buy; never blocks the buy
+    if(source==='ws' && Array.isArray(logs) && k.b58encode) try { const ctx=buyContextFromLogs(logs,k.config.leader,k.b58encode); if(ctx) { remember(buyCtx,ctx.mint,ctx); if(ctx.creator) remember(creators,ctx.mint,ctx.creator); } } catch {}
     if(source==='ws' && k.config.fastPath!==false && k.leaderPumpBuys && Array.isArray(logs) && !fastDone.has(sig)) {
       fastDone.add(sig); if(fastDone.size>5000) fastDone.delete(fastDone.values().next().value);
       try {
-        // his full trade context (local builder) and the coin's dev (holder rule); never blocks the buy
-        try { const ctx=k.b58encode?buyContextFromLogs(logs,k.config.leader,k.b58encode):null; if(ctx) { remember(buyCtx,ctx.mint,ctx); if(ctx.creator) remember(creators,ctx.mint,ctx.creator); } } catch {}
         const buys=k.leaderPumpBuys(logs,k.config.leader);
         // a buy the fast path already handled: its full transaction is only needed later (records, gaps)
         fastBuyOnly=buys.length>0 && !(k.leaderPumpSells?.(logs,k.config.leader)?.length);
@@ -624,7 +668,7 @@ export async function startRuntime(k, {demo=false}={}) {
           const s={sig,time:ev.timestamp||Date.now()/1000,side:'buy',mint:ev.mint,sol:ev.solAmount/1e9,raw:String(ev.tokenAmount),pump:true,decimals:6,fast:true};
           const tp=stampSig(sig,ev.mint,'seenAt',seenAt); if(seenSlot!=null) stampSig(sig,ev.mint,'seenSlot',seenSlot); stampSig(sig,ev.mint,'hisTime',ev.timestamp); if(Number.isInteger(slot)) stampSig(sig,ev.mint,'hisSlot',slot); stampSig(sig,ev.mint,'decodedAt'); tp.source??='websocket (fast path)';
           s.usd=s.sol*(solUsd() ?? await k.getSolUsd()); recordLeaderBuy(s); remember(mintDecimals,s.mint,6); status.fastSignals=(status.fastSignals||0)+1;
-          await engine.ingest(s);
+          await engine.ingest(s); afterHisBuy(s.mint);
         }
         // His SELL is only acted on once it is confirmed on-chain (full path below, ~0.4 s later), so an
         // unconfirmed or failed sell of his can never make the bot sell. FAST_PATH_SELLS=true restores the old way.
@@ -633,6 +677,20 @@ export async function startRuntime(k, {demo=false}={}) {
           study?.leaderSell(s.mint,s); await engine.ingest(s);
         }
       } catch(e) { engine.event('error',{leaderSignature:sig,message:'fast path: '+e.message}); }
+    }
+    // FAST PATH 2: PumpPortal's feed delivered his trade first. A bonding-curve BUY is acted on at once from
+    // its numbers (the full path below still runs and is deduplicated). The local builder gets the coin's
+    // details from Helius' trade event if it arrives meanwhile, else from one read of the chain. His SELLS
+    // still wait for the confirmed transaction, and a PumpSwap buy for the full path, as before.
+    if(source==='pumpportal' && pp && k.config.fastPath!==false && !fastDone.has(sig)) {
+      fastDone.add(sig); if(fastDone.size>5000) fastDone.delete(fastDone.values().next().value);
+      if(pp.side==='buy') fastBuyOnly=true;
+      if(pp.side==='buy' && pp.pool==='pump') try {
+        const s={sig,time:Date.now()/1000,side:'buy',mint:pp.mint,sol:pp.sol,raw:String(pp.raw),pump:true,decimals:6,fast:true,via:'pumpportal'};
+        const tp=stampSig(sig,pp.mint,'seenAt',seenAt); if(seenSlot!=null) stampSig(sig,pp.mint,'seenSlot',seenSlot); stampSig(sig,pp.mint,'decodedAt'); tp.source??='PumpPortal feed (fast path)';
+        s.usd=s.sol*(solUsd() ?? await k.getSolUsd()); recordLeaderBuy(s); remember(mintDecimals,s.mint,6); status.fastSignals=(status.fastSignals||0)+1; status.pumpportalFast=(status.pumpportalFast||0)+1;
+        await engine.ingest(s); afterHisBuy(s.mint);
+      } catch(e) { engine.event('error',{leaderSignature:sig,message:'PumpPortal fast path: '+e.message}); }
     }
     if(completed.has(sig)||inFlight.has(sig)) return;
     inFlight.add(sig);
@@ -680,20 +738,27 @@ export async function startRuntime(k, {demo=false}={}) {
   // websocket + backup poll, the Solscan watcher, the push stream, SOL price / fee / balance refreshes and
   // price checks of held coins. The dashboard stays up. Saved, so it survives restarts. BOT_POWER on the
   // server (on / off) wins once when it is changed; after that the button decides.
-  let stopWatcher=()=>{}, stopSolscan=()=>{}, dataRunning=false;
+  let stopWatcher=()=>{}, stopSolscan=()=>{}, dataRunning=false, ppFeed=null;
   const powerOff=()=>!!engine.d.dataOff;
+  // PumpPortal's live trade feed of his wallet (second way to see his trades; the bot only reads it)
+  const onPumpPortalTrade=t=>{
+    if(t.trader && t.trader!==k.config.leader) return; // the subscription is his wallet only
+    onSignature(t.sig,'pumpportal',null,null,t).catch(e=>engine.event('error',{leaderSignature:t.sig,message:'PumpPortal: '+e.message}));
+  };
+  const pumpPortalStatus=()=>ppFeed ? {on:true,...ppFeed.status()} : {on:false,note:!k.startPumpPortalWatcher?'not set up (no PUMPPORTAL_API_KEY, or PUMPPORTAL_FEED=false): Helius only':powerOff()?'off (power off)':'off'};
   const startData=()=>{
     if(demo || dataRunning) return; dataRunning=true;
     k.power?.on();
     stopWatcher=k.startWatcher(onSignature,{log:message=>engine.event('connection',{message}),status});
     stopSolscan=!k.startSolscanWatcher?()=>{}:k.startSolscanWatcher(onSignature,{log:message=>engine.event('connection',{message}),status,schedule:solscanSchedule});
     status.solscan = k.startSolscanWatcher ? {ok:null,note:'starting'} : {ok:false,note:'SOLSCAN_API_KEY not set: Helius only'};
+    ppFeed=k.startPumpPortalWatcher ? k.startPumpPortalWatcher(onPumpPortalTrade,{log:message=>engine.event('connection',{message})}) : null;
     if(local && !local.blockhash) local.blockhash=startBlockhashCache(k.rpc,{log:m=>status.lastError=m});
     for(const [mint,p] of Object.entries(engine.d.positions)) if(BigInt(p.raw||'0')>0n) scheduleMaxHold(mint); // price checks again
   };
   const stopData=()=>{
     if(demo) return; dataRunning=false;
-    stopWatcher(); stopSolscan(); stopWatcher=stopSolscan=()=>{};
+    stopWatcher(); stopSolscan(); stopWatcher=stopSolscan=()=>{}; ppFeed?.stop(); ppFeed=null;
     k.power?.off();
     local?.blockhash?.stop(); if(local) local.blockhash=null;
     for(const m of monitors.values()) { try{ m.unwatch?.(); }catch{} } monitors.clear(); // no price checks while off
@@ -768,6 +833,7 @@ export async function startRuntime(k, {demo=false}={}) {
       if(token && !authorized()) {res.writeHead(401);return res.end('Unauthorized');}
       if(!token && c.mode==='live') {res.writeHead(403);return res.end('Token required');}
       if(url.pathname==='/api/status' && req.method==='GET') {
+        status.pumpportal=pumpPortalStatus(); status.pumpportalBuilder=ppCheck.result;
         const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',solscanUsage:k.solscanUsage?.()||null,paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
           wallet:{publicKey:c.wallet||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true}};
         res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean(snap)));
@@ -801,7 +867,7 @@ export async function startRuntime(k, {demo=false}={}) {
         engine.event('emergency-stop',{message:`sell everything from the dashboard: ${held.length} position(s)`}); res.writeHead(200); return res.end(String(held.length));
       }
       if(url.pathname==='/api/export.csv' && req.method==='GET') {const {toCsv}=await import('./study.mjs');res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':`attachment; filename="decu-trades-${c.mode}-${new Date().toISOString().slice(0,10)}.csv"`});return res.end(toCsv(study?study.records:[]));}
-      if(url.pathname==='/api/research' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({...(study?study.research():{trades:0}),live:{fees:fee(),feeMode:val('FEE_MODE','max'),push:!!k.stream?.connected?.(),priceChecks:status.priceChecks,sellDesk:desk?{...desk.snapshot(),liveSells:status.localSells||0,lastLiveSellMs:status.lastLocalSellMs??null,paperSellBuilds:status.paperSellBuilds||0,pushedBalances:status.pushedBalances||0}:null,solscan:k.solscanUsage?.()||null}}));}
+      if(url.pathname==='/api/research' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean({...(study?study.research():{trades:0}),live:{fees:fee(),feeMode:val('FEE_MODE','max'),push:!!k.stream?.connected?.(),priceChecks:status.priceChecks,sellDesk:desk?{...desk.snapshot(),liveSells:status.localSells||0,lastLiveSellMs:status.lastLocalSellMs??null,paperSellBuilds:status.paperSellBuilds||0,pushedBalances:status.pushedBalances||0}:null,solscan:k.solscanUsage?.()||null,pumpportal:{...pumpPortalStatus(),fastBuys:status.pumpportalFast||0,chainContexts:status.chainCtx||0,race:status.feedRace||null,builderCheck:ppCheck.result}}})));}
       if(req.method==='POST' && ['/api/autocopy/on','/api/autocopy/off'].includes(url.pathname)) {
         engine.autoCopy(url.pathname==='/api/autocopy/on');res.writeHead(200);return res.end('OK');
       }
@@ -814,5 +880,5 @@ export async function startRuntime(k, {demo=false}={}) {
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});
   engine.event('started',{mode:c.mode,dashboard:`http://${host}:${port}`,note:demo?'SYNTHETIC DEMO; no chain or wallet connection':'confirmed leader signals; paper estimates are not guaranteed fills'});
-  return {engine,server,study,latency:latencyOf,setPower,desk,stop:()=>{stopped=true;desk?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,latency:latencyOf,setPower,desk,stop:()=>{stopped=true;desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }

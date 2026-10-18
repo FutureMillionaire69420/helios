@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import * as P from './pumpbuild.mjs';
-import {config, setFetch, findProgramAddress, associatedTokenAddress as ata, b58decode, b58encode, parseTransaction, signTransaction, loadKeypair, validateTrade, TIP_ACCOUNTS} from './copybot.mjs';
+import {config, setFetch, findProgramAddress, associatedTokenAddress as ata, b58decode, b58encode, parseTransaction, signTransaction, loadKeypair, validateTrade, TIP_ACCOUNTS, checkPumpPortalBuild, addTransferInstruction} from './copybot.mjs';
 
 const fx = JSON.parse(fs.readFileSync(new URL('./fixtures/leader-ws-logs.json', import.meta.url), 'utf8'));
 const h = {findProgramAddress, ata, b58decode, b58encode};
@@ -205,8 +205,9 @@ test('sell desk: armed at the buy, kept current by pushes, sells with no network
   assert.equal(desk.balance(MINT), null, 'no balance pushed yet: the bot asks the chain');
   const ta = Buffer.alloc(165); ta.writeBigUInt64LE(9_000_000n, 64); push(ta.toString('base64'), Date.now());
   assert.equal(desk.balance(MINT), 9_000_000n);
-  assert.equal(desk.blocker(MINT), null, 'ready to sell');
+  assert.equal(desk.blocker(MINT), 'curve flags unknown', 'his trade event does not say whether it is a cashback coin');
   desk.update(MINT, {vSol: ctx.vSol * 2n, vTok: ctx.vTok, complete: false, creator: ctx.creator, mayhem: false, cashback: false, quoteMint: null});
+  assert.equal(desk.blocker(MINT), null, 'the first pushed curve tells: ready to sell');
   const t0 = performance.now();
   const b = desk.build({mint: MINT, raw: 9_000_000n, slippagePct: 35, blockhash: BH, priorityLamports: 1_000_000, tipAccount: TIP_ACCOUNTS[0], tipLamports: 2_000_000, closeAccount: true, global});
   const ms = performance.now() - t0;
@@ -216,7 +217,7 @@ test('sell desk: armed at the buy, kept current by pushes, sells with no network
   assert.equal(b.feeRecipient, global.feeRecipients[0]); assert.equal(b.buybackRecipient, global.buybackFeeRecipients[0]);
   desk.update(MINT, {vSol: 1n, vTok: 1n, complete: true}); assert.match(desk.blocker(MINT), /left the curve/);
   desk.update(MINT, {vSol: 1n, vTok: 1n, complete: false, quoteMint: b58encode(Buffer.alloc(32, 5))}); assert.match(desk.blocker(MINT), /not quoted in SOL/);
-  desk.arm('MAYHEM', {tokenProgram: P.TOKEN, creator: CREATOR, mayhem: true, user: kp.publicKey, curve: {vSol: 10n, vTok: 10n, complete: false}});
+  desk.arm('MAYHEM', {tokenProgram: P.TOKEN, creator: CREATOR, mayhem: true, cashback: false, user: kp.publicKey, curve: {vSol: 10n, vTok: 10n, complete: false}});
   assert.throws(() => desk.build({mint: 'MAYHEM', raw: 1n, slippagePct: 35, blockhash: BH, priorityLamports: 1, global: null}), /mayhem/);
   desk.disarm(MINT); assert.equal(unwatched, 1); assert.equal(desk.kit(MINT), null);
 });
@@ -247,4 +248,22 @@ test("derived addresses match pump.fun's published ones (the fast on-curve check
   assert.equal(findProgramAddress([Buffer.from('global')], P.PUMP)[0], '4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf');
   assert.equal(findProgramAddress([Buffer.from('__event_authority')], P.PUMP)[0], 'Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1');
   assert.equal(findProgramAddress([Buffer.from('global_volume_accumulator')], P.PUMP)[0], 'Hq2wp8uJ9jCPsYgNHex8RtqdvMPfVGoYwjvF1ATiwn2Y');
+});
+
+test("PumpPortal builder check: what its sample buy contains, and whether the safety rules take it (nothing signed or sent)", async (t) => {
+  t.after(() => setFetch(null));
+  const ctx = {...P.buyContextFromLogs(fx.buy.logs, config.leader, b58encode), feeRecipient: global.feeRecipients[0], buybackRecipient: global.buybackFeeRecipients[0]};
+  const clean = P.buildBuyTransaction({user: kp.publicKey, ctx, lamports: 10_000_000, slippagePct: config.slippagePct, blockhash: BH, priorityLamports: 100_000}, h).bytes;
+  const FEE = b58encode(Buffer.alloc(32, 77));
+  const withFee = addTransferInstruction(clean, FEE, 50_000); // what a 0.5% builder fee as its own SOL transfer looks like
+  let reply = clean, asked = null;
+  setFetch(async (url, init) => { asked = {url, body: JSON.parse(init.body)}; return {ok: true, status: 200, arrayBuffer: async () => Buffer.from(reply).buffer.slice(Buffer.from(reply).byteOffset, Buffer.from(reply).byteOffset + Buffer.from(reply).length)}; });
+  const ok = await checkPumpPortalBuild(MINT, kp.publicKey);
+  assert.match(asked.url, /pumpportal\.fun\/api\/trade-local$/); assert.deepEqual([asked.body.action, asked.body.mint, asked.body.amount, asked.body.publicKey], ['buy', MINT, 0.01, kp.publicKey]);
+  assert.equal(ok.ok, true); assert.ok(ok.instructions.some((x) => x.program === P.PUMP));
+  reply = withFee;
+  const refused = await checkPumpPortalBuild(MINT, kp.publicKey);
+  assert.equal(refused.ok, false);
+  assert.match(refused.verdict, new RegExp(`unexpected SOL transfer recipient ${FEE} \\(50000 lamports\\)`));
+  assert.deepEqual(refused.instructions.find((x) => x.transferTo === FEE), {program: '11111111111111111111111111111111', transferTo: FEE, lamports: 50000});
 });
