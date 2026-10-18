@@ -29,13 +29,21 @@ export class Engine {
       this.prune();
     }
   }
-  day() { return new Intl.DateTimeFormat('en-CA', {timeZone: this.c.timezone, year:'numeric', month:'2-digit', day:'2-digit'}).format(new Date()); }
-  save() { const tmp = this.file + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(this.d), {mode:0o600}); fs.renameSync(tmp, this.file); }
-  event(type, fields = {}) {
-    const e = {time:new Date().toISOString(), type, ...fields};
-    this.d.events.push(e); this.d.events = this.d.events.slice(-250); this.save();
-    try { this.log(e); } catch (error) { console.error('event log unavailable:', error.message); }
+  day() { return (this.dayFmt ||= new Intl.DateTimeFormat('en-CA', {timeZone: this.c.timezone, year:'numeric', month:'2-digit', day:'2-digit'})).format(new Date()); }
+  save() {
+    if (this.saveTimer) { clearImmediate(this.saveTimer); this.saveTimer = null; }
+    const tmp = this.file + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(this.d), {mode:0o600}); fs.renameSync(tmp, this.file);
   }
+  // BUY PATH SPEED: nothing irreversible happens before the signed transaction is saved (the one write
+  // that must come before a send), so the steps before it save and log a moment later, off the buy path,
+  // while the bot waits on the network. A real save before then includes everything anyway.
+  saveSoon() { this.saveTimer ||= setImmediate(() => { this.saveTimer = null; try { this.save(); } catch (e) { console.error('state save failed (retried on the next save):', e.message); } }); }
+  event(type, fields = {}, {soon = false} = {}) {
+    const e = {time:new Date().toISOString(), type, ...fields};
+    this.d.events.push(e); if (this.d.events.length > 300) this.d.events = this.d.events.slice(-250);
+    if (soon) { this.saveSoon(); setImmediate(() => this.emit(e)); } else { this.save(); this.emit(e); }
+  }
+  emit(e) { try { this.log(e); } catch (error) { console.error('event log unavailable:', error.message); } }
   lock(fn) { const p = this.serial.then(fn); this.serial = p.catch(() => {}); return p; }
   /** Coins held plus buys being built/sent or queued. */
   openCount() { const m = new Set(Object.entries(this.d.positions).filter(([,p]) => BigInt(p.raw || '0') > 0n).map(([k]) => k)); for (const j of Object.values(this.d.jobs)) if (j.side === 'buy') m.add(j.mint); for (const [k,q] of Object.entries(this.d.queues)) if (q?.some(x => x.side === 'buy')) m.add(k); return m.size; }
@@ -44,7 +52,7 @@ export class Engine {
     return this.lock(async () => {
       const key = `${s.sig}:${s.side}:${s.mint}`;
       if (this.d.seen[key]) return;
-      this.event('detected', {side:s.side, mint:s.mint, leaderSignature:s.sig});
+      this.event('detected', {side:s.side, mint:s.mint, leaderSignature:s.sig}, {soon:true});
       let reason;
       if (s.side === 'buy') {
         // Buying happens in both trading styles; only Pause stops it.
@@ -71,8 +79,8 @@ export class Engine {
       else if (!this.d.positions[s.mint] && !this.d.jobs[s.mint] && !this.d.queues[s.mint]?.length) reason = 'no bot position';
       else if (this.c.maxSellAge > 0 && Date.now()/1000 - s.time > this.c.maxSellAge) reason = 'stale sell signal; inspect position';
       this.d.seen[key] = Date.now();
-      if (reason) { this.event('skip', {mint:s.mint, side:s.side, reason}); return; }
-      (this.d.queues[s.mint] ||= []).push({...s, key}); this.save();
+      if (reason) { this.event('skip', {mint:s.mint, side:s.side, reason}, {soon:true}); return; }
+      (this.d.queues[s.mint] ||= []).push({...s, key}); this.saveSoon();
       this.schedule(s.mint);
     });
   }
@@ -105,15 +113,17 @@ export class Engine {
             job.raw = fractionRaw(available,s.soldRaw,s.beforeRaw).toString();
             if (BigInt(job.raw) === 0n) throw new Error('sell rounds to zero tokens');
           }
-          this.d.jobs[mint] = job; this.d.queues[mint].shift(); this.event('building',{mint,side:job.side,sol:job.sol,raw:job.raw});
+          this.d.jobs[mint] = job; this.d.queues[mint].shift(); this.event('building',{mint,side:job.side,sol:job.sol,raw:job.raw},{soon:true});
         } catch (e) { this.d.queues[mint].shift(); job = null; this.event('skip',{mint,reason:e.message}); }
       });
       if (!job) continue;
       try {
         const built = await this.a.build(job);
         Object.assign(job,built,{phase:'submitted'});
-        // Persist signed transaction BEFORE any broadcast. Recovery can resend identical bytes.
-        this.save(); this.event('submitted',{mint,side:job.side,signature:job.signature});
+        this.event('submitted',{mint,side:job.side,signature:job.signature},{soon:true});
+        // Persist the signed transaction BEFORE any broadcast (one write; it also carries every step above).
+        // Recovery can resend identical bytes.
+        this.save();
         const result = await this.a.send(job);
         await this.finish(job,result);
       } catch (e) {

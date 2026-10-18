@@ -6,7 +6,7 @@ import path from 'node:path';
 import {createStream} from './stream.mjs';
 import {holderVerdict, exitSim} from './learn.mjs';
 import {createStudy, research, latencyLine, toCsv} from './study.mjs';
-import {setFetch, setStream, refreshFees, currentFees, solUsdNow, confirm, holderStats, findProgramAddress, b58decode, b58encode, PROGRAMS} from './copybot.mjs';
+import {setFetch, setStream, refreshFees, currentFees, solUsdNow, confirm, holderStats, findProgramAddress, b58decode, b58encode, PROGRAMS, startSenderWarm, senderUrl, config} from './copybot.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tmp = (t) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-speed-')); t.after(() => fs.rmSync(d, {recursive: true, force: true})); return path.join(d, 'study.jsonl'); };
@@ -173,4 +173,15 @@ test('holder money: every wallet except the bonding curve and the dev, in dollar
   assert.ok(Math.abs(h.mcapUsd - 75 * P) < 1e-6, '75 SOL market cap');
   assert.ok(Math.abs(h.valueUsd - 7.5 * P) < 1e-6, '10% of the coin held by others = 7.5 SOL');
   assert.equal(h.devPct, 0.1); assert.equal(h.devKnown, true);
+});
+
+test('Helius Sender kept warm with free pings; the API key never goes to a plain-http regional Sender', async (t) => {
+  const saved = config.senderUrl, savedKey = config.heliusKey; t.after(() => { setFetch(null); config.senderUrl = saved; config.heliusKey = savedKey; });
+  const hits = []; setFetch(async (url, init) => { hits.push([init.method, url]); return {ok: true, arrayBuffer: async () => new TextEncoder().encode('ok').buffer}; });
+  config.senderUrl = 'http://slc-sender.helius-rpc.com/fast'; config.heliusKey = 'KEY123';
+  const stop = startSenderWarm({intervalMs: 20}); await sleep(70); stop();
+  assert.ok(hits.length >= 3 && hits.every(([m, u]) => m === 'GET' && u === 'http://slc-sender.helius-rpc.com/ping'), JSON.stringify(hits));
+  assert.equal(senderUrl(), 'http://slc-sender.helius-rpc.com/fast', 'no key over http');
+  config.senderUrl = 'https://sender.helius-rpc.com/fast';
+  assert.match(senderUrl(), /^https:.*api-key=KEY123$/, 'https keeps the key');
 });

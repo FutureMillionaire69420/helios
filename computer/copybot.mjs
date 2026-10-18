@@ -1011,6 +1011,17 @@ async function refreshFees() {
   fees.at = Date.now(); fees.source = `max (priority ${Number.isFinite(p) ? 'estimate' : 'cap'}, tip ${Number.isFinite(t) ? 'Jito 99th pct' : 'cap'})`;
   return fees;
 }
+/** LIVE: keep the connection to Helius Sender open between buys (GET /ping, free, every SENDER_PING_SEC),
+ *  so a buy never waits for a new connection (TCP + TLS handshake, ~50-150 ms). */
+function startSenderWarm({ intervalMs = num('SENDER_PING_SEC', 3) * 1000 } = {}) {
+  let ping;
+  try { ping = config.senderUrl && intervalMs > 0 ? new URL('/ping', config.senderUrl).toString() : null; } catch { ping = null; }
+  if (!ping) return () => {};
+  const hit = () => http(ping, { raw: true, timeoutMs: 2000 }).catch(() => {});
+  hit();
+  const t = setInterval(hit, intervalMs); t.unref?.();
+  return () => clearInterval(t);
+}
 function startFeeRefresh() { if (env('FEE_MODE', 'max') !== 'max') return () => {}; refreshFees().then((f) => console.log(`fees now: priority ${f.priorityFeeSol.toFixed(6)} + tip ${f.tipSol.toFixed(6)} SOL per trade (${f.source}); refreshed every ${num('FEE_REFRESH_SEC', 10)} s`)).catch(() => {}); const t = setInterval(refreshFees, num('FEE_REFRESH_SEC', 10) * 1000); t.unref?.(); return () => clearInterval(t); }
 const currentFees = () => ({ priorityFeeSol: fees.priorityFeeSol, tipSol: fees.tipSol, at: fees.at, source: fees.source });
 
@@ -1326,6 +1337,8 @@ const TIP_ACCOUNTS = [
 
 function senderUrl() {
   if (!config.senderUrl) return null;
+  // Helius's regional Sender servers are plain http (lowest latency for a server): never send the key there.
+  if (/^http:\/\//i.test(config.senderUrl)) return config.senderUrl;
   return config.heliusKey && !/api-key=/.test(config.senderUrl) ? `${config.senderUrl}${config.senderUrl.includes('?') ? '&' : '?'}api-key=${config.heliusKey}` : config.senderUrl;
 }
 
@@ -2511,11 +2524,11 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
   const solscanWatch = solscan.enabled && config.solscanPollMs > 0 ? (onSignature, opts) => startSolscanWatcher({ client: solscan, leader: config.leader, intervalMs: config.solscanPollMs, horizonSec: Math.max(config.maxSignalAgeSec, num('MAX_SELL_SIGNAL_AGE_SEC', 300)), onSignature, ...opts }) : null;
   const tokenLabel = solscan.enabled ? async (mint) => { const m = await solscan.tokenMeta(mint); return m?.symbol ? `$${m.symbol}` : null; } : null;
   stream = !demo && config.wsUrl && env('PUSH_STREAM', 'true') !== 'false' ? createStream({ url: config.wsUrl, log: (m) => console.error(redact(m)) }) : null;
-  const stopSol = demo ? () => {} : startSolPriceRefresh(), stopFees = demo ? () => {} : startFeeRefresh();
+  const stopSol = demo ? () => {} : startSolPriceRefresh(), stopFees = demo ? () => {} : startFeeRefresh(), stopWarm = demo || config.dryRun ? () => {} : startSenderWarm();
   const r = await startRuntime({config,kp,notify,solUsdNow,fees:currentFees,stream,watchCurve,curveSell,curveMcapSol,holderStats,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
-  for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();process.exit(0);});
+  for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();stopWarm();process.exit(0);});
   // The settings that decide speed and filtering, as the bot actually uses them (no keys).
-  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'report')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.003)} + ${num('TIP_MAX_SOL', 0.005)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · paper land ${config.paperLandMs} ms`);
+  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'report')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.003)} + ${num('TIP_MAX_SOL', 0.005)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);
 }
 
 /** Backtest one day of the leader's trades with an imaginary wallet. */
@@ -2831,6 +2844,6 @@ async function main(argv = process.argv) {
 
 // ===== entry =====
 const setStream = (s) => (stream = s); // tests
-export {refreshFees,currentFees,solUsdNow,confirm,holderStats,setStream};
+export {refreshFees,currentFees,solUsdNow,confirm,holderStats,setStream,startSenderWarm,senderUrl};
 export {config,setFetch,rpc,relevantLogs,venueOf,quoteSell,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,findProgramAddress,associatedTokenAddress as ata,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);

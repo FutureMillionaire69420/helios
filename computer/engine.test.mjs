@@ -203,3 +203,14 @@ test('circuit-breaker gate from the runtime blocks new buys, never sells', async
   reason=null; await e.ingest(buy('a','a2')); await e.idle(); assert.equal(e.d.positions.a.raw,'1000');
   reason='blocked'; await e.ingest({...sell('1000','1000','a3'),mint:'a'}); await e.idle(); assert.equal(e.d.positions.a.raw,'0','sells ignore the gate');
 });
+test('buy path: ONE state write before the send, and it already holds the signed transaction', async t => {
+  let atSend = null;
+  const e = fixture(t, {send: async j => { atSend = {saves, state: JSON.parse(fs.readFileSync(e.file, 'utf8'))}; return {status:'confirmed', rawDelta:'1000', solDelta:-j.sol}; }});
+  let saves = 0; const save = e.save.bind(e); e.save = () => { saves++; save(); };
+  await e.ingest(buy()); await e.idle();
+  assert.equal(atSend.saves, 1, 'detected / queued / building are saved after the send, off the buy path');
+  assert.equal(atSend.state.jobs.coin.phase, 'submitted'); assert.equal(atSend.state.jobs.coin.signature, 'sig-buy');
+  assert.ok(['detected', 'building', 'submitted'].every(x => atSend.state.events.some(v => v.type === x)), 'the one write carries every step');
+  await new Promise(r => setImmediate(r));
+  assert.equal(JSON.parse(fs.readFileSync(e.file, 'utf8')).positions.coin.raw, '1000');
+});

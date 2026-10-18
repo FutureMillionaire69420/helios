@@ -35,6 +35,7 @@ Do these in order. Don't skip a step because an earlier one passed.
 | `FEE_MODE` | `max` (default) | top-of-market fees on every buy and sell, capped by `PRIORITY_FEE_MAX_SOL` `0.003` + `TIP_MAX_SOL` `0.005` (up to 0.008 SOL per side). `fixed` = `PRIORITY_FEE_SOL` + `TIP_SOL` |
 | `PUSH_STREAM` | `true` | blocks, confirmations and prices pushed over the websocket (faster stop-loss and confirmations) |
 | `NTFY_TOKEN` | optional | ntfy access token: lifts the free daily alert limit |
+| `SENDER_URL` | Render (Oregon): `http://slc-sender.helius-rpc.com/fast` | the regional Helius Sender nearest the server (the API key is never sent over http) |
 | `MAX_OPEN_POSITIONS` | `2` | at most 2 coins at once |
 | `DAILY_CAP_USD` | `600` | at most $600 of buys a day |
 | `SELL_SLIPPAGE_PCT` | `35` | sells fill even on a falling coin |

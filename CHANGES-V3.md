@@ -110,8 +110,15 @@ Your current exit rules are unchanged.
 - **Skipped buys:** a phone alert only when the buy was inside 25% (`SKIPPED_ALERTS=report`).
 - **Local build:** derived addresses are remembered. Building a buy for a new coin dropped from ~6 ms to ~3.5 ms, and to ~0.2 ms for a repeat.
 - **`NTFY_TOKEN`:** an ntfy access token lifts the free daily alert limit.
+- **Faster buy path** (from seeing Decu's buy to "ready to send"):
+  - The save file is written **once** before the send instead of five times. That one write holds the signed transaction, as before. The other steps save and log a moment later, while the bot waits on the network. Measured with a 690 KB state: 23 ms → 8 ms.
+  - Paper builds like the live builder: the expected tokens come from Decu's own trade, with no network call (about 60 ms less in paper).
+  - **Live:** the connection to Helius Sender is kept open with a free ping every 3 s, so a buy never waits for a new connection (about 50–150 ms).
+  - On Render, the Salt Lake City Sender is used (closest to Oregon). The API key is never sent over plain http.
+  - Decu's full transaction for a buy already acted on is fetched 0.5 s later. It can't exist sooner, so the earlier attempts only used credits and the connection.
+  - The holder check runs only after the buy, in the background. It reads that coin's holders only, never their whole wallets.
 - **Spreadsheet:** new columns for detect blocks, premium basis, fees, holder rule, and tests c and d.
-- **Tests:** 112/112 pass. New tests cover:
+- **Tests:** 116/116 pass. New tests cover:
   - the push stream (reconnect and a stalled socket included)
   - the holder rule
   - tests c and d

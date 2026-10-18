@@ -5,7 +5,7 @@ import http from 'node:http';
 import {Engine} from './engine.mjs';
 import {PUMP_TOKEN,QUOTES} from './solscan.mjs';
 import {createStudy,summaryText} from './study.mjs';
-import {buyContextFromLogs,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache} from './pumpbuild.mjs';
+import {buyContextFromLogs,tokensOut,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache} from './pumpbuild.mjs';
 
 const val = (key, fallback) => process.env[key]?.trim() || fallback;
 const number = (key, fallback) => Number(val(key,String(fallback)));
@@ -305,7 +305,11 @@ export async function startRuntime(k, {demo=false}={}) {
     build: async job => {
       if(c.mode!=='live') {
         let quoteRaw;
-        if(job.side==='buy' && !demo) {const q=await k.quoteBuy(job.mint,job.sol*0.995);if(!q?.raw)throw new Error('no paper build quote');quoteRaw=q.raw;}
+        // Like the live local builder: the expected tokens come from Decu's own trade event (his curve
+        // state after his buy), no network. A buy seen without his trade event asks the chain instead.
+        const ctx=job.side==='buy' && !demo ? buyCtx.get(job.mint) : null;
+        if(ctx) { try { quoteRaw=Number(tokensOut(ctx,Math.floor(job.sol*0.995*1e9))); } catch { quoteRaw=undefined; } }
+        if(job.side==='buy' && !demo && !(quoteRaw>0)) {const q=await k.quoteBuy(job.mint,job.sol*0.995);if(!q?.raw)throw new Error('no paper build quote');quoteRaw=q.raw;}
         return {signature:'paper-'+crypto.randomUUID(),quoteRaw};
       }
       const balance=job.side==='buy' ? await adapter.balance() : await k.getBalanceSol(k.kp.publicKey);
@@ -524,8 +528,10 @@ export async function startRuntime(k, {demo=false}={}) {
   // His reference buy for PCAT / entry gap / max-pay guard: the first one big enough to be copied.
   const recordLeaderBuy=s=>{ remember(hisBySig,hisKey(s.sig,s.mint),{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time,sig:s.sig}); remember(lastSig,s.mint,s.sig); const old=leaderBuys.get(s.mint); if(!old || (old.usd<c.minLeaderUsd && s.usd>=c.minLeaderUsd)) remember(leaderBuys,s.mint,{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time}); };
   let lastErrorEventAt=0, hiddenErrors=0;
+  const fullPathDelayMs=number('FULL_PATH_DELAY_MS',500);
   const onSignature=async(sig,source='poll',logs,slot)=>{
     const seenAt=Date.now(), seenSlot=k.stream?.slot?.() ?? null;
+    let fastBuyOnly=false;
     // Which provider saw each leader transaction first. Solscan arriving first means both Helius
     // paths (websocket and polling) missed it: count it and alert, then process it normally.
     if(!delivered.has(sig)) {
@@ -540,8 +546,11 @@ export async function startRuntime(k, {demo=false}={}) {
       fastDone.add(sig); if(fastDone.size>5000) fastDone.delete(fastDone.values().next().value);
       try {
         // his full trade context (local builder) and the coin's dev (holder rule); never blocks the buy
-        try { const ctx=k.b58encode?buyContextFromLogs(logs,k.config.leader,k.b58encode):null; if(ctx) { if(local) remember(buyCtx,ctx.mint,ctx); if(ctx.creator) remember(creators,ctx.mint,ctx.creator); } } catch {}
-        for(const ev of k.leaderPumpBuys(logs,k.config.leader)) {
+        try { const ctx=k.b58encode?buyContextFromLogs(logs,k.config.leader,k.b58encode):null; if(ctx) { remember(buyCtx,ctx.mint,ctx); if(ctx.creator) remember(creators,ctx.mint,ctx.creator); } } catch {}
+        const buys=k.leaderPumpBuys(logs,k.config.leader);
+        // a buy the fast path already handled: its full transaction is only needed later (records, gaps)
+        fastBuyOnly=buys.length>0 && !(k.leaderPumpSells?.(logs,k.config.leader)?.length);
+        for(const ev of buys) {
           const s={sig,time:ev.timestamp||Date.now()/1000,side:'buy',mint:ev.mint,sol:ev.solAmount/1e9,raw:String(ev.tokenAmount),pump:true,decimals:6,fast:true};
           const tp=stampSig(sig,ev.mint,'seenAt',seenAt); if(seenSlot!=null) stampSig(sig,ev.mint,'seenSlot',seenSlot); stampSig(sig,ev.mint,'hisTime',ev.timestamp); if(Number.isInteger(slot)) stampSig(sig,ev.mint,'hisSlot',slot); stampSig(sig,ev.mint,'decodedAt'); tp.source??='websocket (fast path)';
           s.usd=s.sol*(solUsd() ?? await k.getSolUsd()); recordLeaderBuy(s); remember(mintDecimals,s.mint,6); status.fastSignals=(status.fastSignals||0)+1;
@@ -558,13 +567,16 @@ export async function startRuntime(k, {demo=false}={}) {
     if(completed.has(sig)||inFlight.has(sig)) return;
     inFlight.add(sig);
     try {
+      // Decu's buy was already acted on from the websocket: fetch the full transaction once it can exist
+      // (confirmed, ~0.5 s later) instead of retrying for it while the bot's own buy uses the connection.
+      if(fastBuyOnly && fullPathDelayMs>0) await new Promise(r=>setTimeout(r,fullPathDelayMs));
       const tx=await k.getTransaction(sig);
       if(!tx) throw new Error('transaction not available yet; will retry');
       // LaunchLab / bonk.fun / any non-pump.fun coin: ignored completely (no copy, no study, no alert).
       const venue=k.venueOf?k.venueOf(tx.meta?.logMessages||[]):'?', pumpVenue=['pump.fun','PumpSwap'].includes(venue);
       const all=normalize(tx,k.config.leader,k.detectBuy,k.detectSell), signals=all.filter(s=>!(c.pumpOnly && (s.side==='buy'?!s.pump:!pumpVenue && !engine.d.positions[s.mint])));
       if(signals.length<all.length) status.ignoredVenue=(status.ignoredVenue||0)+1;
-      if(k.b58encode && tx.meta?.logMessages && signals.some(s=>s.side==='buy')) try { const ctx=buyContextFromLogs(tx.meta.logMessages,k.config.leader,k.b58encode); if(ctx) { if(local && !buyCtx.has(ctx.mint)) remember(buyCtx,ctx.mint,ctx); if(ctx.creator && !creators.has(ctx.mint)) remember(creators,ctx.mint,ctx.creator); } } catch {}
+      if(k.b58encode && tx.meta?.logMessages && signals.some(s=>s.side==='buy')) try { const ctx=buyContextFromLogs(tx.meta.logMessages,k.config.leader,k.b58encode); if(ctx) { if(!buyCtx.has(ctx.mint)) remember(buyCtx,ctx.mint,ctx); if(ctx.creator && !creators.has(ctx.mint)) remember(creators,ctx.mint,ctx.creator); } } catch {}
       if(!all.length) {
         const u=classifyUnsupported(tx,k.config.leader);
         if(u) {status.unsupported++;engine.event('unsupported',{leaderSignature:sig,mint:u.mint,kind:u.kind,reason:u.kind==='token-swap'?'token-to-token swap':'paid or received PUMP tokens instead of SOL; bot trades with SOL only'});}
@@ -678,5 +690,5 @@ export async function startRuntime(k, {demo=false}={}) {
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});
   engine.event('started',{mode:c.mode,dashboard:`http://${host}:${port}`,note:demo?'SYNTHETIC DEMO; no chain or wallet connection':'confirmed leader signals; paper estimates are not guaranteed fills'});
-  return {engine,server,study,latency:latencyOf,stop:()=>{stopped=true;for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,latency:latencyOf,stop:()=>{stopped=true;if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }

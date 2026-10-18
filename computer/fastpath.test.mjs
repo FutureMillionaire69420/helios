@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {startRuntime} from './runtime.mjs';
 import {config, detectBuy, detectSell, leaderPumpBuys, leaderPumpSells, b58encode} from './copybot.mjs';
-import {buyContextFromLogs} from './pumpbuild.mjs';
+import {buyContextFromLogs, tokensOut} from './pumpbuild.mjs';
 
 // Real websocket logs of Decu's trades on 2026-10-11 (coin siBF3b…): a 0.2475 SOL buy and his full sell.
 const fx = JSON.parse(fs.readFileSync(new URL('./fixtures/leader-ws-logs.json', import.meta.url), 'utf8'));
@@ -29,18 +29,18 @@ const confirmedSellTx = () => ({blockTime: Math.floor(Date.now() / 1000), slot: 
   meta: {err: null, fee: 5000, logMessages: fx.sell.logs, preBalances: [10e9], postBalances: [10e9 + 4.9e9], preTokenBalances: [{owner: config.leader, mint: MINT, uiTokenAmount: {amount: '2254826796163', decimals: 6, uiAmountString: '2254826.796163'}}], postTokenBalances: [{owner: config.leader, mint: MINT, uiTokenAmount: {amount: '0', decimals: 6, uiAmountString: '0'}}]}});
 async function bot(t, env = {}, quote = async () => 0.11, extra = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-fast-')), saved = {...process.env};
-  Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: 'fastpath-test-token-24-characters', STUDY: 'false', PAPER_MAX_PAY_PCT: '0', STALE_DATA_SEC: '0', ...env});
-  let ws; const fetches = [];
+  Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: 'fastpath-test-token-24-characters', STUDY: 'false', PAPER_MAX_PAY_PCT: '0', STALE_DATA_SEC: '0', FULL_PATH_DELAY_MS: '0', ...env});
+  let ws; const fetches = [], fetchedAt = [];
   const k = {config: {...config, dryRun: true, minLeaderBuyUsd: 1, logFile: path.join(dir, 'log'), paperLandMs: 0, tipSol: 0.001, priorityFeeSol: 0.0005, slippagePct: 20}, redact: (x) => x,
     detectBuy, detectSell, leaderPumpBuys, leaderPumpSells, getSolUsd: async () => 116,
     quoteBuy: async () => ({raw: 1_000_000}), quoteSell: (...a) => quote(...a),
     // Buys: full path unavailable, proving the fast path alone buys. His SELL: only the confirmed
     // transaction (full path) makes the bot sell, so the sell signature returns a confirmed tx.
-    getTransaction: async (sig) => { fetches.push(sig); return sig === fx.sell.signature && confirmedSell ? confirmedSellTx() : null; },
+    getTransaction: async (sig) => { fetches.push(sig); fetchedAt.push([sig, Date.now()]); return sig === fx.sell.signature && confirmedSell ? confirmedSellTx() : null; },
     startWatcher: (cb) => { ws = cb; return () => {}; }, ...extra};
   const r = await startRuntime(k);
   t.after(() => { r.stop(); fs.rmSync(dir, {recursive: true, force: true}); for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]; Object.assign(process.env, saved); });
-  return {r, ws: (...a) => ws(...a), fetches};
+  return {r, ws: (...a) => ws(...a), fetches, fetchedAt};
 }
 
 test('fast path: buys from the websocket logs without waiting for the transaction', async (t) => {
@@ -211,9 +211,9 @@ test('failed exit sells are retried, then CAN\'T SELL is alerted', async (t) => 
   let n = 0;
   const {r, ws} = await bot(t, {MAX_HOLD_SEC: '15', MONITOR_MS: '10', SELL_RETRIES: '2'}, async () => (n++ < 2 ? 0.1 : 0.06)); // -40%: stop
   r.engine.style('auto');
-  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
   const realSend = r.engine.a.send; let sells = 0;
   r.engine.a.send = async (job) => (job.side === 'sell' ? (sells++, {status: 'failed', error: 'slippage exceeded'}) : realSend(job));
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
   await sleep(1500); await r.engine.idle();
   assert.ok(sells >= 3, `${sells} sell attempts`);
   assert.ok(r.engine.d.events.some((e) => e.type === 'unsellable'), 'CAN\'T SELL alerted');
@@ -284,4 +284,29 @@ test("holder rule: the dev is taken from Decu's own trade event (written by pump
   assert.equal(asked[0].mint, MINT); assert.equal(asked[0].creator, dev);
   const rec = r.study.records.at(-1);
   assert.equal(rec.holderVerdict.safe, true); assert.equal(rec.holderVerdict.heldUsd, 2500);
+});
+
+test('paper build like the live local builder: expected tokens from Decu\'s trade event, no network call', async (t) => {
+  const ctx = buyContextFromLogs(fx.buy.logs, config.leader, b58encode), expected = Number(tokensOut(ctx, Math.floor(0.1 * 0.995 * 1e9)));
+  let quotes = 0;
+  const {r, ws} = await bot(t, {}, async () => 0.11, {b58encode, quoteBuy: async () => { quotes++; return {raw: expected}; }});
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  assert.equal(r.engine.d.positions[MINT].raw, String(expected));
+  assert.equal(quotes, 1, 'only the landing quote (the simulated fill); the build asked nothing');
+  assert.ok(r.latency(MINT).buildMs < 50, `build ${r.latency(MINT).buildMs} ms`);
+});
+
+test('a buy already acted on from the websocket fetches its full transaction later; his sells right away', async (t) => {
+  const {r, ws, fetchedAt} = await bot(t, {FULL_PATH_DELAY_MS: '500'});
+  const t0 = Date.now(); ws(fx.buy.signature, 'ws', fx.buy.logs);
+  await sleep(50); await r.engine.idle();
+  assert.equal(r.engine.d.positions[MINT].raw, '1000000', 'bought without waiting for the full transaction');
+  assert.equal(fetchedAt.filter(([s]) => s === fx.buy.signature).length, 0, 'not fetched yet');
+  await sleep(550);
+  const at = fetchedAt.find(([s]) => s === fx.buy.signature);
+  assert.ok(at && at[1] - t0 >= 480, 'fetched once it can exist');
+  const t1 = Date.now(); confirmedSell = false; // only when it is fetched matters here
+  try { await ws(fx.sell.signature, 'ws', fx.sell.logs); } finally { confirmedSell = true; }
+  const sellAt = fetchedAt.find(([s]) => s === fx.sell.signature);
+  assert.ok(sellAt && sellAt[1] - t1 < 200, 'his sell (acted on only once confirmed) is fetched at once');
 });
