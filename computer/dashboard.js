@@ -33,6 +33,9 @@ async function refresh(){try{
   $('providers').textContent='Helius: websocket first '+(fs.ws||0)+' · poll first '+(fs.poll||0)+' | Solscan: '+(!sc?'—':sc.ok===false?(sc.note||sc.error||'error'):sc.ok?'OK '+(sc.latencyMs??'?')+' ms':'starting')+' · gaps caught '+(k.gaps||0)+' | non-SOL trades skipped '+(k.unsupported||0)+' | other wallets filtered '+((k.otherWallets||0)+(k.filteredWs||0))+(k.pollMode?' | Helius poll: '+k.pollMode:'')+(k.lastError?' | last error: '+k.lastError:'');
   $('positions').replaceChildren();for(const [mint,p] of entries)item($('positions'),mint,p.raw+' raw tokens · cost '+fmt(p.costSol)+' SOL · realized proceeds '+fmt(p.realizedSol)+' SOL');if(!entries.length)$('positions').textContent='No open positions.';
   $('jobs').replaceChildren();for(const j of latest.jobs)item($('jobs'),j.side+' · '+j.phase,j.mint,j.phase==='unresolved',j.signature);if(!latest.jobs.length)$('jobs').textContent='No pending transactions.';
+  const off=latest.power==='off';$('power-on').disabled=!off;$('power-off').disabled=off;
+  $('power-state').textContent=off?'OFF: not watching Decu, no Helius or Solscan credits used.':'ON: watching Decu (uses Helius and Solscan credits).';
+  if(off)$('mode').textContent+=' · OFF';
   $('pause').disabled=latest.paused;$('resume').disabled=!latest.paused;renderEvents();
   renderResearch(await api('/api/research').catch(()=>null));
 }catch(e){$('message').textContent=e.message;$('mode').textContent='Disconnected';}}
@@ -59,6 +62,12 @@ $('export').onclick=async()=>{try{const r=await fetch('/api/export.csv',{headers
 $('emergency').onclick=async()=>{if(!confirm('EMERGENCY STOP: no new buys until you turn a style back on. Continue?'))return;try{await api('/api/emergency','POST');refresh();}catch(e){$('message').textContent=e.message;}};
 $('sellall').onclick=async()=>{if(!confirm('Sell EVERY open position now? In LIVE this sends real sells.'))return;if(!confirm('Are you sure? This cannot be undone.'))return;try{await api('/api/sell-all','POST');refresh();}catch(e){$('message').textContent=e.message;}};
 $('connect').onclick=()=>{token=$('token').value;$('token').value='';refresh();};
+$('power-off').onclick=async()=>{
+  if(!confirm('Turn the bot OFF? It stops watching Decu and stops using Helius and Solscan credits until you turn it back ON.'))return;
+  const go=q=>fetch('/api/power/off'+q,{method:'POST',headers:token?{Authorization:'Bearer '+token}:{},cache:'no-store'});
+  try{let r=await go('');if(r.status===409){const why=await r.text();if(!confirm(why+'\n\nTurn OFF anyway?'))return;r=await go('?force=1');}if(!r.ok)throw new Error('Request failed: '+r.status);refresh();}catch(e){$('message').textContent=e.message;}
+};
+$('power-on').onclick=async()=>{try{await api('/api/power/on','POST');refresh();}catch(e){$('message').textContent=e.message;}};
 $('pause').onclick=async()=>{try{await api('/api/pause','POST');refresh();}catch(e){$('message').textContent=e.message;}};
 $('resume').onclick=async()=>{try{await api('/api/resume','POST');refresh();}catch(e){$('message').textContent=e.message;}};
 const setStyle=v=>async()=>{try{await api('/api/style/'+v,'POST');refresh();}catch(e){$('message').textContent=e.message;}};

@@ -110,6 +110,14 @@ Your current exit rules are unchanged.
 - **Skipped buys:** a phone alert only when the buy was inside 25% (`SKIPPED_ALERTS=report`).
 - **Local build:** derived addresses are remembered. Building a buy for a new coin dropped from ~6 ms to ~3.5 ms, and to ~0.2 ms for a repeat.
 - **`NTFY_TOKEN`:** an ntfy access token lifts the free daily alert limit.
+- **Bot power ON / OFF** (dashboard). OFF stops every Helius and Solscan use:
+  - Decu's websocket, the backup poll and the Solscan watcher
+  - the push stream
+  - the SOL price, fee and balance refreshes
+  - price checks of held coins
+
+  The dashboard stays up. The choice survives restarts. `BOT_POWER=on/off` on the server wins once when changed. In LIVE, OFF asks first while coins are held.
+- **Backup poll:** while the websocket is healthy, it no longer asks Helius every 5 s (the answer was ignored). That's about 17,000 fewer Helius calls a day.
 - **Faster buy path** (from seeing Decu's buy to "ready to send"):
   - The save file is written **once** before the send instead of five times. That one write holds the signed transaction, as before. The other steps save and log a moment later, while the bot waits on the network. Measured with a 690 KB state: 23 ms → 8 ms.
   - Paper builds like the live builder: the expected tokens come from Decu's own trade, with no network call (about 60 ms less in paper).
@@ -118,7 +126,7 @@ Your current exit rules are unchanged.
   - Decu's full transaction for a buy already acted on is fetched 0.5 s later. It can't exist sooner, so the earlier attempts only used credits and the connection.
   - The holder check runs only after the buy, in the background. It reads that coin's holders only, never their whole wallets.
 - **Spreadsheet:** new columns for detect blocks, premium basis, fees, holder rule, and tests c and d.
-- **Tests:** 116/116 pass. New tests cover:
+- **Tests:** 120/120 pass. New tests cover:
   - the push stream (reconnect and a stalled socket included)
   - the holder rule
   - tests c and d

@@ -5,8 +5,8 @@
 // Reconnects by itself and re-subscribes everything. Callers always keep a polling fallback, so a
 // dead socket only makes things slower, never wrong.
 
-export function createStream({ url, WebSocketImpl = globalThis.WebSocket, log = () => {}, pingMs = 30_000, freshMs = 3000, staleMs = 10_000 } = {}) {
-  let ws = null, stopped = false, backoff = 500, nextId = 1, open = false, lastMsgAt = 0;
+export function createStream({ url, WebSocketImpl = globalThis.WebSocket, log = () => {}, pingMs = 30_000, freshMs = 3000, staleMs = 10_000, paused: startPaused = false } = {}) {
+  let ws = null, stopped = false, paused = startPaused, backoff = 500, nextId = 1, open = false, lastMsgAt = 0;
   // A new block arrives every ~0.4 s, so silence means the socket stalled: pushed data is trusted only
   // while messages are flowing (freshMs), and a socket silent for staleMs is closed and reconnected.
   const fresh = () => open && Date.now() - lastMsgAt < freshMs;
@@ -33,12 +33,12 @@ export function createStream({ url, WebSocketImpl = globalThis.WebSocket, log = 
     open = false;
     for (const s of subs.values()) { s.ready = false; if (s.subId != null) bySubId.delete(s.subId); s.subId = null; }
     pending.clear();
-    if (stopped) return;
+    if (stopped || paused) return;
     setTimeout(connect, backoff).unref?.();
     backoff = Math.min(backoff * 2, 15_000);
   };
   const connect = () => {
-    if (stopped || !url || !WebSocketImpl) return;
+    if (stopped || paused || !url || !WebSocketImpl) return;
     let sock;
     try { sock = ws = new WebSocketImpl(url); } catch (e) { log(`stream: ${e.message}`); setTimeout(connect, backoff).unref?.(); return; }
     // every handler ignores a socket that was already replaced (a late close of a stalled one)
@@ -115,6 +115,9 @@ export function createStream({ url, WebSocketImpl = globalThis.WebSocket, log = 
     },
     /** True once the server acknowledged every current subscription (pushes are flowing). */
     ready: () => fresh() && [...subs.values()].every((s) => s.ready),
+    /** Power OFF: close the socket and stay closed (no data used); resume() reconnects and re-subscribes. */
+    pause() { if (paused) return; paused = true; const w = ws; ws = null; try { w?.close(); } catch {} dropped(); },
+    resume() { if (!paused || stopped) return; paused = false; backoff = 500; connect(); },
     stop() { stopped = true; clearInterval(ping); clearInterval(watchdog); try { ws?.close(); } catch {} },
   };
 }

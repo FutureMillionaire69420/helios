@@ -1479,8 +1479,9 @@ async function executeBuy(kp, mint, balanceSol, prepared = null) {
 let solPrice = { usd: null, at: 0 };
 /** SOL/USD right now WITHOUT waiting: the last known price (refreshed in the background every
  *  SOL_PRICE_REFRESH_SEC). Used on the buy path, where a price lookup cost ~170 ms per buy (up to 4 s). */
+let dataOn = true; // power OFF (dashboard): no background lookups at all
 function solUsdNow() {
-  if (!solPrice.usd || Date.now() - solPrice.at > 20_000) refreshSolUsd();
+  if (dataOn && (!solPrice.usd || Date.now() - solPrice.at > 20_000)) refreshSolUsd();
   return solPrice.usd || config.solPriceFallback;
 }
 let solRefreshing = null;
@@ -1865,6 +1866,9 @@ function startWatcher(onSignature, { log = console.log, status = {} } = {}) {
   const poll = async () => {
     if (stopped) return;
     try {
+      // While the websocket is healthy it already delivers everything (filtered): the poll stands by
+      // WITHOUT asking Helius (it used to download 1000 signatures every 5 s and ignore them).
+      if(status.websocket==='subscribed' && Date.now()-lastMsg<30_000) { status.pollMode='standby (websocket healthy)'; if(!stopped)setTimeout(poll,config.pollIntervalMs); return; }
       const horizon=Math.max(config.maxSignalAgeSec,Number(env('MAX_SELL_SIGNAL_AGE_SEC','300')) || 300);
       const cutoff=Date.now()/1000-horizon;
       // His address is flooded: on 2026-10-07 Helius returned 1000 signatures spanning 4 seconds,
@@ -2523,9 +2527,17 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
   if (!config.dryRun && !demo && config.executor!=='pumpportal') throw new Error('v2 live execution supports EXECUTOR=pumpportal only; legacy Jupiter remains for quotes/backtests');
   const solscanWatch = solscan.enabled && config.solscanPollMs > 0 ? (onSignature, opts) => startSolscanWatcher({ client: solscan, leader: config.leader, intervalMs: config.solscanPollMs, horizonSec: Math.max(config.maxSignalAgeSec, num('MAX_SELL_SIGNAL_AGE_SEC', 300)), onSignature, ...opts }) : null;
   const tokenLabel = solscan.enabled ? async (mint) => { const m = await solscan.tokenMeta(mint); return m?.symbol ? `$${m.symbol}` : null; } : null;
-  stream = !demo && config.wsUrl && env('PUSH_STREAM', 'true') !== 'false' ? createStream({ url: config.wsUrl, log: (m) => console.error(redact(m)) }) : null;
-  const stopSol = demo ? () => {} : startSolPriceRefresh(), stopFees = demo ? () => {} : startFeeRefresh(), stopWarm = demo || config.dryRun ? () => {} : startSenderWarm();
-  const r = await startRuntime({config,kp,notify,solUsdNow,fees:currentFees,stream,watchCurve,curveSell,curveMcapSol,holderStats,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  // Created paused: the runtime turns every data source on (or leaves them off) with the power switch.
+  stream = !demo && config.wsUrl && env('PUSH_STREAM', 'true') !== 'false' ? createStream({ url: config.wsUrl, log: (m) => console.error(redact(m)), paused: true }) : null;
+  let stopSol = () => {}, stopFees = () => {}, stopWarm = () => {};
+  // POWER: the background loops that use Helius / Solscan / Jito (the runtime also stops its own watchers).
+  const power = demo ? null : {
+    on() { if (dataOn && stopSol !== power.idle) return; dataOn = true; stream?.resume(); stopSol = startSolPriceRefresh(); stopFees = startFeeRefresh(); stopWarm = config.dryRun ? () => {} : startSenderWarm(); },
+    off() { dataOn = false; stream?.pause(); stopSol(); stopFees(); stopWarm(); stopSol = stopFees = stopWarm = power.idle; },
+    idle: () => {},
+  };
+  if (power) stopSol = stopFees = stopWarm = power.idle;
+  const r = await startRuntime({config,kp,notify,solUsdNow,fees:currentFees,power,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();stopWarm();process.exit(0);});
   // The settings that decide speed and filtering, as the bot actually uses them (no keys).
   if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'report')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.003)} + ${num('TIP_MAX_SOL', 0.005)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);

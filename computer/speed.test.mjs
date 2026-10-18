@@ -72,6 +72,23 @@ test('push stream: a silent (stalled) socket is not trusted and is replaced', as
   await Promise.all([late, sleep(20)]);
 });
 
+test('push stream: paused (power OFF) means no socket at all; resume reconnects and re-subscribes', async (t) => {
+  FakeWS.all = [];
+  const s = createStream({url: 'wss://x', WebSocketImpl: FakeWS, pingMs: 60_000, paused: true}); t.after(() => s.stop());
+  await sleep(10);
+  assert.equal(FakeWS.all.length, 0, 'created paused: nothing opened');
+  s.resume(); await sleep(5);
+  const ws = FakeWS.all[0]; ws.ack('slotSubscribe', 1);
+  const un = s.watchAccount('CURVE', () => {}); ws.ack('accountSubscribe', 2);
+  s.pause(); assert.equal(s.connected(), false);
+  await sleep(700);
+  assert.equal(FakeWS.all.length, 1, 'paused: no reconnect');
+  s.resume(); await sleep(5);
+  assert.equal(FakeWS.all.length, 2);
+  assert.deepEqual(FakeWS.all[1].sent.map((x) => x.method).sort(), ['accountSubscribe', 'slotSubscribe']);
+  un();
+});
+
 test('holder money rule: holders (dev excluded) need $1000 at a $10k mcap, $2500 at $20k, $4000 at $30k', () => {
   assert.deepEqual(holderVerdict(500, 8000), {heldUsd: 500, mcapUsd: 8000, required: 0, ceilingUsd: 10000, safe: true});
   assert.equal(holderVerdict(900, 12000).safe, false, 'above $10k with under $1000 held: RISKY');

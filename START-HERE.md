@@ -122,6 +122,8 @@ A Decu buy the bot did not take (filtered, 2 coins already open, daily cap, paus
 
 **Stop-loss alerts, in order:** STOP TRIGGERED → SELL SENT (live) → POSITION CLOSED (with the trigger vs the real fill). If prices can't be read 3 times in a row you get *Price checks failing*; after 6 it sells anyway. If a sell fails it retries at once; after 3 failures you get **CAN'T SELL** and it keeps trying.
 
+**Bot power ON / OFF (dashboard, top):** OFF stops everything that uses your Helius and Solscan credits. The bot stops watching Decu, stops checking prices and stops all background lookups. The dashboard keeps working, and ON starts it all again. The choice is kept after restarts. In LIVE, OFF asks first if coins are still held, because their stop-loss can't run while it's off.
+
 **Dashboard on your iPhone:** open the bot's address in Safari → Share → *Add to Home Screen*. It shows mode, balance, P&L, positions, entry premium, execution latency, why buys were skipped, the brain's level, and two red buttons: **EMERGENCY STOP** (no new buys) and **Sell everything**.
 
 All of it is saved. Double-click **study** (or run `node copybot.mjs study`) any time, even with the

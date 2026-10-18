@@ -15,6 +15,7 @@ const fresh = (logs) => logs.map((l) => { if (!l.startsWith('Program data: ')) r
 fx.buy.logs = fresh(fx.buy.logs); fx.sell.logs = fresh(fx.sell.logs);
 const MINT = 'siBF3bcDKAH9so6zFSRLVer6ua3sFJ8m279aF2cpump';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const PRISTINE_ENV = {...process.env};
 
 test('decoder reads his real pump.fun buy and sell from the logs', () => {
   const [b] = leaderPumpBuys(fx.buy.logs, config.leader);
@@ -28,7 +29,7 @@ let confirmedSell = true;
 const confirmedSellTx = () => ({blockTime: Math.floor(Date.now() / 1000), slot: 9, transaction: {signatures: [fx.sell.signature], message: {accountKeys: [{pubkey: config.leader, signer: true}]}},
   meta: {err: null, fee: 5000, logMessages: fx.sell.logs, preBalances: [10e9], postBalances: [10e9 + 4.9e9], preTokenBalances: [{owner: config.leader, mint: MINT, uiTokenAmount: {amount: '2254826796163', decimals: 6, uiAmountString: '2254826.796163'}}], postTokenBalances: [{owner: config.leader, mint: MINT, uiTokenAmount: {amount: '0', decimals: 6, uiAmountString: '0'}}]}});
 async function bot(t, env = {}, quote = async () => 0.11, extra = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-fast-')), saved = {...process.env};
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-fast-')), saved = PRISTINE_ENV; // two bots in one test can't leak each other's settings
   Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: 'fastpath-test-token-24-characters', STUDY: 'false', PAPER_MAX_PAY_PCT: '0', STALE_DATA_SEC: '0', FULL_PATH_DELAY_MS: '0', ...env});
   let ws; const fetches = [], fetchedAt = [];
   const k = {config: {...config, dryRun: true, minLeaderBuyUsd: 1, logFile: path.join(dir, 'log'), paperLandMs: 0, tipSol: 0.001, priorityFeeSol: 0.0005, slippagePct: 20}, redact: (x) => x,
@@ -309,4 +310,47 @@ test('a buy already acted on from the websocket fetches its full transaction lat
   try { await ws(fx.sell.signature, 'ws', fx.sell.logs); } finally { confirmedSell = true; }
   const sellAt = fetchedAt.find(([s]) => s === fx.sell.signature);
   assert.ok(sellAt && sellAt[1] - t1 < 200, 'his sell (acted on only once confirmed) is fetched at once');
+});
+
+test('power OFF stops every data source (Helius, Solscan, push, refreshes); ON restarts them; saved across restarts', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-power-')); t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const n = {watch: 0, unwatch: 0, scan: 0, unscan: 0, on: 0, off: 0}, alerts = [];
+  const extra = () => ({startWatcher: () => { n.watch++; return () => n.unwatch++; }, startSolscanWatcher: () => { n.scan++; return () => n.unscan++; },
+    power: {on: () => n.on++, off: () => n.off++}, notify: async (a) => alerts.push(a)});
+  const env = {ENGINE_STATE_FILE: path.join(dir, 'engine.json')};
+  const a = await bot(t, env, async () => 0.11, extra());
+  assert.deepEqual([n.watch, n.scan, n.on], [1, 1, 1], 'starts ON');
+  assert.equal(a.r.setPower(false), null);
+  assert.deepEqual([n.unwatch, n.unscan, n.off], [1, 1, 1], 'OFF stopped Decu\'s watchers and the background loops');
+  assert.equal(a.r.engine.d.dataOff, true);
+  await new Promise((r) => setImmediate(r));
+  assert.ok(alerts.some((x) => /Bot OFF: no Helius or Solscan use/.test(x.title)), 'phone alert');
+  a.r.stop();
+  const b = await bot(t, env, async () => 0.11, extra());
+  assert.equal(n.watch, 1, 'restarted OFF: nothing started'); assert.equal(n.on, 1);
+  assert.equal(b.r.setPower(true), null);
+  assert.deepEqual([n.watch, n.scan, n.on], [2, 2, 2], 'ON started everything again');
+  b.r.stop();
+});
+
+test('BOT_POWER on the server wins once when changed; after that the dashboard button decides', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-power-')); t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  let watch = 0; const extra = {startWatcher: () => { watch++; return () => {}; }};
+  const env = {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), BOT_POWER: 'off'};
+  const a = await bot(t, env, async () => 0.11, extra);
+  assert.equal(watch, 0, 'BOT_POWER=off: starts OFF'); a.r.setPower(true); assert.equal(watch, 1); a.r.stop();
+  const b = await bot(t, env, async () => 0.11, extra);
+  assert.equal(watch, 2, 'same BOT_POWER, button said ON: stays ON'); b.r.stop();
+});
+
+test('dashboard power buttons: /api/power/off and /on need the token and switch the bot', async (t) => {
+  let watch = 0;
+  const {r} = await bot(t, {}, async () => 0.11, {startWatcher: () => { watch++; return () => {}; }});
+  const base = `http://127.0.0.1:${r.server.address().port}`, auth = {Authorization: 'Bearer fastpath-test-token-24-characters'};
+  assert.equal((await fetch(base + '/api/power/off', {method: 'POST'})).status, 401, 'no token, no switch');
+  assert.equal((await fetch(base + '/api/power/off', {method: 'POST', headers: auth})).status, 200);
+  assert.equal((await (await fetch(base + '/api/status', {headers: auth})).json()).power, 'off');
+  assert.equal((await fetch(base + '/api/power/on', {method: 'POST', headers: auth})).status, 200);
+  assert.equal((await (await fetch(base + '/api/status', {headers: auth})).json()).power, 'on');
+  assert.equal(watch, 2);
 });

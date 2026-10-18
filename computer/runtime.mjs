@@ -89,6 +89,8 @@ export function alertFor(e, mode, leaderLabel='Decu') {
   if (e.type==='price-check-failing') return {title:`${tag}Price checks failing: ${short(e.mint)}`, body:`${e.fails} price checks in a row failed (last known ${pc(e.last)}). The stop-loss cannot see the price. ${'The bot sells anyway if it keeps failing.'}\nToken: ${e.mint}`, priority:4, tags:['warning'], click:pump(e.mint)};
   if (e.type==='unsellable') return {title:`${tag}CAN'T SELL ${short(e.mint)}`, body:`${e.attempts} sell attempts failed: ${String(e.message||'').slice(0,200)}\nThe bot keeps trying. Check the coin; you may need to sell by hand in Phantom.\nToken: ${e.mint}`, priority:5, tags:['rotating_light'], click:pump(e.mint)};
   if (e.type==='breaker') return {title:`${tag}New buys paused (circuit breaker)`, body:e.message, priority:4, tags:['no_entry']};
+  if (e.type==='power-off') return {title:`${tag}Bot OFF: no Helius or Solscan use`, body:`Not watching ${leaderLabel} and not using any data credits${e.open?` (${e.open} position(s) still open: no stop-loss while off)`:''}.\nTurn it back ON from the dashboard.${e.by&&e.by!=='dashboard'?`\n(${e.by})`:''}`, priority:3, tags:['zzz']};
+  if (e.type==='power-on') return {title:`${tag}Bot ON: watching ${leaderLabel} again`, body:'Helius and Solscan are in use again.', priority:3, tags:['white_check_mark']};
   if (e.type==='failed') return {title:`${tag}Trade FAILED (${e.side})`, body:`${e.message||'unknown error'}\nToken: ${e.mint}\nNo tokens changed hands.`, priority:4, tags:['x'], click:pump(e.mint)};
   if (e.type==='unresolved') return {title:`${tag}Trade outcome UNKNOWN`, body:`${e.message||''}\nThe bot keeps checking and will not double-trade.\nTx: ${e.signature||'?'}`, priority:5, tags:['warning'], click:e.signature?tx(e.signature):undefined};
   if (e.type==='unsupported' && e.kind==='paid-with-pump') return {title:`${tag}${leaderLabel} bought with PUMP tokens (not copied)`, body:`He paid with PUMP tokens he held, not SOL. This bot buys with SOL only, so it skipped this one.\nToken: ${e.mint}`, priority:2, tags:['eyes'], click:pump(e.mint)};
@@ -291,7 +293,7 @@ export async function startRuntime(k, {demo=false}={}) {
     helpers:{findProgramAddress:k.findProgramAddress,ata:k.ata,b58decode:k.b58decode,b58encode:k.b58encode},
     blockhash:startBlockhashCache(k.rpc,{log:m=>status.lastError=m}), global:null,
   } : null;
-  const refreshGlobal=()=>local && readGlobal(k.rpc,local.helpers).then(g=>{local.global=g;}).catch(e=>{status.lastError='pump.fun global: '+e.message;});
+  const refreshGlobal=()=>local && !engine?.d.dataOff && readGlobal(k.rpc,local.helpers).then(g=>{local.global=g;}).catch(e=>{status.lastError='pump.fun global: '+e.message;});
   refreshGlobal();
   const globalTimer=local?setInterval(refreshGlobal,600_000):null; globalTimer?.unref?.();
   const adapter = {
@@ -317,7 +319,7 @@ export async function startRuntime(k, {demo=false}={}) {
       // FASTEST: build the buy locally from his trade event (no PumpPortal round trip, no waiting
       // for a blockhash). Same safety check and full simulation as every other trade.
       if(job.side==='buy' && local) {
-        const ctx=buyCtx.get(job.mint), blockhash=local.blockhash.get();
+        const ctx=buyCtx.get(job.mint), blockhash=local.blockhash?.get();
         if(ctx && blockhash && local.global) {
           try {
             const t0=Date.now();
@@ -450,7 +452,7 @@ export async function startRuntime(k, {demo=false}={}) {
   // (and for coins that left the curve for PumpSwap, priced by Jupiter).
   status.priceChecks={push:0,poll:0,pollMsLast:null};
   scheduleMaxHold=(mint)=>{
-    if(monitors.has(mint) || !k.quoteSell) return;
+    if(monitors.has(mint) || !k.quoteSell || engine.d.dataOff) return; // power off: no price checks (on: restarted)
     const m={peak:-Infinity,decided:false,fails:0,pushed:null,unwatch:null,busy:false,again:false}; monitors.set(mint,m);
     const alive=()=>monitors.get(mint)===m && !stopped;
     const unwatch=()=>{ try{ m.unwatch?.(); }catch{} m.unwatch=null; };
@@ -606,9 +608,44 @@ export async function startRuntime(k, {demo=false}={}) {
     }
     finally {inFlight.delete(sig);}
   };
-  const stopWatcher=demo?()=>{}:k.startWatcher(onSignature,{log:message=>engine.event('connection',{message}),status});
-  const stopSolscan=demo||!k.startSolscanWatcher?()=>{}:k.startSolscanWatcher(onSignature,{log:message=>engine.event('connection',{message}),status});
-  if(!demo) status.solscan ||= k.startSolscanWatcher ? {ok:null,note:'starting'} : {ok:false,note:'SOLSCAN_API_KEY not set: Helius only'};
+  // POWER (dashboard ON / OFF): OFF stops everything that uses Helius or Solscan credits: Decu's
+  // websocket + backup poll, the Solscan watcher, the push stream, SOL price / fee / balance refreshes and
+  // price checks of held coins. The dashboard stays up. Saved, so it survives restarts. BOT_POWER on the
+  // server (on / off) wins once when it is changed; after that the button decides.
+  let stopWatcher=()=>{}, stopSolscan=()=>{}, dataRunning=false;
+  const powerOff=()=>!!engine.d.dataOff;
+  const startData=()=>{
+    if(demo || dataRunning) return; dataRunning=true;
+    k.power?.on();
+    stopWatcher=k.startWatcher(onSignature,{log:message=>engine.event('connection',{message}),status});
+    stopSolscan=!k.startSolscanWatcher?()=>{}:k.startSolscanWatcher(onSignature,{log:message=>engine.event('connection',{message}),status});
+    status.solscan = k.startSolscanWatcher ? {ok:null,note:'starting'} : {ok:false,note:'SOLSCAN_API_KEY not set: Helius only'};
+    if(local && !local.blockhash) local.blockhash=startBlockhashCache(k.rpc,{log:m=>status.lastError=m});
+    for(const [mint,p] of Object.entries(engine.d.positions)) if(BigInt(p.raw||'0')>0n) scheduleMaxHold(mint); // price checks again
+  };
+  const stopData=()=>{
+    if(demo) return; dataRunning=false;
+    stopWatcher(); stopSolscan(); stopWatcher=stopSolscan=()=>{};
+    k.power?.off();
+    local?.blockhash?.stop(); if(local) local.blockhash=null;
+    for(const m of monitors.values()) { try{ m.unwatch?.(); }catch{} } monitors.clear(); // no price checks while off
+    status.websocket='off (power off)'; status.solscan={ok:null,note:'off (power off)'};
+  };
+  const openNow=()=>Object.values(engine.d.positions).filter(p=>BigInt(p.raw||'0')>0n).length+Object.keys(engine.d.jobs).length;
+  /** on: true / false. Refused in LIVE while coins are held or trades are in flight (their stop-loss and
+   *  confirmation need data) unless force. Returns the problem, or null when done. */
+  const setPower=(on,{force=false,by='dashboard'}={})=>{
+    if(!on && c.mode==='live' && openNow()>0 && !force) return `${openNow()} open position(s) or trade(s) in flight: turning off would stop their stop-loss. Sell them first, or turn off anyway.`;
+    engine.d.dataOff=!on;
+    if(on) startData(); else stopData();
+    engine.event(on?'power-on':'power-off',{by,open:openNow()});
+    return null;
+  };
+  if(!demo) {
+    const envPower=val('BOT_POWER','').toLowerCase();
+    if(['on','off'].includes(envPower) && engine.d.powerEnv!==envPower) { engine.d.powerEnv=envPower; engine.d.dataOff=envPower==='off'; engine.save(); }
+    if(powerOff()) { stopData(); engine.event('power-off',{by:'saved setting at startup',open:openNow()}); } else startData();
+  }
   const timer=setInterval(()=>engine.recover().catch(e=>engine.event('error',{message:e.message})),5000);
   // WATCHDOG: alert when Helius (websocket) or Solscan stays down, and when it recovers;
   // plus a "healthy" check-in every HEALTH_ALERT_HOURS (12). Respects the alerts on/off switch.
@@ -617,6 +654,7 @@ export async function startRuntime(k, {demo=false}={}) {
   const tag=c.mode==='live'?'':'[PAPER] ';
   const watchdog=demo?null:setInterval(()=>{
     const now=Date.now();
+    if(powerOff()) { wsDownSince=scDownSince=null; return; } // switched off on purpose: nothing to report
     if(status.websocket!=='subscribed') { wsDownSince??=now; if(!wsAlerted && now-wsDownSince>120_000) { wsAlerted=true; say({title:`${tag}Helius connection DOWN`,body:`Websocket "${status.websocket}" for ${Math.round((now-wsDownSince)/60000)} min. Solscan backup still watching. Check your Helius key and plan.`,priority:4,tags:['warning']}); } }
     else { if(wsAlerted) say({title:`${tag}Helius connection back`,body:'Websocket subscribed again.',priority:2,tags:['white_check_mark']}); wsDownSince=null; wsAlerted=false; }
     if(status.solscan?.ok===false) { scDownSince??=now; if(!scAlerted && now-scDownSince>300_000) { scAlerted=true; say({title:`${tag}Solscan backup DOWN`,body:`${status.solscan.error||'no answer'} for 5+ min. Helius still watching; no gap detection meanwhile.`,priority:3,tags:['warning']}); } }
@@ -628,7 +666,7 @@ export async function startRuntime(k, {demo=false}={}) {
   },30_000);
   watchdog?.unref?.();
   const pruneTimer=setInterval(()=>engine.lock(()=>{if(engine.prune())engine.save();}).catch(()=>{}),600_000);
-  const balanceTimer=c.mode==='live'?setInterval(()=>k.getBalanceSol(k.kp.publicKey).then(b=>{status.balance=b;cachedBalance={sol:b,at:Date.now()};}).catch(e=>engine.event('error',{message:e.message})),10000):null;
+  const balanceTimer=c.mode==='live'?setInterval(()=>powerOff()?null:k.getBalanceSol(k.kp.publicKey).then(b=>{status.balance=b;cachedBalance={sol:b,at:Date.now()};}).catch(e=>engine.event('error',{message:e.message})),10000):null;
   let demonstration;
   if(demo) {
     status.websocket='synthetic demo (no chain connection)';
@@ -650,7 +688,7 @@ export async function startRuntime(k, {demo=false}={}) {
       if(token && !authorized()) {res.writeHead(401);return res.end('Unauthorized');}
       if(!token && c.mode==='live') {res.writeHead(403);return res.end('Token required');}
       if(url.pathname==='/api/status' && req.method==='GET') {
-        const snap={...engine.snapshot(),paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
+        const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
           wallet:{publicKey:c.wallet||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true}};
         res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean(snap)));
       }
@@ -660,6 +698,12 @@ export async function startRuntime(k, {demo=false}={}) {
       if(url.pathname==='/api/wallet' && req.method==='GET') {
         res.writeHead(200,{'Content-Type':'application/json'});
         return res.end(JSON.stringify(clean({publicKey:c.wallet||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true})));
+      }
+      // POWER: OFF = no Helius / Solscan use at all (dashboard stays up). ?force=1 turns off with coins held (LIVE).
+      if(req.method==='POST' && ['/api/power/on','/api/power/off'].includes(url.pathname)) {
+        const problem=setPower(url.pathname.endsWith('/on'),{force:url.searchParams.get('force')==='1'});
+        if(problem) { res.writeHead(409,{'Content-Type':'text/plain'}); return res.end(problem); }
+        res.writeHead(200); return res.end('OK');
       }
       if(req.method==='POST' && ['/api/pause','/api/resume'].includes(url.pathname)) {
         engine.pause(url.pathname==='/api/pause');res.writeHead(200);return res.end('OK');
@@ -690,5 +734,5 @@ export async function startRuntime(k, {demo=false}={}) {
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});
   engine.event('started',{mode:c.mode,dashboard:`http://${host}:${port}`,note:demo?'SYNTHETIC DEMO; no chain or wallet connection':'confirmed leader signals; paper estimates are not guaranteed fills'});
-  return {engine,server,study,latency:latencyOf,stop:()=>{stopped=true;if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,latency:latencyOf,setPower,stop:()=>{stopped=true;if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }
