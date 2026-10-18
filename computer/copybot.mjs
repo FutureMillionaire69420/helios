@@ -929,8 +929,10 @@ function decodeCurve(base64) {
   const vSol = r.u64();
   r.u64();
   r.u64();
-  r.u64();
-  return { vTok, vSol, complete: r.bool() };
+  const supply = r.u64();
+  const complete = r.bool();
+  // the coin's creator (the dev) follows `complete` in the current pump.fun layout
+  return { vTok, vSol, supply, complete, creator: buf.length >= 81 ? b58encode(buf.subarray(49, 81)) : null };
 }
 
 const poolFee = () => config.pumpFeePct / 100;
@@ -954,21 +956,39 @@ async function readCurve(mint) {
 
 /** Market cap in SOL from the bonding curve (1 billion tokens, 6 decimals). */
 function curveMcapSol(c) { return c && Number(c.vTok) > 0 ? (Number(c.vSol) / Number(c.vTok)) * 1e6 : null; }
-async function mcapUsdNow(mint) { const c = await readCurve(mint).catch(() => null); return c && !c.complete ? curveMcapSol(c) * solUsdNow() : null; }
 /** Every change of the coin's bonding curve, pushed over the websocket (null when no stream). */
 function watchCurve(mint, cb) { return stream ? stream.watchAccount(bondingCurvePda(mint), (b64, at) => { const c = decodeCurve(b64); if (c) cb(c, at); }) : null; }
 
-/** Holders of a pump.fun coin right now (Helius DAS), not counting the bonding curve itself. Counts up to
- *  `upTo` (1000 per request), which is all the holder rule needs. */
-async function holderCount(mint, upTo = 4000) {
-  const curve = bondingCurvePda(mint), owners = new Set();
-  for (let page = 1; page <= Math.ceil(upTo / 1000); page++) {
-    const r = await rpc('getTokenAccounts', { mint, limit: 1000, page }, 4000);
-    const list = r?.token_accounts || [];
-    for (const a of list) if (a.owner && a.owner !== curve && Number(a.amount) > 0) owners.add(a.owner);
-    if (list.length < 1000) break;
+/** Who holds a pump.fun coin right now, in DOLLARS at the current curve price (Helius DAS + the bonding
+ *  curve, read together): valueUsd = every wallet except the bonding curve and the DEV (the coin's creator:
+ *  `creator` from Decu's trade event when known, else the one stored in the curve account).
+ *  Reads up to `upTo` token accounts (1000 per request); past that, it is everything outside the curve
+ *  minus the dev. Null once the coin has left the curve (no curve price). */
+async function holderStats(mint, { creator = null, upTo = 4000 } = {}) {
+  const curvePk = bondingCurvePda(mint);
+  const pages = async () => {
+    const rows = [];
+    for (let page = 1; page <= Math.ceil(upTo / 1000); page++) {
+      const list = (await rpc('getTokenAccounts', { mint, limit: 1000, page }, 4000))?.token_accounts || [];
+      rows.push(...list);
+      if (list.length < 1000) return { rows, partial: false };
+    }
+    return { rows, partial: true };
+  };
+  const [c, { rows, partial }] = await Promise.all([readCurve(mint), pages()]);
+  if (!c || c.complete) return null;
+  const mcapUsd = curveMcapSol(c) * solUsdNow(), usdPerRaw = mcapUsd / 1e15; // 1 billion tokens, 6 decimals
+  const dev = creator || c.creator, owners = new Set();
+  let curveRaw = null, devRaw = 0, othersRaw = 0;
+  for (const a of rows) {
+    const amt = Number(a.amount) || 0;
+    if (a.owner === curvePk) { curveRaw = (curveRaw || 0) + amt; continue; }
+    if (!(amt > 0) || !a.owner) continue;
+    if (dev && a.owner === dev) devRaw += amt;
+    else { othersRaw += amt; owners.add(a.owner); }
   }
-  return owners.size;
+  if (partial && curveRaw != null) othersRaw = Math.max(0, (Number(c.supply) || 1e15) - curveRaw - devRaw);
+  return { holders: owners.size, mcapUsd, valueUsd: othersRaw * usdPerRaw, devUsd: devRaw * usdPerRaw, devPct: devRaw / 1e15, devKnown: !!dev, partial };
 }
 
 // ===== fees =====
@@ -2492,10 +2512,10 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
   const tokenLabel = solscan.enabled ? async (mint) => { const m = await solscan.tokenMeta(mint); return m?.symbol ? `$${m.symbol}` : null; } : null;
   stream = !demo && config.wsUrl && env('PUSH_STREAM', 'true') !== 'false' ? createStream({ url: config.wsUrl, log: (m) => console.error(redact(m)) }) : null;
   const stopSol = demo ? () => {} : startSolPriceRefresh(), stopFees = demo ? () => {} : startFeeRefresh();
-  const r = await startRuntime({config,kp,notify,solUsdNow,fees:currentFees,stream,watchCurve,curveSell,curveMcapSol,mcapUsdNow,holderCount,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  const r = await startRuntime({config,kp,notify,solUsdNow,fees:currentFees,stream,watchCurve,curveSell,curveMcapSol,holderStats,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();process.exit(0);});
   // The settings that decide speed and filtering, as the bot actually uses them (no keys).
-  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'report')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.003)} + ${num('TIP_MAX_SOL', 0.005)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · holder rule ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · paper land ${config.paperLandMs} ms`);
+  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'report')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.003)} + ${num('TIP_MAX_SOL', 0.005)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · paper land ${config.paperLandMs} ms`);
 }
 
 /** Backtest one day of the leader's trades with an imaginary wallet. */
@@ -2811,6 +2831,6 @@ async function main(argv = process.argv) {
 
 // ===== entry =====
 const setStream = (s) => (stream = s); // tests
-export {refreshFees,currentFees,solUsdNow,confirm,holderCount,setStream};
+export {refreshFees,currentFees,solUsdNow,confirm,holderStats,setStream};
 export {config,setFetch,rpc,relevantLogs,venueOf,quoteSell,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,findProgramAddress,associatedTokenAddress as ata,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);

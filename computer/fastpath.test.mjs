@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {startRuntime} from './runtime.mjs';
-import {config, detectBuy, detectSell, leaderPumpBuys, leaderPumpSells} from './copybot.mjs';
+import {config, detectBuy, detectSell, leaderPumpBuys, leaderPumpSells, b58encode} from './copybot.mjs';
+import {buyContextFromLogs} from './pumpbuild.mjs';
 
 // Real websocket logs of Decu's trades on 2026-10-11 (coin siBF3b…): a 0.2475 SOL buy and his full sell.
 const fx = JSON.parse(fs.readFileSync(new URL('./fixtures/leader-ws-logs.json', import.meta.url), 'utf8'));
@@ -269,4 +270,18 @@ test('max fees: paper P&L pays the live fee of that moment; detection counted in
   const L = r.latency(MINT);
   assert.equal(L.detectBlocks, 5, 'seen in block 105, his trade in block 100');
   assert.equal(L.blocksAfter, 5, 'landing block from the pushed slot');
+});
+
+test("holder rule: the dev is taken from Decu's own trade event (written by pump.fun), even in paper", async (t) => {
+  const asked = [];
+  const holderStats = async (mint, o) => { asked.push({mint, creator: o?.creator}); return {holders: 40, mcapUsd: 9000, valueUsd: 2500, devPct: 0.05, devKnown: true}; };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-holder-')); t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const {r, ws} = await bot(t, {STUDY: 'true', STUDY_FILE: path.join(dir, 'study.jsonl'), STUDY_WINDOW_SEC: '1'}, async () => 0.11, {holderStats, b58encode});
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  await sleep(1500);
+  const dev = buyContextFromLogs(fx.buy.logs, config.leader, b58encode).creator;
+  assert.ok(dev && asked.length >= 1, 'sampled');
+  assert.equal(asked[0].mint, MINT); assert.equal(asked[0].creator, dev);
+  const rec = r.study.records.at(-1);
+  assert.equal(rec.holderVerdict.safe, true); assert.equal(rec.holderVerdict.heldUsd, 2500);
 });

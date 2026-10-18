@@ -6,7 +6,7 @@ import path from 'node:path';
 import {createStream} from './stream.mjs';
 import {holderVerdict, exitSim} from './learn.mjs';
 import {createStudy, research, latencyLine, toCsv} from './study.mjs';
-import {setFetch, setStream, refreshFees, currentFees, solUsdNow, confirm, holderCount} from './copybot.mjs';
+import {setFetch, setStream, refreshFees, currentFees, solUsdNow, confirm, holderStats, findProgramAddress, b58decode, b58encode, PROGRAMS} from './copybot.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tmp = (t) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-speed-')); t.after(() => fs.rmSync(d, {recursive: true, force: true})); return path.join(d, 'study.jsonl'); };
@@ -72,16 +72,16 @@ test('push stream: a silent (stalled) socket is not trusted and is replaced', as
   await Promise.all([late, sleep(20)]);
 });
 
-test('holder rule: 10k needs 1000 holders, 20k needs 2500, 30k needs 4000', () => {
-  assert.deepEqual(holderVerdict(500, 8000), {holders: 500, mcapUsd: 8000, required: 0, ceilingUsd: 10000, safe: true});
-  assert.equal(holderVerdict(900, 12000).safe, false, 'above $10k with under 1000 holders: RISKY');
+test('holder money rule: holders (dev excluded) need $1000 at a $10k mcap, $2500 at $20k, $4000 at $30k', () => {
+  assert.deepEqual(holderVerdict(500, 8000), {heldUsd: 500, mcapUsd: 8000, required: 0, ceilingUsd: 10000, safe: true});
+  assert.equal(holderVerdict(900, 12000).safe, false, 'above $10k with under $1000 held: RISKY');
   assert.equal(holderVerdict(1200, 12000).safe, true);
-  assert.equal(holderVerdict(1200, 12000).ceilingUsd, 20000, '1200 holders support up to $20k');
+  assert.equal(holderVerdict(1200, 12000).ceilingUsd, 20000, '$1200 supports up to a $20k mcap');
   assert.equal(holderVerdict(2400, 21000).safe, false);
   assert.equal(holderVerdict(3000, 25000).safe, true);
   assert.equal(holderVerdict(3000, 31000).required, 4000);
   assert.equal(holderVerdict(5000, 90000).ceilingUsd, null);
-  assert.equal(holderVerdict(null, 9000), null, 'no count: no verdict (never a guess)');
+  assert.equal(holderVerdict(null, 9000), null, 'no data: no verdict (never a guess)');
   assert.equal(holderVerdict(500, 15000, [[20000, 600]]).safe, true, 'custom HOLDER_RULES');
 });
 
@@ -91,25 +91,26 @@ test('test c: -20% on your money sells where the organic stop does not yet; test
   assert.equal(money.how, 'stop on your money'); assert.equal(money.sec, 3); assert.equal(money.pnl, -0.3, 'decided at 3 s, filled at 4 s');
   assert.equal(organic.how, 'stop'); assert.equal(organic.sec, 4, 'organic -20% counts from -9% at entry');
   const rise = [-0.05, 0.05, 0.15, 0.3, 0.3, 0.3];
-  const path = [{s: 0, holders: 800, mcapUsd: 9000}];
+  const path = [{s: 0, holders: 300, mcapUsd: 9000, valueUsd: 800}];
   const d = exitSim({curve: rise, holderPath: path}, {holders: true});
-  assert.equal(d.how, 'holders behind mcap'); assert.equal(d.sec, 2, 'mcap passes $10k at 2 s with only 800 holders');
-  assert.equal(exitSim({curve: rise, holderPath: [{s: 0, holders: 1500, mcapUsd: 9000}]}, {holders: true}).how, 'holding at 15 s');
+  assert.equal(d.how, 'holder money behind mcap'); assert.equal(d.sec, 2, 'mcap passes $10k at 2 s with holder money ~$970 (< $1000)');
+  assert.equal(exitSim({curve: rise, holderPath: [{s: 0, holders: 300, mcapUsd: 9000, valueUsd: 4000}]}, {holders: true}).how, 'holding at 15 s');
   assert.equal(exitSim({curve: rise}, {holders: true}), null, 'no holder counts: left out, not zero');
 });
 
 test('alerts: price-vs-price premium, 10% / 15% (trading) / 25% labels, holders line, skipped buys alerted only inside 25%', async (t) => {
   const alerts = [];
   const s = createStudy({file: tmp(t), quoteSell: async () => 0.1, notify: (a) => alerts.push(a), stepMs: 1, feeSol: () => 0.008, slip: 0, reportPcts: [10, 25], notesOpts: {maxPayPct: 15}, skippedAlerts: 'report',
-    sampleHolders: async () => ({holders: 900, mcapUsd: 12000})});
+    sampleHolders: async () => ({holders: 412, mcapUsd: 12000, valueUsd: 900, devPct: 0.3, devKnown: true})});
   const his = {sol: 1, raw: 10000, time: Date.now() / 1000 - 1};
   const rec = await s.start({mint: 'Lbl1', cost: 0.108, raw: '900', his, entryPrice: 1.12e-4, fill: {buyFeeSol: 0.008, actualFill: false}});
   assert.ok(Math.abs(rec.entryGap - 0.12) < 1e-9, 'price vs price'); assert.equal(rec.premiumDef, 'price');
   assert.ok(rec.costPremium > rec.entryGap, 'the cost basis includes the fees');
   assert.match(alerts[0].body, /Filters: 10% SKIP · 15% \(trading\) TAKE · 25% TAKE/);
   assert.match(alerts[0].body, /entry premium \+12\.0% \(price vs price\) · fees -0\.0160 SOL \(16\.0% of the trade, buy\+sell\)/);
-  assert.match(alerts[0].body, /Holders: 900 · mcap \$12,000 → RISKY \(holders support up to \$10k\)/);
-  assert.match(alerts[0].body, /Test c, stop -20% on your money/); assert.match(alerts[0].body, /Test d, holder momentum: holders behind mcap at 0s/);
+  assert.match(alerts[0].body, /Holders \(dev excluded\) hold \$900 in 412 wallets · dev holds 30\.0% · mcap \$12,000 → RISKY \(needs \$1,000 at this mcap\)/);
+  assert.match(alerts[0].body, /Holder money \(dev excluded\) \$900 is behind this \$12,000 mcap \(needs \$1,000\): RISKY; the dev holds 30% of the coin/);
+  assert.match(alerts[0].body, /Test c, stop -20% on your money/); assert.match(alerts[0].body, /Test d, holder momentum: holder money behind mcap at 0s/);
   assert.equal(rec.holderVerdict.safe, false);
   const n = alerts.length;
   await s.start({mint: 'Skip20', cost: 0.1, raw: '800', his, entryPrice: 1.2e-4, shadow: 'entry premium 20% above Decu'});
@@ -122,8 +123,8 @@ test('alerts: price-vs-price premium, 10% / 15% (trading) / 25% labels, holders 
   assert.equal(R.holders.risky.trades, 3);
   assert.equal(R.exitTests[1].name, 'holder momentum'); assert.equal(R.exitTests[1].trades, 3);
   const csv = toCsv(s.records).split('\n');
-  assert.match(csv[0], /premium_basis,cost_premium_pct,buy_fee_sol,sell_fee_sol,holder_rule,holders_needed,test_c_stop_on_money_pct/);
-  assert.match(csv[1], /,price,/); assert.match(csv[1], /,RISKY,1000,/);
+  assert.match(csv[0], /premium_basis,cost_premium_pct,buy_fee_sol,sell_fee_sol,holder_rule,holder_money_usd,holder_money_needed_usd,dev_pct,test_c_stop_on_money_pct/);
+  assert.match(csv[1], /,price,/); assert.match(csv[1], /,RISKY,900,1000,30\.00,/);
 });
 
 test('latency line shows detection in exact blocks', () => {
@@ -157,10 +158,19 @@ test('SOL price never blocks a buy; confirmation comes from the push when it is 
   assert.deepEqual(r, {ok: true}); assert.ok(Date.now() - t1 < 400, 'push answered before a second poll');
 });
 
-test('holder count: unique owners with a balance, not counting the bonding curve, paged', async (t) => {
+test('holder money: every wallet except the bonding curve and the dev, in dollars at the curve price', async (t) => {
   t.after(() => setFetch(null));
-  const page1 = Array.from({length: 1000}, (_, i) => ({owner: 'O' + (i % 990), amount: i === 5 ? '0' : '10'}));
-  const page2 = [{owner: 'Z1', amount: '5'}, {owner: 'O1', amount: '7'}];
-  setFetch(async (_u, init) => { const b = JSON.parse(init.body); return {ok: true, json: async () => ({result: {token_accounts: b.params.page === 1 ? page1 : page2}})}; });
-  assert.equal(await holderCount('siBF3bcDKAH9so6zFSRLVer6ua3sFJ8m279aF2cpump'), 991);
+  const MINT = 'siBF3bcDKAH9so6zFSRLVer6ua3sFJ8m279aF2cpump', DEV = b58encode(Buffer.alloc(32, 5));
+  const curvePk = findProgramAddress([Buffer.from('bonding-curve'), Buffer.from(b58decode(MINT))], PROGRAMS.PUMP)[0];
+  // pump.fun bonding curve account: 8-byte tag, 5 u64 (vTok, vSol, realTok, realSol, supply), complete, creator
+  const buf = Buffer.alloc(81); buf.writeBigUInt64LE(600_000_000_000_000n, 8); buf.writeBigUInt64LE(45_000_000_000n, 16); buf.writeBigUInt64LE(10n ** 15n, 40); Buffer.from(b58decode(DEV)).copy(buf, 49);
+  const rows = [{owner: curvePk, amount: 7e14}, {owner: DEV, amount: 1e14}, {owner: 'A1', amount: 5e13}, {owner: 'B1', amount: 2.5e13}, {owner: 'A1', amount: 2.5e13}, {owner: 'C1', amount: 0}];
+  setFetch(async (_u, init) => { const b = init?.body ? JSON.parse(init.body) : {};
+    const result = b.method === 'getAccountInfo' ? {value: {data: [buf.toString('base64'), 'base64']}} : b.method === 'getTokenAccounts' ? {token_accounts: rows} : null;
+    return {ok: true, json: async () => (result ? {result} : {})}; });
+  const P = solUsdNow(), h = await holderStats(MINT);
+  assert.equal(h.holders, 2, 'A1 (two accounts) and B1; not the curve, the dev or an empty account');
+  assert.ok(Math.abs(h.mcapUsd - 75 * P) < 1e-6, '75 SOL market cap');
+  assert.ok(Math.abs(h.valueUsd - 7.5 * P) < 1e-6, '10% of the coin held by others = 7.5 SOL');
+  assert.equal(h.devPct, 0.1); assert.equal(h.devKnown, true);
 });

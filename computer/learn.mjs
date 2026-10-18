@@ -35,7 +35,7 @@ export const DIMENSIONS = {
   'holders': { kind: 'pre', f: (r) => r.coin?.holders == null ? null : r.coin.holders < 50 ? '<50' : r.coin.holders < 200 ? '50-200' : '200+' },
   'Decu activity': { kind: 'pre', f: (r) => r.ctx?.recent10m == null ? null : r.ctx.recent10m === 0 ? 'first in 10 min' : r.ctx.recent10m < 4 ? '2-4 in 10 min' : '5+ in 10 min (hot)' },
   'hour (UTC)': { kind: 'pre', pairs: false, f: (r) => (r.time ? `${String(new Date(r.time).getUTCHours()).padStart(2, '0')}h` : null) },
-  'holder rule': { kind: 'early', f: (r) => (r.holderVerdict ? (r.holderVerdict.safe ? 'SAFE' : 'RISKY') : null) },
+  'holder rule': { kind: 'early', f: (r) => (r.holderVerdict?.heldUsd != null ? (r.holderVerdict.safe ? 'SAFE' : 'RISKY') : null) },
   'first second': { kind: 'early', f: (r) => { const c = r.curve || []; if (c[0] == null || c[1] == null) return null; const d = c[1] - c[0]; return d < -0.03 ? 'falling' : d > 0.03 ? 'rising' : 'flat'; } },
   'Decu sold': { kind: 'post', f: (r) => !Array.isArray(r.curve) ? null : r.hisSoldAtSec == null ? 'held past 15s' : r.hisSoldAtSec + Math.max(0, r.delaySec ?? 0) < 5 ? 'within 5s of his buy' : 'within 15s of his buy' },
   'shape': { kind: 'post', f: (r) => r.shape || null },
@@ -109,24 +109,26 @@ export function readiness(records, opts = {}) {
 }
 
 // ---------- your holder rule ----------
-// A market cap needs enough holders to hold up: at/above $10k mcap at least 1000 holders, $20k 2500,
-// $30k 4000 (HOLDER_RULES). Fewer = RISKY for that market cap ("it can't go above it"), else SAFE.
+// A market cap needs enough money in the holders' hands to hold up: the coins held by every wallet except
+// the dev must be worth at least $1000 at a $10k market cap, $2500 at $20k, $4000 at $30k (HOLDER_RULES).
+// Less = RISKY for that market cap ("it can't go above it"), else SAFE.
 export const HOLDER_RULES = [[10000, 1000], [20000, 2500], [30000, 4000]];
-export function holderVerdict(holders, mcapUsd, rules = HOLDER_RULES) {
-  if (!Number.isFinite(holders) || !Number.isFinite(mcapUsd) || !rules?.length) return null;
+export function holderVerdict(heldUsd, mcapUsd, rules = HOLDER_RULES) {
+  if (!Number.isFinite(heldUsd) || !Number.isFinite(mcapUsd) || !rules?.length) return null;
   const required = rules.filter(([m]) => mcapUsd >= m).reduce((a, [, h]) => Math.max(a, h), 0);
-  const next = rules.find(([, h]) => holders < h); // the first market cap this many holders can't support
-  return { holders, mcapUsd, required, ceilingUsd: next ? next[0] : null, safe: holders >= required };
+  const next = rules.find(([, h]) => heldUsd < h); // the first market cap this much holder money can't support
+  return { heldUsd, mcapUsd, required, ceilingUsd: next ? next[0] : null, safe: heldUsd >= required };
 }
-/** Market cap at second s, from the nearest earlier holder sample and the price path (mcap moves with price). */
+const heldSample = (x) => Number.isFinite(x.valueUsd) && Number.isFinite(x.mcapUsd);
+/** Holder money and market cap at second s: the nearest earlier sample, moved with the price path since
+ *  (both are the same coins at the current price, so both move with it until the next sample). */
 function holderStateAt(rec, s) {
-  const path = (rec.holderPath || []).filter((x) => x.s <= s && Number.isFinite(x.holders) && Number.isFinite(x.mcapUsd));
+  const path = (rec.holderPath || []).filter((x) => x.s <= s && heldSample(x));
   if (!path.length) return null;
   const h = path.at(-1), c = rec.curve || [];
   const at = (k) => { for (let i = Math.min(k, c.length - 1); i >= 0; i--) if (c[i] != null) return c[i]; return null; };
-  const vs = at(s), vh = at(h.s);
-  const mcap = vs != null && vh != null ? h.mcapUsd * (1 + vs) / (1 + vh) : h.mcapUsd;
-  return { holders: h.holders, mcapUsd: mcap };
+  const vs = at(s), vh = at(h.s), f = vs != null && vh != null ? (1 + vs) / (1 + vh) : 1;
+  return { heldUsd: h.valueUsd * f, mcapUsd: h.mcapUsd * f };
 }
 
 /**
@@ -135,14 +137,14 @@ function holderStateAt(rec, s) {
  * strat: {} = your rules · {fixed:N} sell at N s · {trail:X} trailing stop X below the peak ·
  * {half:true} sell half at +gain gate, the rest by your rules. All keep his sell and the organic stop.
  * {costStop:0.2} your rules, but the stop is -20% on your MONEY (vs cost, fees included) instead of organic.
- * {holders:true} your rules PLUS your holder rule: sell the moment the market cap outgrows its holders.
- *   Needs holder samples (newer trades); returns null without them (counted as incomplete, never as 0).
+ * {holders:true} your rules PLUS your holder rule: sell the moment the market cap outgrows the money its
+ *   holders (dev excluded) hold. Needs holder samples (newer trades); null without them (incomplete, never 0).
  */
 export function exitSim(rec, strat = {}, { stopLossPct = 20, gainGatePct = 15, gateSec = 15, lagSec = 1, holderRules = HOLDER_RULES } = {}) {
   const c = rec.curve || [];
   const base = firstKnown(c);
   if (base == null) return null;
-  if (strat.holders && !(rec.holderPath || []).some((x) => Number.isFinite(x.holders) && Number.isFinite(x.mcapUsd))) return null;
+  if (strat.holders && !(rec.holderPath || []).some(heldSample)) return null;
   const fillAt = (s) => { for (let k = Math.min(c.length - 1, s + lagSec); k >= 0; k--) if (c[k] != null) return c[k]; return null; };
   const stop = stopLossPct / 100, gate = gainGatePct / 100;
   const gateAt = Math.max(0, Math.ceil(gateSec - Math.max(0, rec.delaySec ?? 0) - 1e-9));
@@ -158,7 +160,7 @@ export function exitSim(rec, strat = {}, { stopLossPct = 20, gainGatePct = 15, g
     if (strat.trail != null && s > 0 && (1 + v) / (1 + peak) - 1 <= -strat.trail) return fin(fillAt(s), 'trailing stop');
     if (strat.costStop != null) { if (v <= -strat.costStop) return fin(fillAt(s), 'stop on your money'); }
     else if (stop > 0 && (1 + v) / (1 + base) - 1 <= -stop) return fin(fillAt(s), 'stop');
-    if (strat.holders) { const st = holderStateAt(rec, s), hv = st && holderVerdict(st.holders, st.mcapUsd, holderRules); if (hv && !hv.safe) return fin(fillAt(s), 'holders behind mcap'); }
+    if (strat.holders) { const st = holderStateAt(rec, s), hv = st && holderVerdict(st.heldUsd, st.mcapUsd, holderRules); if (hv && !hv.safe) return fin(fillAt(s), 'holder money behind mcap'); }
     if (strat.half && half == null && v >= gate) half = fillAt(s);
     if (strat.fixed == null && strat.trail == null && !decided && s >= gateAt) { decided = true; if (peak >= gate) return fin(fillAt(s), 'gain gate'); }
   }
@@ -307,9 +309,9 @@ export function createBrain({ buySol = 0.1, stopLossPct = 20, gainGatePct = 15, 
   function filterLines(list) {
     const rs = list.filter((r) => Number.isFinite(r.fcat));
     const out = pcts.map((p) => { const k = rs.filter((r) => Number.isFinite(r.entryGap) && r.entryGap <= p / 100 + 1e-9); return `${p}%${p === maxPayPct ? ' (trading)' : ''}: ${k.length} trades ${sol(k.reduce((a, r) => a + r.fcat * buySol, 0))} SOL, ${k.filter((r) => r.fcat > 0).length} won`; });
-    const hv = rs.filter((r) => r.holderVerdict), safe = hv.filter((r) => r.holderVerdict.safe), risky = hv.filter((r) => !r.holderVerdict.safe);
+    const hv = rs.filter((r) => r.holderVerdict?.heldUsd != null), safe = hv.filter((r) => r.holderVerdict.safe), risky = hv.filter((r) => !r.holderVerdict.safe);
     return [out.length ? `Filters: ${out.join(' · ')}` : null,
-      hv.length ? `Holder rule at buy: SAFE ${safe.length} trades ${sol(safe.reduce((a, r) => a + r.fcat * buySol, 0))} SOL · RISKY ${risky.length} trades ${sol(risky.reduce((a, r) => a + r.fcat * buySol, 0))} SOL` : null].filter(Boolean);
+      hv.length ? `Holder money rule at buy (dev excluded): SAFE ${safe.length} trades ${sol(safe.reduce((a, r) => a + r.fcat * buySol, 0))} SOL · RISKY ${risky.length} trades ${sol(risky.reduce((a, r) => a + r.fcat * buySol, 0))} SOL` : null].filter(Boolean);
   }
 
   function adviceLines(records) {

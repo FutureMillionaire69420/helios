@@ -108,13 +108,13 @@ Decu's Raydium LaunchLab / bonk.fun coins are ignored completely: no copy, no st
 **Two words used everywhere:**
 - **Execution latency**: seconds from Decu's buy to the bot's buy. The alert's *Latency:* line splits it into steps (seen, decode, decide, build, send, land) and shows the part that is only SIMULATED in paper (1 s).
 - **Entry premium**: how much more per token the bot paid than Decu, **price vs price** (fees are shown separately on the same line). The bot skips buys over **15%** (the entry-premium filter), in paper and live. If it can't get Decu's price or the current price, it does **not** buy. Every alert also shows what a **10%** and a **25%** limit would have done: `Filters: 10% SKIP · 15% (trading) TAKE · 25% TAKE`.
-- **Holders**: every alert has a line like `Holders: 900 · mcap $12,000 → RISKY`. Your rule: above $10k market cap needs 1,000 holders, above $20k needs 2,500, above $30k needs 4,000. It only reports; it never changes a trade.
+- **Holder money**: every alert has a line like `Holders (dev excluded) hold $900 in 412 wallets · dev holds 30.0% · mcap $12,000 → RISKY (needs $1,000 at this mcap)`. Your rule: the coins held by every wallet except the dev must be worth at least **$1,000 at a $10k market cap, $2,500 at $20k, $4,000 at $30k**. It only reports; it never changes a trade.
 
 A Decu buy the bot did not take (filtered, 2 coins already open, daily cap, paused) is still studied and shown on the dashboard, so the research never hides the trades it missed. You get a phone alert for a skipped buy only when it was inside 25% (`SKIPPED_ALERTS=report`; `true` = all, `false` = none).
 
 **Speed:** fees are set to the top of the market for every buy and sell (`FEE_MODE=max`: up to 0.003 SOL priority + 0.005 SOL tip per side). The current block, "your transaction confirmed" and every price change of a held coin are **pushed** to the bot over the websocket, so it never waits for the next check.
 
-**Paper tests of other exits** (on every trade, nothing changes for real): **c** = a -20% stop counted on your money, **d** = sell when holders fall behind the market cap. Notes and the dashboard compare each with your real rules on the same trades. The real stop-loss **always** sells.
+**Paper tests of other exits** (on every trade, nothing changes for real): **c** = a -20% stop counted on your money, **d** = sell when the holders' money (dev excluded) falls behind the market cap. Notes and the dashboard compare each with your real rules on the same trades. The real stop-loss **always** sells.
 
 **Limits:** at most **2 coins** open at once, at most **$600** of buys a day, no daily loss limit. New buys stop by themselves (sells never stop) if 3 buys fail in a row (10 min) or Helius stops sending data.
 

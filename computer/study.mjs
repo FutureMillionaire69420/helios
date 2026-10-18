@@ -95,6 +95,13 @@ export function summarize(records, { buySol = 0.1, filterPct = 60 } = {}) {
 }
 
 /** One line: where the execution latency went (see runtime.mjs pipe). */
+const usd = (x) => `$${Math.round(x).toLocaleString('en-US')}`;
+/** "Holders (dev excluded) hold $3,900 in 412 wallets · dev 12% · mcap $10,500 → SAFE (enough up to $30k)" */
+export function holderLine(hv) {
+  if (!hv) return null;
+  const dev = hv.devKnown === false ? ' · dev unknown' : hv.devPct != null ? ` · dev holds ${(hv.devPct * 100).toFixed(1)}%` : '';
+  return `Holders (dev excluded) hold ${usd(hv.heldUsd)}${hv.holders != null ? ` in ${hv.holders} wallets` : ''}${dev} · mcap ${usd(hv.mcapUsd)} → ${hv.safe ? 'SAFE' : 'RISKY'}${hv.safe ? (hv.ceilingUsd ? ` (enough up to a ${usd(hv.ceilingUsd)} mcap)` : ' (enough for every market cap in your rule)') : ` (needs ${usd(hv.required)} at this mcap)`}`;
+}
 export function latencyLine(L) {
   if (!L) return null;
   const ms = (x) => (x == null ? '—' : x >= 1000 ? `${(x / 1000).toFixed(2)} s` : `${x} ms`);
@@ -122,7 +129,7 @@ export function research(records, { buySol = 0.1, filterPct = 60, reportPcts = [
     filter: { pct: filterPct, trades: fl.length, fcatSol: fl.reduce((a, r) => a + r.fcat * buySol, 0) },
     // Same trades, three premium limits side by side (only trades with a known premium count).
     filters: [...new Set([...reportPcts, filterPct])].sort((a, b) => a - b).map((p) => { const k = rs.filter((r) => Number.isFinite(r.entryGap) && r.entryGap <= p / 100 + 1e-9); return { pct: p, trading: p === filterPct, trades: k.length, wins: k.filter((r) => r.fcat > 0).length, fcatSol: k.reduce((a, r) => a + r.fcat * buySol, 0) }; }),
-    holders: (() => { const g = (safe) => { const k = rs.filter((r) => r.holderVerdict && r.holderVerdict.safe === safe); return { trades: k.length, wins: k.filter((r) => r.fcat > 0).length, fcatSol: k.reduce((a, r) => a + r.fcat * buySol, 0) }; }; return { safe: g(true), risky: g(false), unknown: rs.filter((r) => !r.holderVerdict).length }; })(),
+    holders: (() => { const g = (safe) => { const k = rs.filter((r) => r.holderVerdict?.heldUsd != null && r.holderVerdict.safe === safe); return { trades: k.length, wins: k.filter((r) => r.fcat > 0).length, fcatSol: k.reduce((a, r) => a + r.fcat * buySol, 0) }; }; return { safe: g(true), risky: g(false), unknown: rs.filter((r) => r.holderVerdict?.heldUsd == null).length }; })(),
     // Paper tests c and d vs your rules, on the SAME trades (a trade without data for a test is left out of both).
     exitTests: ['costStop', 'holders'].map((k) => { const both = rs.filter((r) => r.exitAlt?.[k] && r.ruleSim && Number.isFinite(r.exitAlt[k].pnl) && Number.isFinite(r.ruleSim.pnl)); const sum = (f) => both.reduce((a, r) => a + f(r) * buySol, 0);
       return { name: k === 'costStop' ? 'stop -20% on your money' : 'holder momentum', trades: both.length, pnlSol: sum((r) => r.exitAlt[k].pnl), yoursSol: sum((r) => r.ruleSim.pnl), incomplete: rs.filter((r) => r.exitAlt?.[k] == null).length }; }),
@@ -133,13 +140,13 @@ export function research(records, { buySol = 0.1, filterPct = 60, reportPcts = [
 
 /** Every studied trade as CSV (one row per Decu buy, bought or skipped), for a spreadsheet. */
 export function toCsv(records) {
-  const cols = ['time_utc', 'coin', 'mint', 'bought', 'skip_reason', 'decu_sol', 'decu_usd', 'execution_latency_s', 'blocks_after_decu', 'entry_premium_pct', 'fcat_pct', 'fcat_exit', 'cat3_pct', 'cat5_pct', 'cat10_pct', 'btsab_s', 'peak_pct', 'worst_pct', 'pcat_pct', 'your_rules_pct', 'your_rules_exit', 'shape', 'predicted_pct', 'holders', 'mcap_usd', 'coin_age_min', 'detect_blocks', 'premium_basis', 'cost_premium_pct', 'buy_fee_sol', 'sell_fee_sol', 'holder_rule', 'holders_needed', 'test_c_stop_on_money_pct', 'test_c_exit', 'test_d_holder_momentum_pct', 'test_d_exit', ...Array.from({ length: 16 }, (_, s) => `s${s}_pct`)];
+  const cols = ['time_utc', 'coin', 'mint', 'bought', 'skip_reason', 'decu_sol', 'decu_usd', 'execution_latency_s', 'blocks_after_decu', 'entry_premium_pct', 'fcat_pct', 'fcat_exit', 'cat3_pct', 'cat5_pct', 'cat10_pct', 'btsab_s', 'peak_pct', 'worst_pct', 'pcat_pct', 'your_rules_pct', 'your_rules_exit', 'shape', 'predicted_pct', 'holders', 'mcap_usd', 'coin_age_min', 'detect_blocks', 'premium_basis', 'cost_premium_pct', 'buy_fee_sol', 'sell_fee_sol', 'holder_rule', 'holder_money_usd', 'holder_money_needed_usd', 'dev_pct', 'test_c_stop_on_money_pct', 'test_c_exit', 'test_d_holder_momentum_pct', 'test_d_exit', ...Array.from({ length: 16 }, (_, s) => `s${s}_pct`)];
   const p = (x) => (x == null || !Number.isFinite(x) ? '' : (x * 100).toFixed(2));
   const q = (v) => { const t = v == null ? '' : String(v); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
   const ex = (x) => (x == null ? '' : x.open ? 'holding at 15 s' : `${x.how} at ${x.sec}s`);
   const rows = records.map((r) => [r.time, r.symbol || '', r.mint, r.taken === false ? 'no' : 'yes', r.skipReason || '', r.hisSol ?? '', r.hisUsd != null ? Math.round(r.hisUsd) : '', r.delaySec ?? '', r.latency?.blocksAfter ?? '', p(r.entryGap), p(r.fcat), r.fcatExit || '',
     p(r.curve?.[3]), p(r.curve?.[5]), p(r.curve?.[10]), r.btsab ?? '', p(r.peak), p(r.worst), p(r.pcat), p(r.ruleSim?.pnl), r.ruleSim ? (r.ruleSim.open ? 'holding at 15 s' : `${r.ruleSim.how} at ${r.ruleSim.sec}s`) : '', r.shape || '', p(r.prediction?.fcat), r.coin?.holders ?? '', r.coin?.marketCapUsd != null ? Math.round(r.coin.marketCapUsd) : '', r.coin?.ageSec != null ? Math.round(r.coin.ageSec / 60) : '',
-    r.latency?.detectBlocks ?? '', r.premiumDef || 'cost', p(r.costPremium), r.buyFeeSol ?? '', r.sellFeeSol ?? '', r.holderVerdict ? (r.holderVerdict.safe ? 'SAFE' : 'RISKY') : '', r.holderVerdict?.required ?? '',
+    r.latency?.detectBlocks ?? '', r.premiumDef || 'cost', p(r.costPremium), r.buyFeeSol ?? '', r.sellFeeSol ?? '', r.holderVerdict?.heldUsd != null ? (r.holderVerdict.safe ? 'SAFE' : 'RISKY') : '', r.holderVerdict?.heldUsd != null ? Math.round(r.holderVerdict.heldUsd) : '', r.holderVerdict?.heldUsd != null ? r.holderVerdict.required : '', p(r.holderVerdict?.devPct),
     p(r.exitAlt?.costStop?.pnl), ex(r.exitAlt?.costStop), p(r.exitAlt?.holders?.pnl), ex(r.exitAlt?.holders),
     ...Array.from({ length: 16 }, (_, s) => p(r.curve?.[s]))].map(q).join(','));
   return [cols.join(','), ...rows].join('\n') + '\n';
@@ -181,9 +188,9 @@ export function tradeNotes(rec, records, { stopLossPct = 20, gainGatePct = 15, m
   const rs = rec.ruleSim, alt = (x) => (x == null ? null : x.open ? `still holding at 15 s (${pct(x.pnl)})` : `${x.how} at ${x.sec}s → ${pct(x.pnl)}`);
   const vs = (x) => (x && rs && Number.isFinite(x.pnl) && Number.isFinite(rs.pnl) ? ` (${x.pnl >= rs.pnl ? '+' : ''}${((x.pnl - rs.pnl) * 100).toFixed(1)} pts vs your rules)` : '');
   if (rec.exitAlt?.costStop) n.push(`Test c, stop -20% on your money: ${alt(rec.exitAlt.costStop)}${vs(rec.exitAlt.costStop)}.`);
-  if (rec.exitAlt) n.push(rec.exitAlt.holders ? `Test d, holder momentum: ${alt(rec.exitAlt.holders)}${vs(rec.exitAlt.holders)}.` : 'Test d, holder momentum: no holder counts for this coin (left out, not counted as zero).');
+  if (rec.exitAlt) n.push(rec.exitAlt.holders ? `Test d, holder momentum: ${alt(rec.exitAlt.holders)}${vs(rec.exitAlt.holders)}.` : 'Test d, holder momentum: no holder data for this coin (left out, not counted as zero).');
   const hv = rec.holderVerdict;
-  if (hv) n.push(hv.safe ? `Holders ${hv.holders} support this mcap ($${Math.round(hv.mcapUsd).toLocaleString('en-US')})${hv.ceilingUsd ? `; above $${hv.ceilingUsd / 1000}k it needs more` : ''}: SAFE.` : `Holders ${hv.holders} are behind this mcap ($${Math.round(hv.mcapUsd).toLocaleString('en-US')} needs ${hv.required}): RISKY.`);
+  if (hv?.heldUsd != null) n.push(hv.safe ? `Holder money (dev excluded) ${usd(hv.heldUsd)} supports this ${usd(hv.mcapUsd)} mcap${hv.ceilingUsd ? `; a ${usd(hv.ceilingUsd)} mcap needs more` : ''}: SAFE.` : `Holder money (dev excluded) ${usd(hv.heldUsd)} is behind this ${usd(hv.mcapUsd)} mcap (needs ${usd(hv.required)}): RISKY${hv.devPct > 0.2 ? `; the dev holds ${(hv.devPct * 100).toFixed(0)}% of the coin` : ''}.`);
   const size = BUCKETS['Decu buy size'](rec);
   if (size) { const g = memoryBank(records).find((x) => x.dimension === 'Decu buy size' && x.bucket === size); if (g && g.trades >= 3) n.push(`Memory: Decu buys of ${size} → ${g.wins}/${g.trades} won, avg FCAT ${pct(g.avgFcat)}.`); }
   return n;
@@ -276,8 +283,10 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
       coin: m ? { holders: m.holders ?? null, marketCapUsd: m.marketCapUsd ?? null, ageSec: m.createdTime ? Math.round(st.startedAt / 1000 - m.createdTime) : null } : null,
     };
     enrich(rec, records);
-    const h0 = rec.holderPath?.find((x) => Number.isFinite(x.holders) && Number.isFinite(x.mcapUsd));
-    rec.holderVerdict = h0 ? holderVerdict(h0.holders, h0.mcapUsd, holderRule) : null;
+    // your holder rule at the buy: the first sample (holder money = every wallet except the dev and the curve)
+    const h0 = rec.holderPath?.find((x) => Number.isFinite(x.valueUsd) && Number.isFinite(x.mcapUsd));
+    const v0 = h0 && holderVerdict(h0.valueUsd, h0.mcapUsd, holderRule);
+    rec.holderVerdict = v0 ? { ...v0, holders: h0.holders ?? null, devPct: h0.devPct ?? null, devKnown: h0.devKnown ?? null } : null;
     // Paper tests of two other exits on this same trade: (c) the -20% stop counted on your money,
     // (d) your holder rule as a momentum exit. Both still keep his sell; the stop always sells.
     const xo = { ...ruleOpts, holderRules: holderRule };
@@ -298,7 +307,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
         st.shadow ? `NOT BOUGHT (${st.shadow}). Studied anyway with a ${buySol} SOL quote: what it would have done.` : null,
         `${label} bought ${st.his.sol?.toFixed(3) ?? '?'} SOL${st.his.usd ? ` ($${Math.round(st.his.usd)})` : ''} · execution latency ${rec.delaySec ?? '?'} s · entry premium ${pct(rec.entryGap)}${rec.premiumDef === 'price' ? ' (price vs price)' : ''}${rec.buyFeeSol != null ? ` · fees ${sol(-(rec.buyFeeSol + rec.sellFeeSol))} SOL (${((rec.buyFeeSol + rec.sellFeeSol) / buySol * 100).toFixed(1)}% of the trade, buy+sell)` : ''}`,
         `Filters: ${filterLabels(rec.entryGap)}`,
-        rec.holderVerdict ? `Holders: ${rec.holderVerdict.holders} · mcap $${Math.round(rec.holderVerdict.mcapUsd).toLocaleString('en-US')} → ${rec.holderVerdict.safe ? 'SAFE' : 'RISKY'}${rec.holderVerdict.ceilingUsd ? ` (holders support up to $${(rec.holderVerdict.ceilingUsd / 1000).toFixed(0)}k)` : ' (holders support any market cap in your rule)'}` : null,
+        rec.holderVerdict?.heldUsd != null ? holderLine(rec.holderVerdict) : null,
         latencyLine(rec.latency),
         `FCAT ${pct(fcat)} (${sol(fcat == null ? null : fcat * buySol)} SOL) · sold at ${fcatExit}${rec.bandSol ? ` · BAND ${sol(fcat == null ? null : fcat * rec.bandSol)} SOL` : ''}`,
         `3CAT ${at(3)} | 5CAT ${at(5)} | 10CAT ${at(10)}`,
@@ -341,8 +350,8 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
         let s = 0;
         const tick = async () => {
           const due = st.startedAt + s * stepMs;
-          // holders + market cap every holderEverySec (in parallel; never delays the price samples)
-          if (sampleHolders && s % holderEverySec === 0) { const at = s; st.holderPending.push(timed(sampleHolders(mint)).then((h) => { if (h) st.holderPath.push({ s: at, holders: h.holders ?? null, mcapUsd: h.mcapUsd ?? null }); }).catch(() => {})); }
+          // holder money + market cap every holderEverySec (in parallel; never delays the price samples)
+          if (sampleHolders && s % holderEverySec === 0) { const at = s; st.holderPending.push(timed(sampleHolders(mint)).then((h) => { if (h) st.holderPath.push({ s: at, holders: h.holders ?? null, mcapUsd: h.mcapUsd ?? null, valueUsd: h.valueUsd ?? null, devPct: h.devPct ?? null, devKnown: h.devKnown ?? null }); }).catch(() => {})); }
           st.values[s] = await timed(quoteSell(mint, st.raw).then((v) => (Number.isFinite(v) ? v : null)).catch(() => null));
           s++;
           if (s > windowSec) return resolve(await finish(st)); // hard stop: never studies a coin longer than the window

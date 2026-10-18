@@ -93,7 +93,7 @@ Your current exit rules are unchanged.
 7. **Prices pushed for exits.** Every change of a held coin's bonding curve arrives over the websocket and is checked at once, including the stop-loss. Polling every 0.5 s stays as the backup.
 8. **Stop-loss alternatives in paper:**
    - test **c**: -20% counted on your money
-   - test **d**: sell when holders fall behind the market cap
+   - test **d**: sell when the holders' money (dev excluded) falls behind the market cap
 
    The real stop always sells.
 9. **Fair exit comparison:** every exit is compared with your rules on the same trades, chosen on older trades and checked on newer ones.
@@ -101,17 +101,17 @@ Your current exit rules are unchanged.
 11. **Timing bug fixed:** a second build attempt starts with clean timings. An earlier attempt's stamps once made a buy look 111 s slow.
 
 **Also:**
-- **Holder rule**, on every alert (SAFE / RISKY) and as a brain pattern:
-  - above $10k needs 1,000 holders
-  - above $20k needs 2,500
-  - above $30k needs 4,000
+- **Holder money rule**, on every alert (SAFE / RISKY) and as a brain pattern. It counts the dollar value of the coins held by every wallet except the dev:
+  - $1,000 at a $10k market cap
+  - $2,500 at $20k
+  - $4,000 at $30k
 
-  Set with `HOLDER_RULES`. Report only.
+  The dev is the coin's creator, taken from Decu's own trade event. Set with `HOLDER_RULES`. Report only.
 - **Skipped buys:** a phone alert only when the buy was inside 25% (`SKIPPED_ALERTS=report`).
 - **Local build:** derived addresses are remembered. Building a buy for a new coin dropped from ~6 ms to ~3.5 ms, and to ~0.2 ms for a repeat.
 - **`NTFY_TOKEN`:** an ntfy access token lifts the free daily alert limit.
 - **Spreadsheet:** new columns for detect blocks, premium basis, fees, holder rule, and tests c and d.
-- **Tests:** 111/111 pass. New tests cover:
+- **Tests:** 112/112 pass. New tests cover:
   - the push stream (reconnect and a stalled socket included)
   - the holder rule
   - tests c and d
@@ -122,4 +122,5 @@ Your current exit rules are unchanged.
   - fee caps
   - the non-blocking SOL price
   - pushed confirmation
-  - the holder count
+  - the holder money (curve and dev excluded)
+  - the dev taken from Decu's trade event

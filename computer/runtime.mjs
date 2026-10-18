@@ -225,13 +225,15 @@ export async function startRuntime(k, {demo=false}={}) {
       // detection in BLOCKS (exact; no clock rounding): the block the bot was on when it saw his trade
       detectBlocks:p.hisSlot&&p.seenSlot!=null?Math.max(0,p.seenSlot-p.hisSlot):null};
   };
-  // HOLDER RULE (your strategy): a market cap needs enough holders to hold up. HOLDER_RULES
-  // "mcapUsd:holders": at/above $10k needs 1000 holders, $20k 2500, $30k 4000. Below that = RISKY.
+  // HOLDER RULE (your strategy): a market cap needs enough money in the holders' hands to hold up.
+  // HOLDER_RULES "mcapUsd:heldUsd": the coins held by every wallet except the dev (and the curve) must be
+  // worth at least $1000 at a $10k market cap, $2500 at $20k, $4000 at $30k. Less = RISKY.
   const holderRuleCfg = String(val('HOLDER_RULES','10000:1000,20000:2500,30000:4000')).split(',').map(x=>x.split(':').map(Number)).filter(([a,b])=>a>0&&b>0).sort((a,b)=>a[0]-b[0]);
-  const holderSample = async mint => { const [holders, mcapUsd] = await Promise.all([k.holderCount(mint).catch(()=>null), k.mcapUsdNow?k.mcapUsdNow(mint).catch(()=>null):null]); return {holders, mcapUsd}; };
+  // the dev comes from Decu's trade event (written by pump.fun itself); the curve account is the fallback
+  const holderSample = mint => k.holderStats(mint,{creator:creators.get(mint)}).catch(()=>null);
   const study = demo || val('STUDY','true')==='false' || !k.quoteSell ? null : createStudy({
     file:val('STUDY_FILE',path.resolve(`study-${c.mode}.jsonl`)), quoteSell:k.quoteSell, mode:c.mode, buySol:c.buySol,
-    feeSol:()=>sideFee(), reportPcts, holderRule:holderRuleCfg, sampleHolders:k.holderCount&&!demo?holderSample:null, windowSec:number('STUDY_WINDOW_SEC',15), bandPct:number('BAND_PCT',10)/100, notesOpts:{stopLossPct:number('STOP_LOSS_PCT',20),gainGatePct:number('GAIN_GATE_PCT',15),maxPayPct:filterPct}, learnOpts:{gateSec:number('MAX_HOLD_SEC',15),maxPayPct:filterPct,reportEvery:number('LEARN_REPORT_EVERY',10),digestHours:number('LEARN_DIGEST_HOURS',24)}, label:k.config.leaderLabel,
+    feeSol:()=>sideFee(), reportPcts, holderRule:holderRuleCfg, sampleHolders:k.holderStats&&!demo?holderSample:null, windowSec:number('STUDY_WINDOW_SEC',15), bandPct:number('BAND_PCT',10)/100, notesOpts:{stopLossPct:number('STOP_LOSS_PCT',20),gainGatePct:number('GAIN_GATE_PCT',15),maxPayPct:filterPct}, learnOpts:{gateSec:number('MAX_HOLD_SEC',15),maxPayPct:filterPct,reportEvery:number('LEARN_REPORT_EVERY',10),digestHours:number('LEARN_DIGEST_HOURS',24)}, label:k.config.leaderLabel,
     skippedAlerts:val('SKIPPED_ALERTS','report'), meta:k.tokenMeta||null, notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, log:m=>engine?.event('connection',{message:m})});
   // A Decu buy the bot did not take (filtered, paused, style off, too late, failed): still priced
   // every second for 15 s from a quote of the same size, so the research data has no survivor bias.
@@ -284,7 +286,7 @@ export async function startRuntime(k, {demo=false}={}) {
     return {status:'confirmed',rawDelta:(-BigInt(job.raw)).toString(),solDelta:sol*0.995-fee};
   };
   let cachedBalance=null;
-  const buyCtx=new Map();
+  const buyCtx=new Map(), creators=new Map(); // creators: each coin's dev, from Decu's own trade event (for the holder rule)
   const local = c.mode==='live' && val('LOCAL_BUILD','true')!=='false' && k.findProgramAddress ? {
     helpers:{findProgramAddress:k.findProgramAddress,ata:k.ata,b58decode:k.b58decode,b58encode:k.b58encode},
     blockhash:startBlockhashCache(k.rpc,{log:m=>status.lastError=m}), global:null,
@@ -537,7 +539,8 @@ export async function startRuntime(k, {demo=false}={}) {
     if(source==='ws' && k.config.fastPath!==false && k.leaderPumpBuys && Array.isArray(logs) && !fastDone.has(sig)) {
       fastDone.add(sig); if(fastDone.size>5000) fastDone.delete(fastDone.values().next().value);
       try {
-        if(local) { const ctx=buyContextFromLogs(logs,k.config.leader,k.b58encode); if(ctx) remember(buyCtx,ctx.mint,ctx); }
+        // his full trade context (local builder) and the coin's dev (holder rule); never blocks the buy
+        try { const ctx=k.b58encode?buyContextFromLogs(logs,k.config.leader,k.b58encode):null; if(ctx) { if(local) remember(buyCtx,ctx.mint,ctx); if(ctx.creator) remember(creators,ctx.mint,ctx.creator); } } catch {}
         for(const ev of k.leaderPumpBuys(logs,k.config.leader)) {
           const s={sig,time:ev.timestamp||Date.now()/1000,side:'buy',mint:ev.mint,sol:ev.solAmount/1e9,raw:String(ev.tokenAmount),pump:true,decimals:6,fast:true};
           const tp=stampSig(sig,ev.mint,'seenAt',seenAt); if(seenSlot!=null) stampSig(sig,ev.mint,'seenSlot',seenSlot); stampSig(sig,ev.mint,'hisTime',ev.timestamp); if(Number.isInteger(slot)) stampSig(sig,ev.mint,'hisSlot',slot); stampSig(sig,ev.mint,'decodedAt'); tp.source??='websocket (fast path)';
@@ -561,7 +564,7 @@ export async function startRuntime(k, {demo=false}={}) {
       const venue=k.venueOf?k.venueOf(tx.meta?.logMessages||[]):'?', pumpVenue=['pump.fun','PumpSwap'].includes(venue);
       const all=normalize(tx,k.config.leader,k.detectBuy,k.detectSell), signals=all.filter(s=>!(c.pumpOnly && (s.side==='buy'?!s.pump:!pumpVenue && !engine.d.positions[s.mint])));
       if(signals.length<all.length) status.ignoredVenue=(status.ignoredVenue||0)+1;
-      if(local && tx.meta?.logMessages && signals.some(s=>s.side==='buy')) { const ctx=buyContextFromLogs(tx.meta.logMessages,k.config.leader,k.b58encode); if(ctx && !buyCtx.has(ctx.mint)) remember(buyCtx,ctx.mint,ctx); }
+      if(k.b58encode && tx.meta?.logMessages && signals.some(s=>s.side==='buy')) try { const ctx=buyContextFromLogs(tx.meta.logMessages,k.config.leader,k.b58encode); if(ctx) { if(local && !buyCtx.has(ctx.mint)) remember(buyCtx,ctx.mint,ctx); if(ctx.creator && !creators.has(ctx.mint)) remember(creators,ctx.mint,ctx.creator); } } catch {}
       if(!all.length) {
         const u=classifyUnsupported(tx,k.config.leader);
         if(u) {status.unsupported++;engine.event('unsupported',{leaderSignature:sig,mint:u.mint,kind:u.kind,reason:u.kind==='token-swap'?'token-to-token swap':'paid or received PUMP tokens instead of SOL; bot trades with SOL only'});}
