@@ -31,7 +31,7 @@ export function tradeChart(rec, gatePct = 15, stopPct = 20) {
   return chartUrl({ type: 'line', data: { labels: c.map((_, s) => `${s}s`), datasets: ds }, options: { title: { display: true, text: `${rec.symbol ? '$' + rec.symbol : rec.mint.slice(0, 6)} FCAT ${pct(rec.fcat)} · paid ${pct(rec.entryGap)} vs Decu` } } });
 }
 export function historyChart(records, n = 30) {
-  const rs = records.filter((r) => Number.isFinite(r.fcat)).slice(-n); let cum = 0;
+  const rs = records.filter((r) => Number.isFinite(r.fcat) && r.taken !== false && !r.skipReason).slice(-n); let cum = 0; // bought trades only
   return chartUrl({ type: 'bar', data: { labels: rs.map((r) => r.symbol || r.mint.slice(0, 4)), datasets: [
     { label: 'FCAT %', data: rs.map((r) => Math.round(r.fcat * 1000) / 10), backgroundColor: rs.map((r) => (r.fcat > 0 ? '#2da44e' : '#cf222e')) },
     { label: 'Running total (SOL x100)', type: 'line', data: rs.map((r) => Math.round((cum += r.fcat * 0.1) * 1e4) / 100), borderColor: '#1f6feb', fill: false }] },

@@ -5,6 +5,7 @@ import http from 'node:http';
 import {Engine} from './engine.mjs';
 import {PUMP_TOKEN,QUOTES} from './solscan.mjs';
 import {createStudy,summaryText} from './study.mjs';
+import {buildAnalytics,digestMessages} from './analytics.mjs';
 import {buyContextFromLogs,tokensOut,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache,createSellDesk,decodeBondingCurve,quotedInSol,PUMP,TOKEN,TOKEN_2022} from './pumpbuild.mjs';
 
 const val = (key, fallback) => process.env[key]?.trim() || fallback;
@@ -167,6 +168,9 @@ export async function startRuntime(k, {demo=false}={}) {
       if(p && kit) { if(kit.tokenProgram) p.tokenProgram??=kit.tokenProgram; if(kit.creator) p.creator??=kit.creator; }
     }
     if (e.type==='confirmed' && e.side==='sell' && e.closed) desk?.disarm(e.mint);
+    // CLOSED-TRADE LEDGER (analytics): the realized result of every position the bot closed
+    if (e.type==='confirmed' && e.side==='sell' && e.closed && engine) { const p=engine.d.positions[e.mint]; if(p && p.costSol>0) { const L=(engine.d.closedTrades ||= []);
+      L.push({mint:e.mint,symbol:study?.records?.findLast?.(r=>r.mint===e.mint)?.symbol||null,boughtAt:p.boughtAt||null,closedAt:Date.now(),costSol:p.costSol,pnlSol:Math.round((p.realizedSol-p.costSol)*1e6)/1e6,pnlPct:e.pnl??null,rule:e.rule||'his sell / other'}); if(L.length>2000) L.splice(0,L.length-2000); } }
     // a failed sell may have used a wrong pushed balance: the retry reads the chain. A failed buy leaves
     // nothing to sell: its armed sell (and its token-account watch) goes too.
     if (e.type==='failed' && e.side==='sell') desk?.forgetBalance(e.mint);
@@ -247,7 +251,7 @@ export async function startRuntime(k, {demo=false}={}) {
   const study = demo || val('STUDY','true')==='false' || !k.quoteSell ? null : createStudy({
     file:val('STUDY_FILE',path.resolve(`study-${c.mode}.jsonl`)), quoteSell:k.quoteSell, mode:c.mode, buySol:c.buySol,
     feeSol:()=>sideFee(), reportPcts, holderRule:holderRuleCfg, sampleHolders:k.holderStats&&!demo?holderSample:null, windowSec:number('STUDY_WINDOW_SEC',15), bandPct:number('BAND_PCT',10)/100, notesOpts:{stopLossPct:number('STOP_LOSS_PCT',20),gainGatePct:number('GAIN_GATE_PCT',15),maxPayPct:filterPct}, learnOpts:{gateSec:number('MAX_HOLD_SEC',15),maxPayPct:filterPct,reportEvery:number('LEARN_REPORT_EVERY',10),digestHours:number('LEARN_DIGEST_HOURS',24)}, label:k.config.leaderLabel,
-    skippedAlerts:val('SKIPPED_ALERTS','report'), meta:k.tokenMeta||null, notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, log:m=>engine?.event('connection',{message:m})});
+    skippedAlerts:val('SKIPPED_ALERTS','false'), meta:k.tokenMeta||null, notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, log:m=>engine?.event('connection',{message:m})});
   // A Decu buy the bot did not take (filtered, paused, style off, too late, failed): still priced
   // every second for 15 s from a quote of the same size, so the research data has no survivor bias.
   // Read-only; one quote per skipped buy, never on the trading path.
@@ -877,18 +881,40 @@ export async function startRuntime(k, {demo=false}={}) {
         engine.event('emergency-stop',{message:`sell everything from the dashboard: ${held.length} position(s)`}); res.writeHead(200); return res.end(String(held.length));
       }
       if(url.pathname==='/api/export.csv' && req.method==='GET') {const {toCsv}=await import('./study.mjs');res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':`attachment; filename="decu-trades-${c.mode}-${new Date().toISOString().slice(0,10)}.csv"`});return res.end(toCsv(study?study.records:[]));}
+      if(url.pathname==='/api/analytics' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean({...analyticsNow(),ntfy:k.ntfyUsage?.()||null})));}
+      if(url.pathname==='/api/analytics/send' && req.method==='POST') {const msg=await sendDigest();res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8'});return res.end(msg);}
       if(url.pathname==='/api/research' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean({...(study?study.research():{trades:0}),live:{fees:fee(),feeMode:val('FEE_MODE','max'),push:!!k.stream?.connected?.(),priceChecks:status.priceChecks,sellDesk:desk?{...desk.snapshot(),liveSells:status.localSells||0,lastLiveSellMs:status.lastLocalSellMs??null,paperSellBuilds:status.paperSellBuilds||0,pushedBalances:status.pushedBalances||0}:null,solscan:k.solscanUsage?.()||null,pumpportal:{...pumpPortalStatus(),fastBuys:status.pumpportalFast||0,chainContexts:status.chainCtx||0,race:status.feedRace||null,builderCheck:ppCheck.result}}})));}
       if(req.method==='POST' && ['/api/autocopy/on','/api/autocopy/off'].includes(url.pathname)) {
         engine.autoCopy(url.pathname==='/api/autocopy/on');res.writeHead(200);return res.end('OK');
       }
       res.writeHead(404);return res.end('Not found');
     }
-    const files={'/':'dashboard.html','/dashboard.js':'dashboard.js','/dashboard.css':'dashboard.css','/manifest.webmanifest':'manifest.webmanifest','/icon.svg':'icon.svg'};
+    const files={'/':'dashboard.html','/dashboard.js':'dashboard.js','/charts.js':'charts.js','/dashboard.css':'dashboard.css','/manifest.webmanifest':'manifest.webmanifest','/icon.svg':'icon.svg'};
     if(!files[url.pathname]) {res.writeHead(404);return res.end('Not found');}
     const types={'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.webmanifest':'application/manifest+json'};
     res.writeHead(200,{'Content-Type':types[path.extname(files[url.pathname])]});res.end(fs.readFileSync(new URL(files[url.pathname],import.meta.url)));
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});
   engine.event('started',{mode:c.mode,dashboard:`http://${host}:${port}`,note:demo?'SYNTHETIC DEMO; no chain or wallet connection':'confirmed leader signals; paper estimates are not guaranteed fills'});
-  return {engine,server,study,latency:latencyOf,setPower,desk,stop:()=>{stopped=true;desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  // ANALYTICS DIGEST to the phone: once every ANALYTICS_DIGEST_HOURS (24) when there are new bought trades,
+  // or from the dashboard button. Built from the bot's own records (no data credits); each chart is one ntfy
+  // message, capped per day (NTFY_CHARTS_PER_DAY) so trade alerts always keep their share.
+  const analyticsNow=()=>buildAnalytics({records:study?.records||[],closed:engine.d.closedTrades||[],buySol:c.buySol,timezone:c.timezone});
+  const sendDigest=async()=>{
+    if(demo || !k.notify) return 'Phone alerts are not set up here (NTFY_TOPIC).';
+    const a=analyticsNow(); if(!a.charts.length) return 'No bought trades to chart yet.';
+    const tag=c.mode==='live'?'':c.mode==='paper'?'[PAPER] ':'[DEMO] ';
+    let sent=0, capped=false;
+    for(const m of digestMessages(a,{max:number('ANALYTICS_DIGEST_CHARTS',6),tag})) { const r=await k.notify({...m,priority:2,tags:['chart_with_upwards_trend'],kind:'chart'}); if(r==='sent') sent++; else if(r==='capped') { capped=true; break; } }
+    engine.d.analyticsDigestAt=Date.now(); engine.d.analyticsDigestN=a.bought+a.closed; engine.saveSoon?.();
+    const u=k.ntfyUsage?.();
+    return `Sent ${sent} chart${sent===1?'':'s'} to your phone${capped?' (the daily chart cap is reached; more tomorrow)':''}.${u?` ${u.chartsLeft} chart messages left today; ${u.total} of ${u.max} ntfy messages used.`:''}`;
+  };
+  const digestTimer=demo?null:setInterval(()=>{
+    if(stopped || !k.notify || engine.d.alertsOff || val('ANALYTICS_DIGEST','true')==='false') return;
+    const n=boughtCount()+(engine.d.closedTrades?.length||0);
+    if(Date.now()-(engine.d.analyticsDigestAt||0)>=number('ANALYTICS_DIGEST_HOURS',24)*3600e3 && n>(engine.d.analyticsDigestN||0)) sendDigest().then(m=>engine.event('analytics-digest',{message:m})).catch(()=>{});
+  },number('ANALYTICS_CHECK_MS',600_000)); digestTimer?.unref?.();
+  const boughtCount=()=>(study?.records||[]).filter(r=>r.taken!==false && !r.skipReason).length;
+  return {engine,server,study,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;clearInterval(digestTimer);desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }

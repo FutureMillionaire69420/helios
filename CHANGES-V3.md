@@ -239,3 +239,21 @@ Earlier v3.3 tests:
 - SOL price: Solscan first (every 2 min), then Jupiter / DexScreener / Helius if it fails or the day's budget is nearly used.
 - Watcher while ON: every 5 s while coins are held or the Helius websocket is down, every 60 s otherwise. It is never used while OFF.
 - Hard cap stays at 2,500 requests a day. When what's left only covers the day's price checks plus one look every 2 min, it slows to that pace so it never goes blind before 00:00 UTC.
+
+## v3.5 (analytics charts on the dashboard and the phone)
+- New **Analytics** section on the dashboard. It has 10 headline numbers and 15 charts, each with tap-for-value tooltips and a "Numbers" table:
+  - running profit, profit per trade, profit per day, drawdown
+  - result and win rate by entry premium
+  - blocks after Decu, and result by blocks
+  - profit by exit, hold time vs result
+  - price path after the buy (average and middle half)
+  - best second to sell, holder rule, where the profit goes, fees per trade
+- Charts are drawn in the page, with no outside requests.
+- **Bought trades only:** skipped buys ("what if" studies) and missed-trade reports are left out.
+- **Realized results:** a closed-trade ledger records every position the bot closes (cost, profit, exit reason, hold time). Until it has trades, the money charts use each study's FCAT x the buy size, and say so.
+- **No data credits:** everything is built from records the bot already keeps.
+- **Phone:**
+  - A daily digest of the 6 key charts goes out as ntfy pictures (QuickChart images), sent only when there are new trades. A dashboard button sends it now.
+  - The ntfy budget is counted per day across restarts. Chart messages are capped at 12 a day and stop early near the ntfy limit, so trade alerts always get through.
+  - Skipped-buy alerts are off by default (`SKIPPED_ALERTS=false`).
+- **Tests: 150/150.**

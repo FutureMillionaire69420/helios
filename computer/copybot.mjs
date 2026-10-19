@@ -849,10 +849,18 @@ function encodeTradeEvent({ mint, solAmount, tokenAmount, isBuy, user, timestamp
 
 const ascii = (s) => String(s).replace(/[^\x20-\x7e]/g, '').slice(0, 200);
 
-async function notify({ title, body, priority = 3, tags = [], click, actions = [], image }) {
+// NTFY BUDGET: messages sent today (UTC), kept across restarts next to the state file. ntfy.sh's free tier
+// allows about 250 a day. Chart messages (the analytics digest) are capped at NTFY_CHARTS_PER_DAY (12) and
+// stop early once NTFY_MAX_PER_DAY (250) less NTFY_RESERVE (60) is reached, so trade alerts always get through.
+const ntfyUsageFile = path.join(path.dirname(config.stateFile), 'ntfy-usage.json');
+let ntfyUsage = (() => { try { const u = JSON.parse(fs.readFileSync(ntfyUsageFile, 'utf8')); return u.day === new Date().toISOString().slice(0, 10) ? u : null; } catch { return null; } })() || { day: new Date().toISOString().slice(0, 10), total: 0, charts: 0 };
+function ntfyToday() { const d = new Date().toISOString().slice(0, 10); if (ntfyUsage.day !== d) ntfyUsage = { day: d, total: 0, charts: 0 }; const max = num('NTFY_MAX_PER_DAY', 250), charts = num('NTFY_CHARTS_PER_DAY', 12); return { ...ntfyUsage, max, chartCap: charts, chartsLeft: Math.max(0, Math.min(charts - ntfyUsage.charts, max - num('NTFY_RESERVE', 60) - ntfyUsage.total)) }; }
+
+async function notify({ title, body, priority = 3, tags = [], click, actions = [], image, kind }) {
   const line = `[${new Date().toISOString()}] ${title} | ${body.replace(/\n/g, ' | ')}`;
   console.log(line);
-  if (!config.ntfyTopic) return;
+  if (!config.ntfyTopic) return 'no topic';
+  if (kind === 'chart' && ntfyToday().chartsLeft <= 0) return 'capped';
   // ntfy turns messages over 4096 bytes into a file attachment: keep the alert readable instead.
   if (Buffer.byteLength(body) > 3900) { const tail = '\n…(cut: full report with node copybot.mjs study)'; body = Buffer.from(body).subarray(0, 3900 - tail.length).toString('utf8').replace(/\uFFFD+$/, '') + tail; }
   const headers = { Title: ascii(title), Priority: String(priority) };
@@ -865,8 +873,12 @@ async function notify({ title, body, priority = 3, tags = [], click, actions = [
   if (actions.length) headers.Actions = actions.map((a) => `view, ${ascii(a.label)}, ${a.url}`).join('; ');
   try {
     await http(`${config.ntfyServer.replace(/\/$/, '')}/${encodeURIComponent(config.ntfyTopic)}`, { method: 'POST', headers: { ...headers, 'content-type': 'text/plain; charset=utf-8' }, body: body, timeoutMs: 6000 });
+    ntfyToday(); ntfyUsage.total++; if (kind === 'chart') ntfyUsage.charts++;
+    try { fs.writeFileSync(ntfyUsageFile, JSON.stringify(ntfyUsage), { mode: 0o600 }); } catch { /* best effort */ }
+    return 'sent';
   } catch (e) {
     console.error('ntfy failed:', e.message);
+    return 'failed';
   }
 }
 
@@ -2607,10 +2619,10 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
     idle: () => {},
   };
   if (power) stopSol = stopFees = stopWarm = power.idle;
-  const r = await startRuntime({config,kp,notify,solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,startPumpPortalWatcher:pumpPortalWatch,checkPumpPortalBuild,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  const r = await startRuntime({config,kp,notify,ntfyUsage:()=>ntfyToday(),solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,startPumpPortalWatcher:pumpPortalWatch,checkPumpPortalBuild,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();stopWarm();solscan.flush();process.exit(0);});
   // The settings that decide speed and filtering, as the bot actually uses them (no keys).
-  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'report')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.001)} + ${num('TIP_MAX_SOL', 0.002)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · PumpPortal feed ${pumpPortalWatch ? 'on' : 'off (no PUMPPORTAL_API_KEY)'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);
+  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'false')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.001)} + ${num('TIP_MAX_SOL', 0.002)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · PumpPortal feed ${pumpPortalWatch ? 'on' : 'off (no PUMPPORTAL_API_KEY)'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);
 }
 
 /** Backtest one day of the leader's trades with an imaginary wallet. */

@@ -14,3 +14,4 @@ trades.log.*
 study-*.jsonl
 solscan-usage.json
 solscan-usage.json.tmp
+ntfy-usage.json

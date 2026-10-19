@@ -38,6 +38,8 @@ async function refresh(){try{
   if(off)$('mode').textContent+=' · OFF';
   $('pause').disabled=latest.paused;$('resume').disabled=!latest.paused;renderEvents();
   renderResearch(await api('/api/research').catch(()=>null));
+  // analytics: rebuilt every 30 s (the page refreshes every 2 s; the charts don't need to)
+  if(!window._anAt||Date.now()-window._anAt>30000){window._anAt=Date.now();const a=await api('/api/analytics').catch(()=>null);if(a&&window.renderAnalytics){window.renderAnalytics($('analytics'),a);$('analytics-updated').textContent='Updated '+new Date(a.generatedAt).toLocaleTimeString();}}
 }catch(e){$('message').textContent=e.message;$('mode').textContent='Disconnected';}}
 const pc=x=>Number.isFinite(x)?(x>=0?'+':'')+(x*100).toFixed(1)+'%':'—', sl=x=>Number.isFinite(x)?(x>=0?'+':'')+x.toFixed(4)+' SOL':'—', sec=x=>Number.isFinite(x)?x.toFixed(2)+' s':'—', msf=x=>Number.isFinite(x)?Math.round(x)+' ms':'—';
 function renderResearch(r){
@@ -76,6 +78,7 @@ $('pause').onclick=async()=>{try{await api('/api/pause','POST');refresh();}catch
 $('resume').onclick=async()=>{try{await api('/api/resume','POST');refresh();}catch(e){$('message').textContent=e.message;}};
 const setStyle=v=>async()=>{try{await api('/api/style/'+v,'POST');refresh();}catch(e){$('message').textContent=e.message;}};
 $('style-auto-on').onclick=setStyle('auto');$('style-auto-off').onclick=setStyle('off');$('style-manual-on').onclick=setStyle('manual');$('style-manual-off').onclick=setStyle('off');
+$('analytics-send').onclick=async()=>{try{const r=await fetch('/api/analytics/send',{method:'POST',headers:token?{Authorization:'Bearer '+token}:{},cache:'no-store'});$('message').textContent=r.ok?(await r.text()):'Could not send: '+r.status;}catch(e){$('message').textContent=e.message;}};
 $('errors').onchange=renderEvents;refresh();setInterval(refresh,2000);
 
 $('phantom-connect').onclick=async()=>{
