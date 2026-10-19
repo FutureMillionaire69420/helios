@@ -357,16 +357,18 @@ test('dashboard power buttons: /api/power/off and /on need the token and switch 
   assert.equal(watch, 2);
 });
 
-test('Solscan schedule: rare while Helius is healthy and nothing is held, often while holding, never when off or over budget', async (t) => {
+test('Solscan schedule: very active while ON (5 s holding or Helius down, 60 s otherwise), slowed only when the daily budget runs low, never when off', async (t) => {
   let opts = null, usage = {requests: 10, budget: 2500, left: 2490};
   const {r, ws} = await bot(t, {}, async () => 0.11, {startSolscanWatcher: (cb, o) => { opts = o; return () => {}; }, solscanUsage: () => usage});
   const plan = () => opts.schedule();
   opts.status.websocket = 'disconnected';
-  assert.deepEqual(plan(), {ms: 15000, mode: 'Helius websocket down: Solscan watching'});
+  assert.deepEqual(plan(), {ms: 5000, mode: 'Helius websocket down: Solscan watching'});
   opts.status.websocket = 'subscribed';
-  assert.equal(plan().ms, 600000, 'healthy and nothing held: every 10 min');
+  assert.equal(plan().ms, 60000, 'Helius healthy, nothing held: every 60 s');
   await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
-  assert.equal(plan().ms, 30000, 'holding a coin: every 30 s (a missed sell of his matters)');
+  assert.equal(plan().ms, 5000, 'holding a coin: every 5 s');
+  usage = {requests: 2470, budget: 2500, left: 30};
+  assert.ok(plan().ms > 5000, 'budget low: slowed so it lasts until 00:00 UTC'); assert.match(plan().mode, /budget low/);
   usage = {requests: 2500, budget: 2500, left: 0};
   assert.equal(plan().ms, Infinity); assert.match(plan().mode, /daily budget used/);
   usage = {requests: 10, budget: 2500, left: 2490};

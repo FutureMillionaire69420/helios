@@ -125,7 +125,7 @@ A Decu buy the bot did not take (filtered, 2 coins already open, daily cap, paus
 
 **Stop-loss alerts, in order:** STOP TRIGGERED → SELL SENT (live) → POSITION CLOSED (with the trigger vs the real fill). If prices can't be read 3 times in a row you get *Price checks failing*; after 6 it sells anyway. If a sell fails it retries at once; after 3 failures you get **CAN'T SELL** and it keeps trying.
 
-**Solscan credits:** Solscan is asked only when it helps: every 10 min while Helius works and nothing is held, every 30 s while coins are held, every 15 s if Helius is down, and never more than 2,500 requests a day (the dashboard shows today's count).
+**Solscan (a priority source):** while the bot is ON, Solscan watches Decu every 5 s while a coin is held or Helius is down, and every 60 s otherwise. It is also the first source for the SOL price (every 2 min). Hard cap: 2,500 requests a day. When the day's remaining requests run low, it slows down just enough to keep watching until midnight UTC. OFF uses no Solscan at all. The dashboard shows today's count.
 
 **PumpPortal feed (second way to see Decu's trades):** with `PUMPPORTAL_API_KEY` set, PumpPortal pushes each of his trades too. If it is first, the bot copies his buy right away; Helius' copy of the same trade is ignored, so it never buys twice. His sells are still acted on only once confirmed. The dashboard counts which feed was first and by how many ms. Once per run, the bot also asks PumpPortal's builder for a sample buy (never signed or sent) and shows whether the safety check accepts it. PumpPortal charges **0.5% per trade it builds**, so the bot uses it only as a fallback.
 

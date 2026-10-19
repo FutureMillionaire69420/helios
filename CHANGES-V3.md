@@ -234,3 +234,8 @@ Earlier v3.3 tests:
 - OFF closing the feed
 - the builder check
 - a cashback coin sold with its extra account
+
+## v3.4.1 (Solscan as a priority source)
+- SOL price: Solscan first (every 2 min), then Jupiter / DexScreener / Helius if it fails or the day's budget is nearly used.
+- Watcher while ON: every 5 s while coins are held or the Helius websocket is down, every 60 s otherwise. It is never used while OFF.
+- Hard cap stays at 2,500 requests a day. When what's left only covers the day's price checks plus one look every 2 min, it slows to that pace so it never goes blind before 00:00 UTC.

@@ -773,9 +773,19 @@ export async function startRuntime(k, {demo=false}={}) {
   const solscanSchedule=()=>{
     if(powerOff()) return {ms:Infinity,mode:'off (power off)'};
     const u=k.solscanUsage?.(); if(u && u.left<=0) return {ms:Infinity,mode:`daily budget used (${u.requests}/${u.budget}): paused until 00:00 UTC`};
-    if(status.websocket!=='subscribed') return {ms:number('SOLSCAN_DOWN_SEC',15)*1000,mode:'Helius websocket down: Solscan watching'};
-    if(openNow()>0) return {ms:number('SOLSCAN_HOLDING_SEC',30)*1000,mode:'coins held: watching for a missed sell'};
-    return {ms:number('SOLSCAN_IDLE_SEC',600)*1000,mode:'standby (Helius healthy, nothing held)'};
+    // VERY ACTIVE while ON (5 s while holding or with Helius down, 60 s otherwise), within the daily budget: once
+    // the requests left only cover the SOL price checks still due plus one look every SOLSCAN_FLOOR_SEC (120)
+    // until 00:00 UTC, it slows to that pace, so it never goes blind before the day ends
+    const plan=status.websocket!=='subscribed' ? {ms:number('SOLSCAN_DOWN_SEC',5)*1000,mode:'Helius websocket down: Solscan watching'}
+      : openNow()>0 ? {ms:number('SOLSCAN_HOLDING_SEC',5)*1000,mode:'coins held: watching for a missed sell'}
+      : {ms:number('SOLSCAN_IDLE_SEC',60)*1000,mode:'watching Decu (second set of eyes)'};
+    if(u && u.budget) {
+      const now=new Date(), msLeft=Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate()+1)-now.getTime();
+      const priceDue=Math.ceil(msLeft/(number('SOL_PRICE_REFRESH_SEC',120)*1000)), floorMs=number('SOLSCAN_FLOOR_SEC',120)*1000;
+      const spare=u.left-priceDue;
+      if(spare<=Math.ceil(msLeft/floorMs)) { const paced=spare>0?Math.max(plan.ms,Math.ceil(msLeft/spare)):Infinity; return {ms:paced,mode:plan.mode+` (budget low: ${u.left} left today, slowed to last until 00:00 UTC)`}; }
+    }
+    return plan;
   };
   /** on: true / false. Refused in LIVE while coins are held or trades are in flight (their stop-loss and
    *  confirmation need data) unless force. Returns the problem, or null when done. */

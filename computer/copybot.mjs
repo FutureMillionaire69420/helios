@@ -1546,12 +1546,12 @@ let solPrice = { usd: null, at: 0 };
  *  SOL_PRICE_REFRESH_SEC). Used on the buy path, where a price lookup cost ~170 ms per buy (up to 4 s). */
 let dataOn = true; // power OFF (dashboard): no background lookups at all
 function solUsdNow() {
-  if (dataOn && (!solPrice.usd || Date.now() - solPrice.at > 90_000)) refreshSolUsd();
+  if (dataOn && (!solPrice.usd || Date.now() - solPrice.at > 150_000)) refreshSolUsd();
   return solPrice.usd || config.solPriceFallback;
 }
 let solRefreshing = null;
 function refreshSolUsd() { return (solRefreshing ||= fetchSolUsdLive().catch(() => null).finally(() => { solRefreshing = null; })); }
-function startSolPriceRefresh() { refreshSolUsd(); const t = setInterval(refreshSolUsd, num('SOL_PRICE_REFRESH_SEC', 60) * 1000); t.unref?.(); return () => clearInterval(t); }
+function startSolPriceRefresh() { refreshSolUsd(); const t = setInterval(refreshSolUsd, num('SOL_PRICE_REFRESH_SEC', 120) * 1000); t.unref?.(); return () => clearInterval(t); }
 
 async function getSolUsd() {
   if (solPrice.usd && Date.now() - solPrice.at < 60_000) return solPrice.usd;
@@ -1565,6 +1565,8 @@ async function getSolUsd() {
 /** SOL/USD sources in priority order: the free ones first (Jupiter, DexScreener), then Helius (DAS
  *  getAsset, uses Helius credits) and Solscan last (100 Solscan CU per call). */
 const SOL_PRICE_SOURCES = [
+  // Solscan first (it is a priority source); the free ones take over if it fails or its daily budget is nearly used
+  ['Solscan', async () => (solscan.enabled && solscan.usage().left > num('SOLSCAN_PRICE_RESERVE', 100) ? solscan.tokenPrice(WSOL) : null)],
   ['Jupiter', async () => {
     const base = config.jupiterApiKey ? 'https://api.jup.ag' : 'https://lite-api.jup.ag';
     const r = await http(`${base}/price/v3?ids=${WSOL}`, { headers: config.jupiterApiKey ? { 'x-api-key': config.jupiterApiKey } : {}, timeoutMs: 4000 });
@@ -1580,7 +1582,6 @@ const SOL_PRICE_SOURCES = [
     const r = await rpc('getAsset', { id: WSOL }, 4000);
     return Number(r?.token_info?.price_info?.price_per_token);
   }],
-  ['Solscan', async () => (solscan.enabled ? solscan.tokenPrice(WSOL) : null)],
 ];
 
 /** Live SOL/USD from the first source that answers. Throws if all are down. */
