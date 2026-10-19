@@ -257,3 +257,21 @@ Earlier v3.3 tests:
   - The ntfy budget is counted per day across restarts. Chart messages are capped at 12 a day and stop early near the ntfy limit, so trade alerts always get through.
   - Skipped-buy alerts are off by default (`SKIPPED_ALERTS=false`).
 - **Tests: 150/150.**
+
+## v3.5.1 (a chart for every bought coin)
+- After each bought trade's alert, a second ntfy notification carries that coin's own chart, deconstructed:
+  - the profit % line second by second
+  - 3CAT / 5CAT / 10CAT / best second marked and named on the time axis, along with Decu's sell and the bot's exit
+  - the stop-loss (red), the gain gate and break-even as labelled lines
+  - a header with every number: FCAT, entry premium, delay, 3/5/10CAT, best, worst, PCAT, BAND in SOL, and win rates
+- Its text reads the chart like a trader:
+  - the shape (spiked and faded, climbed late, never made money)
+  - the exits ranked best to worst in % and SOL
+  - PCAT vs what you paid
+  - whether the stop-loss or gain gate was hit, and when
+  - BAND results
+  - the win rate and average of each exit over all bought trades
+  - how setups with the same entry premium did
+- Bought trades only. These charts have their own cap (`NTFY_TRADE_CHARTS_PER_DAY` 60) under the same ntfy reserve, and `COIN_CHARTS=false` turns them off.
+- Checked by drawing the chart with the same chart library QuickChart uses (Chart.js 2.9.4).
+- Tests 151/151.

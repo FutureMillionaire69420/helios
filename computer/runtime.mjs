@@ -251,7 +251,7 @@ export async function startRuntime(k, {demo=false}={}) {
   const study = demo || val('STUDY','true')==='false' || !k.quoteSell ? null : createStudy({
     file:val('STUDY_FILE',path.resolve(`study-${c.mode}.jsonl`)), quoteSell:k.quoteSell, mode:c.mode, buySol:c.buySol,
     feeSol:()=>sideFee(), reportPcts, holderRule:holderRuleCfg, sampleHolders:k.holderStats&&!demo?holderSample:null, windowSec:number('STUDY_WINDOW_SEC',15), bandPct:number('BAND_PCT',10)/100, notesOpts:{stopLossPct:number('STOP_LOSS_PCT',20),gainGatePct:number('GAIN_GATE_PCT',15),maxPayPct:filterPct}, learnOpts:{gateSec:number('MAX_HOLD_SEC',15),maxPayPct:filterPct,reportEvery:number('LEARN_REPORT_EVERY',10),digestHours:number('LEARN_DIGEST_HOURS',24)}, label:k.config.leaderLabel,
-    skippedAlerts:val('SKIPPED_ALERTS','false'), meta:k.tokenMeta||null, notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, log:m=>engine?.event('connection',{message:m})});
+    skippedAlerts:val('SKIPPED_ALERTS','false'), coinCharts:val('COIN_CHARTS','true')!=='false', meta:k.tokenMeta||null, notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, log:m=>engine?.event('connection',{message:m})});
   // A Decu buy the bot did not take (filtered, paused, style off, too late, failed): still priced
   // every second for 15 s from a quote of the same size, so the research data has no survivor bias.
   // Read-only; one quote per skipped buy, never on the trading path.

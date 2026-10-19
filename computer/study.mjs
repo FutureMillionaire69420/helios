@@ -38,6 +38,76 @@ export function historyChart(records, n = 30) {
     options: { title: { display: true, text: `Last ${rs.length} trades: FCAT per trade and running total` } } });
 }
 
+/**
+ * PER-COIN CHART (its own phone notification after the trade alert): this one trade, deconstructed.
+ * The bot's profit % every second after its buy (blue), the 3CAT / 5CAT / 10CAT / BTSAB exits marked on the
+ * line and named on the time axis, Decu's sell and the bot's own exit named on the axis too, the stop-loss
+ * (red, dashed) and the +gain gate and break-even (gray, dashed) as labelled lines. PCAT, BAND and the win
+ * rates are in the header. Colors pass color-blind checks on white; every mark is also named in text.
+ */
+export function coinChart(rec, records = [], { gatePct = 15, stopPct = 20 } = {}) {
+  const c = rec.curve || [], r = (v) => (v == null || !Number.isFinite(v) ? null : Math.round(v * 1000) / 10);
+  const base = c.find((v) => v != null) ?? 0, stopLvl = (1 + base) * (1 - stopPct / 100) - 1;
+  const st = coinStats(rec, records);
+  const tags = c.map((_, s) => [s === 3 && '3CAT', s === 5 && '5CAT', s === 10 && '10CAT', s === rec.btsab && 'BEST', s === rec.fcatSec && 'EXIT', rec.hisSoldAtSec != null && s === Math.ceil(rec.hisSoldAtSec) && 'DECU SOLD'].filter(Boolean).join(' '));
+  const labels = c.map((_, s) => (tags[s] ? `${s}s ${tags[s]}` : `${s}s`));
+  const marks = c.map((v, s) => ([3, 5, 10, rec.btsab].includes(s) ? r(v) : null));
+  const flat = (v) => c.map(() => r(v));
+  const band = rec.bandSol, bs = (v) => (v == null || !band ? '—' : `${v * band >= 0 ? '+' : ''}${(v * band).toFixed(3)}`);
+  const cfg = { type: 'line', data: { labels, datasets: [
+    { label: 'Bot profit % each second', data: c.map(r), borderColor: '#2a78d6', backgroundColor: '#2a78d6', borderWidth: 2, pointRadius: 2, pointBackgroundColor: '#2a78d6', fill: false, lineTension: 0, datalabels: { display: false } },
+    { label: '3CAT / 5CAT / 10CAT / best second', data: marks, showLine: false, fill: false, pointRadius: 7, backgroundColor: '#1baf7a', borderColor: '#1baf7a', pointBackgroundColor: '#1baf7a', pointBorderColor: '#ffffff', pointBorderWidth: 2, datalabels: { display: true, align: 'top', color: '#0b0b0b', font: { weight: 'bold' } } },
+    { label: `Stop-loss: -${stopPct}% from entry (${pct(stopLvl)})`, data: flat(stopLvl), borderColor: '#e34948', backgroundColor: '#e34948', borderWidth: 2, borderDash: [8, 5], pointRadius: 0, fill: false, datalabels: { display: false } },
+    { label: `+${gatePct}% gain gate`, data: flat(gatePct / 100), borderColor: '#52514e', backgroundColor: '#52514e', borderWidth: 1.5, borderDash: [3, 4], pointRadius: 0, fill: false, datalabels: { display: false } },
+    { label: 'Break-even (0%)', data: flat(0), borderColor: '#898781', backgroundColor: '#898781', borderWidth: 1, pointRadius: 0, fill: false, datalabels: { display: false } },
+  ] }, options: {
+    title: { display: true, fontColor: '#0b0b0b', fontSize: 13, text: [
+      `${rec.symbol ? '$' + rec.symbol : rec.mint.slice(0, 6)}: FCAT ${pct(rec.fcat)} (${rec.fcatExit || 'exit'}) · paid ${pct(rec.entryGap)} vs Decu · ${rec.delaySec ?? '?'} s${rec.latency?.blocksAfter != null ? ` / ${rec.latency.blocksAfter} blocks` : ''} after him`,
+      `3CAT ${pct(c[3])} · 5CAT ${pct(c[5])} · 10CAT ${pct(c[10])} · BEST ${rec.btsab ?? '—'}s ${pct(rec.peak)} · worst ${pct(rec.worst)} at ${rec.worstAt ?? '—'}s · PCAT ${pct(rec.pcat)}`,
+      band ? `BAND ${band.toFixed(3)} SOL: 3CAT ${bs(c[3])} · 5CAT ${bs(c[5])} · 10CAT ${bs(c[10])} · BEST ${bs(rec.peak)} · FCAT ${bs(rec.fcat)} SOL` : `BAND: — (no Decu size)`,
+      `Win rate so far (${st.n} bought): FCAT ${st.win.fcat} · 3CAT ${st.win[3]} · 5CAT ${st.win[5]} · 10CAT ${st.win[10]}`,
+    ] },
+    legend: { position: 'bottom', labels: { fontColor: '#52514e', boxWidth: 18 } },
+    plugins: { datalabels: { display: false } },
+    scales: { xAxes: [{ gridLines: { display: false }, ticks: { fontColor: '#52514e', maxRotation: 60, autoSkip: false } }], yAxes: [{ gridLines: { color: '#e1e0d9', zeroLineColor: '#c3c2b7' }, ticks: { fontColor: '#52514e' }, scaleLabel: { display: true, labelString: 'profit % after fees', fontColor: '#52514e' } }] },
+  } };
+  return `https://quickchart.io/chart?w=760&h=480&bkg=white&c=${encodeURIComponent(JSON.stringify(cfg))}`;
+}
+
+/** Win rates of each exit over the bought trades so far, and setups like this one (same entry-premium band). */
+export function coinStats(rec, records = []) {
+  const bought = [...records.filter((x) => x !== rec && x.taken !== false && !x.skipReason), rec];
+  const rate = (f) => { const v = bought.map(f).filter((x) => x != null && Number.isFinite(x)); return v.length ? `${Math.round((v.filter((x) => x > 0).length / v.length) * 100)}%` : '—'; };
+  const avg = (f) => { const v = bought.map(f).filter((x) => x != null && Number.isFinite(x)); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null; };
+  const lo = rec.entryGap == null ? null : Math.floor(rec.entryGap * 20) / 20, like = lo == null ? [] : bought.filter((x) => Number.isFinite(x.entryGap) && Math.floor(x.entryGap * 20) / 20 === lo && Number.isFinite(x.fcat));
+  return { n: bought.length, win: { fcat: rate((x) => x.fcat), 3: rate((x) => x.curve?.[3]), 5: rate((x) => x.curve?.[5]), 10: rate((x) => x.curve?.[10]) },
+    avg: { fcat: avg((x) => x.fcat), 3: avg((x) => x.curve?.[3]), 5: avg((x) => x.curve?.[5]), 10: avg((x) => x.curve?.[10]), best: avg((x) => x.peak) },
+    like: { band: lo == null ? null : [lo, lo + 0.05], n: like.length, win: like.length ? like.filter((x) => x.fcat > 0).length / like.length : null, avg: like.length ? like.reduce((a, x) => a + x.fcat, 0) / like.length : null } };
+}
+
+/** The chart read like a trader: what the price did, which exit won, the stop and gate, the win rates. */
+export function coinChartText(rec, records = [], { gatePct = 15, stopPct = 20, buySol = 0.1 } = {}) {
+  const c = rec.curve || [], base = c.find((v) => v != null) ?? 0, stopLvl = (1 + base) * (1 - stopPct / 100) - 1;
+  const first = (f) => { const s = c.findIndex((v) => v != null && f(v)); return s < 0 ? null : s; };
+  const stopAt = first((v) => v <= stopLvl), gateAt = first((v) => v >= gatePct / 100), last = [...c].reverse().find((v) => v != null);
+  const st = coinStats(rec, records), sv = (v) => (v == null || !Number.isFinite(v) ? '—' : `${v * buySol >= 0 ? '+' : ''}${(v * buySol).toFixed(4)} SOL`);
+  const exits = [['3CAT', c[3]], ['5CAT', c[5]], ['10CAT', c[10]], ['FCAT (your rule)', rec.fcat], [`BEST (${rec.btsab ?? '?'}s)`, rec.peak]].filter(([, v]) => v != null && Number.isFinite(v)).sort((a, b) => b[1] - a[1]);
+  const shape = rec.peak == null || last == null ? 'not enough price points to read the shape'
+    : rec.peak <= 0 ? `never made money: best ${pct(rec.peak)}, it ${last < base ? 'kept falling' : 'went sideways'} (${pct(base)} at the buy, ${pct(last)} at the end)`
+    : rec.btsab <= 5 && last < rec.peak - 0.1 ? `spiked fast to ${pct(rec.peak)} at ${rec.btsab}s, then gave back ${Math.round((rec.peak - last) * 100)} points by the end: an early exit beat holding`
+    : rec.btsab >= 10 ? `climbed late: the best price came at ${rec.btsab}s (${pct(rec.peak)}), holding paid`
+    : `peaked at ${pct(rec.peak)} at ${rec.btsab}s and ended at ${pct(last)}`;
+  return [
+    `READ: ${shape}.`,
+    `EXITS, best to worst: ${exits.map(([k, v]) => `${k} ${pct(v)} (${sv(v)})`).join(' > ')}`,
+    `PCAT ${pct(rec.pcat)}: bought at Decu's own price, sold at ${rec.pcatExit || 'the end'}.${Number.isFinite(rec.entryGap) ? ` You paid ${Math.abs(rec.entryGap * 100).toFixed(1)}% ${rec.entryGap >= 0 ? 'more' : 'less'} than him: most of the gap between PCAT and your FCAT.` : ''}`,
+    `STOP-LOSS -${stopPct}% from entry = ${pct(stopLvl)} on this chart: ${stopAt == null ? 'never hit' : `hit at ${stopAt}s`}. GAIN GATE +${gatePct}%: ${gateAt == null ? 'never reached' : `reached at ${gateAt}s`}.`,
+    rec.bandSol ? `BAND (${rec.bandSol.toFixed(3)} SOL, a share of Decu's size): ${[['3CAT', c[3]], ['5CAT', c[5]], ['10CAT', c[10]], ['FCAT', rec.fcat], ['BEST', rec.peak]].map(([k, v]) => `${k} ${v == null || !Number.isFinite(v) ? '—' : `${v >= 0 ? '+' : ''}${(v * rec.bandSol).toFixed(4)} SOL`}`).join(' · ')}` : null,
+    `WIN RATE over ${st.n} bought trades: FCAT ${st.win.fcat} (avg ${pct(st.avg.fcat)}) · 3CAT ${st.win[3]} (avg ${pct(st.avg[3])}) · 5CAT ${st.win[5]} (avg ${pct(st.avg[5])}) · 10CAT ${st.win[10]} (avg ${pct(st.avg[10])})`,
+    st.like.band ? `SETUPS LIKE THIS (paid ${Math.round(st.like.band[0] * 100)}–${Math.round(st.like.band[1] * 100)}% over Decu): ${st.like.n} trades, ${st.like.win == null ? '—' : Math.round(st.like.win * 100) + '%'} won, avg FCAT ${pct(st.like.avg)}` : null,
+  ].filter(Boolean).join('\n');
+}
+
 const pct = (x) => (x == null || !Number.isFinite(x) ? '—' : `${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)}%`);
 const sol = (x) => (x == null || !Number.isFinite(x) ? '—' : `${x >= 0 ? '+' : ''}${x.toFixed(4)}`);
 const median = (xs) => { const s = xs.filter(Number.isFinite).sort((a, b) => a - b); return s.length ? (s.length % 2 ? s[s.length >> 1] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2) : null; };
@@ -217,7 +287,7 @@ export function summaryText(sm) {
  * leaderSell(mint, {time, sol, soldRaw}) records his first sell during the window.
  * learnOpts go to the brain (learn.mjs): stopLossPct, gainGatePct, gateSec, maxPayPct, reportEvery.
  */
-export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, notesOpts = {}, learnOpts = {}, skippedAlerts = true, reportPcts = [], holderRule = HOLDER_RULES, sampleHolders = null, holderEverySec = 5, log = () => {} }) {
+export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, notesOpts = {}, learnOpts = {}, skippedAlerts = true, coinCharts = true, reportPcts = [], holderRule = HOLDER_RULES, sampleHolders = null, holderEverySec = 5, log = () => {} }) {
   const sellFee = () => (typeof feeSol === 'function' ? feeSol() : feeSol);
   const filterPct = notesOpts.maxPayPct ?? 60;
   const ruleOpts = { stopLossPct: notesOpts.stopLossPct ?? 20, gainGatePct: notesOpts.gainGatePct ?? 15, gateSec: learnOpts.gateSec ?? windowSec };
@@ -326,7 +396,9 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
         mode === 'live' ? '' : 'No real money used.',
         `Token: ${st.mint}`,
       ].filter((x) => x != null).join('\n');
-      if (!st.shadow || alertSkipped(rec.entryGap)) send({ title: `${tag}${st.shadow ? 'SKIPPED ' : ''}${name} FCAT ${pct(fcat)} | BTSAB ${btsab ?? '—'}s ${pct(peak)}`, body, priority: st.shadow ? 2 : 3, tags: ['bar_chart'], click: `https://pump.fun/coin/${st.mint}`, image: tradeChart(rec, ruleOpts.gainGatePct, ruleOpts.stopLossPct) });
+      const tradeAlert = !st.shadow || alertSkipped(rec.entryGap) ? Promise.resolve(notify({ title: `${tag}${st.shadow ? 'SKIPPED ' : ''}${name} FCAT ${pct(fcat)} | BTSAB ${btsab ?? '—'}s ${pct(peak)}`, body, priority: st.shadow ? 2 : 3, tags: ['bar_chart'], click: `https://pump.fun/coin/${st.mint}`, image: tradeChart(rec, ruleOpts.gainGatePct, ruleOpts.stopLossPct) })).catch(() => {}) : Promise.resolve();
+      // THE PER-COIN CHART of a bought trade: its own notification, right after the trade alert
+      if (!st.shadow && coinCharts) tradeAlert.then(() => send({ title: `${tag}${name} chart · FCAT ${pct(fcat)} · 3CAT ${at(3)} · 5CAT ${at(5)} · 10CAT ${at(10)} · PCAT ${pct(pcat)}`, body: coinChartText(rec, records, { gatePct: ruleOpts.gainGatePct, stopPct: ruleOpts.stopLossPct, buySol }), priority: 3, tags: ['chart_with_upwards_trend'], click: `https://pump.fun/coin/${st.mint}`, image: coinChart(rec, records, { gatePct: ruleOpts.gainGatePct, stopPct: ruleOpts.stopLossPct }), kind: 'trade-chart' }));
       // What the brain decided is worth its own alert: new / confirmed / faded patterns, streaks,
       // level-ups, the learning report every 10 trades and the daily digest.
       for (const e of learned.events) send({ title: `${tag}${e.title}`, body: e.body + (mode === 'live' ? '' : '\nNo real money used.'), priority: e.priority, tags: e.tags, image: ['report', 'level', 'digest', 'streak'].includes(e.kind) ? historyChart(records) : undefined });

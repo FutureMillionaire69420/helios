@@ -38,7 +38,7 @@ test('analytics digest: one phone image per key chart, short QuickChart links', 
   const m = digestMessages(a, {max: 6, tag: '[PAPER] '});
   assert.equal(m.length, 6); assert.match(m[0].title, /^\[PAPER\] Analytics 1: Running profit/); assert.match(m[0].body, /Bought trades only/);
   for (const x of m) { assert.match(x.image, /^https:\/\/quickchart\.io\/chart\?/); assert.ok(x.image.length < 4500, `${x.title}: ${x.image.length} chars`); }
-  const cfg = JSON.parse(decodeURIComponent(new URL(quickChartUrl(a.charts[0])).searchParams.get('c')));
+  const cfg = JSON.parse(new URL(quickChartUrl(a.charts[0])).searchParams.get('c'));
   assert.ok(cfg.data.labels.length <= 60, 'at most 60 points per image');
 });
 
@@ -61,4 +61,26 @@ test('runtime: /api/analytics, the dashboard send button, and the daily chart ca
   assert.match(msg, /Sent 3 charts.*cap is reached/);
   assert.ok(sent.filter((m) => m.kind === 'chart').every((m) => m.image && /quickchart/.test(m.image)), 'each chart message carries its image');
   assert.ok((await fetch(base + '/charts.js')).ok, 'the chart renderer is served');
+});
+
+test('per-coin chart: this trade deconstructed (3/5/10CAT, best second, stop, gate, PCAT, BAND, win rates)', async () => {
+  const {coinChart, coinChartText} = await import('./study.mjs');
+  const records = Array.from({length: 20}, (_, i) => rec(i));
+  const r = {...rec(3), symbol: 'TEST', curve: [-0.09, -0.13, 0.26, 0.32, 0.44, 0.41, 0.36, 0.37, 0.34, 0.32, 0.35, 0.29, 0.29, 0.27, 0.24, 0.27], btsab: 4, peak: 0.44, worst: -0.13, worstAt: 1, fcat: 0.27, fcatSec: 13, fcatExit: '15s limit', pcat: 1.2, pcatExit: 'his sell at 4.2s', hisSoldAtSec: 4.2, entryGap: 0.73, bandSol: 0.196};
+  records.push(r);
+  const url = coinChart(r, records, {gatePct: 15, stopPct: 20});
+  assert.ok(url.length < 6000, `${url.length} chars`);
+  const cfg = JSON.parse(new URL(url).searchParams.get('c'));
+  assert.deepEqual(cfg.data.labels.slice(3, 6), ['3s 3CAT', '4s BEST', '5s 5CAT DECU SOLD'], 'every exit is named on the time axis');
+  assert.equal(cfg.data.labels[13], '13s EXIT'); assert.equal(cfg.data.labels[10], '10s 10CAT');
+  assert.deepEqual(cfg.data.datasets[1].data.filter((x) => x != null), [32, 44, 41, 35], 'markers at 3, 4 (best), 5 and 10 s');
+  assert.match(cfg.data.datasets[2].label, /Stop-loss: -20% from entry \(-27\.2%\)/);
+  assert.match(cfg.options.title.text.join(' '), /3CAT \+32\.0%.*5CAT \+41\.0%.*10CAT \+35\.0%.*PCAT \+120\.0%.*BAND 0\.196 SOL.*Win rate so far \(21 bought\)/);
+  const text = coinChartText(r, records, {gatePct: 15, stopPct: 20, buySol: 0.1});
+  assert.match(text, /^READ: spiked fast to \+44\.0% at 4s/);
+  assert.match(text, /EXITS, best to worst: BEST \(4s\) \+44\.0%/);
+  assert.match(text, /STOP-LOSS -20% from entry = -27\.2% on this chart: never hit\. GAIN GATE \+15%: reached at 2s\./);
+  assert.match(text, /BAND \(0\.196 SOL.*3CAT \+0\.0627 SOL/);
+  assert.match(text, /WIN RATE over 21 bought trades: FCAT \d+%/);
+  assert.match(text, /You paid 73\.0% more than him/);
 });
