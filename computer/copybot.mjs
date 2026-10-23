@@ -866,6 +866,8 @@ async function notify({ title, body, priority = 3, tags = [], click, actions = [
   console.log(line);
   if (!config.ntfyTopic) return 'no topic';
   if ((kind === 'chart' && ntfyToday().chartsLeft <= 0) || (kind === 'trade-chart' && ntfyToday().tradeChartsLeft <= 0)) return 'capped';
+  // brain notes (one per bought trade, capped per day in brain.mjs) give way to trade alerts near the daily limit
+  if (kind === 'brain' && num('NTFY_MAX_PER_DAY', 250) - num('NTFY_RESERVE', 60) - ntfyUsage.total <= 0) return 'capped';
   // ntfy turns messages over 4096 bytes into a file attachment: keep the alert readable instead.
   if (Buffer.byteLength(body) > 3900) { const tail = '\n…(cut: full report with node copybot.mjs study)'; body = Buffer.from(body).subarray(0, 3900 - tail.length).toString('utf8').replace(/\uFFFD+$/, '') + tail; }
   const headers = { Title: ascii(title), Priority: String(priority) };

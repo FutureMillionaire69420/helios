@@ -61,6 +61,11 @@ function renderResearch(r){
   item(out,'Execution latency',`median ${sec(L.medianSec)} · p95 ${sec(L.p95Sec)} from his block · bot part median ${msf(L.botMedianMs)} (p95 ${msf(L.botP95Ms)}) · build ${msf(L.buildMedianMs)} · land ${msf(L.landMedianMs)}${L.simulatedMs?' (incl. '+msf(L.simulatedMs)+' simulated)':''} · blocks after Decu ${L.blocksMedian??'—'}${L.detectBlocksMedian!=null?` · seen ${L.detectBlocksMedian} blocks after him (p95 ${L.detectBlocksP95??'—'})`:''}`);
   const rs=Object.entries(r.skipReasons||{});if(rs.length)item(out,'Why buys were skipped',rs.map(([k,v])=>`${v}× ${k}`).join(' · '));
   if(r.brain)item(out,`Brain: L${r.brain.level} ${r.brain.name}`,`${r.brain.trades} trades · go-live ${r.brain.readiness.passed}/${r.brain.readiness.of}${r.brain.accuracy?' · predictions '+Math.round(r.brain.accuracy.rate*100)+'% right':''}`);
+  const T=r.thinking; if(T){const u=x=>Number.isFinite(x)?`${x<0?'−':'+'}$${Math.abs(x).toFixed(2)}`:'—';
+    item(out,`Brain rank: ${T.rank.name} (${T.rank.index}/${T.rank.of})`,`$1000 paper bankroll now $${T.rank.bankrollUsd.toFixed(2)}${T.rank.next?` · next ${T.rank.next.name}: ${T.rank.next.checks.map(c=>(c.ok?'✔ ':'✘ ')+c.text).join(' · ')}`:' · top rank'}`);
+    item(out,'Brain rules',`premium cap ${T.rules.maxPayPct}% · stop −${T.rules.stopLossPct}% · gate +${T.rules.gainGatePct}% (your settings ${T.defaults.maxPayPct}% / −${T.defaults.stopLossPct}% / +${T.defaults.gainGatePct}%) · auto-tune ${T.autoTune?'on (paper)':'off'} · skips ${T.vetoes.skipped} (${T.vetoes.rightSkips} right)`);
+    if(T.mirror.trades)item(out,`$10 mirror over ${T.mirror.trades} trades`,`Decu perfect ${u(T.mirror.perfectUsd)} · yours ${u(T.mirror.yourUsd)} · delay cost ${u(T.mirror.delayUsd)} · fees ${u(-T.mirror.feesUsd)} · after fees ${u(T.mirror.afterFeesUsd)}`);
+    for(const d of T.decisions.slice().reverse())item(out,`Brain ${d.kind} · ${new Date(d.time).toLocaleString()}`,d.text);}
   for(const t of r.recent)item(rec,`${new Date(t.time).toLocaleTimeString()} · ${t.coin} · ${t.taken?'BOUGHT':'SKIPPED'}`,`premium ${pc(t.premium)} · latency ${sec(t.latencySec)}${t.blocks!=null?' · '+t.blocks+' blocks':''} · FCAT ${pc(t.fcat)}${t.reason?' · '+t.reason:''}`,!t.taken);
   $('research-updated').textContent='Updated '+new Date().toLocaleTimeString();
 }

@@ -287,7 +287,7 @@ export function summaryText(sm) {
  * leaderSell(mint, {time, sol, soldRaw}) records his first sell during the window.
  * learnOpts go to the brain (learn.mjs): stopLossPct, gainGatePct, gateSec, maxPayPct, reportEvery.
  */
-export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, notesOpts = {}, learnOpts = {}, skippedAlerts = true, coinCharts = true, reportPcts = [], holderRule = HOLDER_RULES, sampleHolders = null, holderEverySec = 5, log = () => {} }) {
+export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, notesOpts = {}, learnOpts = {}, skippedAlerts = true, coinCharts = true, reportPcts = [], holderRule = HOLDER_RULES, sampleHolders = null, holderEverySec = 5, onRecord = null, log = () => {} }) {
   const sellFee = () => (typeof feeSol === 'function' ? feeSol() : feeSol);
   const filterPct = notesOpts.maxPayPct ?? 60;
   const ruleOpts = { stopLossPct: notesOpts.stopLossPct ?? 20, gainGatePct: notesOpts.gainGatePct ?? 15, gateSec: learnOpts.gateSec ?? windowSec };
@@ -325,10 +325,10 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
     const hisPrice = st.his.sol > 0 && st.his.raw > 0 ? st.his.sol / st.his.raw : null;
     const f = st.his.first, firstPrice = f?.sol > 0 && f.raw > 0 ? f.sol / f.raw : hisPrice;
     const delaySec = st.his.time ? Math.round((st.startedAt / 1000 - st.his.time) * 10) / 10 : null;
-    let pcat = null, pcatExit = null;
+    let pcat = null, pcatExit = null, exitPrice = null;
     if (firstPrice) {
       const hs = st.hisSell;
-      const exitPrice = hs && hs.sol > 0 && hs.soldRaw > 1000 ? hs.sol / hs.soldRaw /* a placeholder amount ('1') is never a price */ : st.values.findLast((v) => v != null) / st.raw;
+      exitPrice = hs && hs.sol > 0 && hs.soldRaw > 1000 ? hs.sol / hs.soldRaw /* a placeholder amount ('1') is never a price */ : st.values.findLast((v) => v != null) / st.raw;
       if (Number.isFinite(exitPrice)) { pcat = exitPrice / firstPrice - 1 - (2 * st.sellFee) / buySol; pcatExit = hs ? `his sell at ${hs.atSec}s` : '15s mark'; }
     }
     // FCAT: exit at the first full second after his first sell, else 15 s after DECU'S buy (the bot
@@ -349,6 +349,8 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
       holderPath: st.holderPath.length ? st.holderPath.sort((a, b) => a.s - b.s) : null, cost: st.cost, curve, fcat, fcatSec, fcatExit, btsab, peak, worst, worstAt, pcat, pcatExit,
       hisSoldAtSec: st.hisSell?.atSec ?? null, bandSol: st.his.sol > 0 ? st.his.sol * bandPct : null,
       taken: !st.shadow, skipReason: st.shadow || null, latency: st.his.latency || null, hisTime: st.his.time ?? null,
+      // prices for the $10 mirror (brain.mjs): his copied buy, the bot's entry, the exit (his sell or the 15 s mark)
+      hisPrice, entryPrice: st.entryPrice > 0 ? st.entryPrice : botPrice, exitPrice: Number.isFinite(exitPrice) ? exitPrice : null,
       copiedLaterBuy: !!(f && f.time && st.his.time && st.his.time - f.time > 1), hisFirstTime: f?.time ?? null,
       coin: m ? { holders: m.holders ?? null, marketCapUsd: m.marketCapUsd ?? null, ageSec: m.createdTime ? Math.round(st.startedAt / 1000 - m.createdTime) : null } : null,
     };
@@ -368,6 +370,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
     rec.thinking = brain.thinkingNotes(rec, learned, records);
     rec.prediction = learned.prediction ? { fcat: learned.prediction.fcat, right: learned.prediction.win === rec.fcat > 0 } : null;
     try { fs.appendFileSync(file, JSON.stringify(rec) + '\n', { mode: 0o600 }); } catch (e) { log(`study journal unavailable: ${e.message}`); }
+    if (onRecord) { try { onRecord(rec); } catch (e) { log(`brain: ${e.message}`); } }
     if (notify) {
       const name = rec.symbol ? `$${rec.symbol}` : `${st.mint.slice(0, 6)}…`;
       const at = (s) => (curve[s] == null ? '—' : pct(curve[s]));

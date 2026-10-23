@@ -6,6 +6,7 @@ import {Engine} from './engine.mjs';
 import {PUMP_TOKEN,QUOTES} from './solscan.mjs';
 import {createStudy,summaryText} from './study.mjs';
 import {buildAnalytics,digestMessages} from './analytics.mjs';
+import {createThinkingBrain,createBackup,restoreIfEmpty} from './brain.mjs';
 import {buyContextFromLogs,tokensOut,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache,createSellDesk,decodeBondingCurve,quotedInSol,PUMP,TOKEN,TOKEN_2022} from './pumpbuild.mjs';
 
 const val = (key, fallback) => process.env[key]?.trim() || fallback;
@@ -136,6 +137,10 @@ export async function startRuntime(k, {demo=false}={}) {
   const netPrice = (solIn, raw, feeFrac=poolFee) => raw>0 ? solIn*(1-feeFrac)/raw : null;
   const solUsd = () => k.solUsdNow ? k.solUsdNow() : null;
   const maxPayPct = demo ? 0 : c.mode==='live' ? filterPct : number('PAPER_MAX_PAY_PCT',filterPct);
+  // THE RULES the bot trades by. In PAPER the brain (brain.mjs) may tune them inside fixed limits; LIVE never
+  // changes them on its own (the brain only suggests). defaults = the settings, what a revert goes back to.
+  const rules={maxPayPct,stopLossPct:number('STOP_LOSS_PCT',20),gainGatePct:number('GAIN_GATE_PCT',15)}, ruleDefaults={...rules};
+  let thinking=null;
   const sellSlippagePct=number('SELL_SLIPPAGE_PCT',35), fastSells=val('FAST_PATH_SELLS','false')==='true';
   // CIRCUIT BREAKERS (new buys only; sells always run): BUY_FAIL_BREAKER (3) failed buys in a row ->
   // no new buys for BUY_FAIL_COOLDOWN_MIN (10); Helius websocket down for STALE_DATA_SEC (30) -> no
@@ -248,10 +253,21 @@ export async function startRuntime(k, {demo=false}={}) {
   const holderRuleCfg = String(val('HOLDER_RULES','10000:1000,20000:2500,30000:4000')).split(',').map(x=>x.split(':').map(Number)).filter(([a,b])=>a>0&&b>0).sort((a,b)=>a[0]-b[0]);
   // the dev comes from Decu's trade event (written by pump.fun itself); the curve account is the fallback
   const holderSample = mint => k.holderStats(mint,{creator:creators.get(mint)}).catch(()=>null);
+  const studyFile=val('STUDY_FILE',path.resolve(`study-${c.mode}.jsonl`)), brainFile=val('BRAIN_FILE',path.join(path.dirname(studyFile),`brain-memory-${c.mode}.json`));
+  // GITHUB_BACKUP_TOKEN: a GitHub token for ONE repo (contents read/write). Off without it.
+  const brainBackup=demo?null:createBackup({token:val('GITHUB_BACKUP_TOKEN',''),repo:val('GITHUB_BACKUP_REPO','FutureMillionaire69420/DECU-BOT-RENDER-'),branch:val('GITHUB_BACKUP_BRANCH',`brain-backup-${c.mode}`),log:m=>console.log(m)});
+  if(brainBackup) await restoreIfEmpty({backup:brainBackup,memoryFile:brainFile,journalFile:studyFile,log:m=>console.log(m)}).catch(()=>{});
   const study = demo || val('STUDY','true')==='false' || !k.quoteSell ? null : createStudy({
-    file:val('STUDY_FILE',path.resolve(`study-${c.mode}.jsonl`)), quoteSell:k.quoteSell, mode:c.mode, buySol:c.buySol,
+    file:studyFile, onRecord:r=>thinking?.onTrade(r), quoteSell:k.quoteSell, mode:c.mode, buySol:c.buySol,
     feeSol:()=>sideFee(), reportPcts, holderRule:holderRuleCfg, sampleHolders:k.holderStats&&!demo?holderSample:null, windowSec:number('STUDY_WINDOW_SEC',15), bandPct:number('BAND_PCT',10)/100, notesOpts:{stopLossPct:number('STOP_LOSS_PCT',20),gainGatePct:number('GAIN_GATE_PCT',15),maxPayPct:filterPct}, learnOpts:{gateSec:number('MAX_HOLD_SEC',15),maxPayPct:filterPct,reportEvery:number('LEARN_REPORT_EVERY',10),digestHours:number('LEARN_DIGEST_HOURS',24)}, label:k.config.leaderLabel,
     skippedAlerts:val('SKIPPED_ALERTS','false'), coinCharts:val('COIN_CHARTS','true')!=='false', meta:k.tokenMeta||null, notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, log:m=>engine?.event('connection',{message:m})});
+  if(study) {
+    let version='0'; try { version=JSON.parse(fs.readFileSync(new URL('./package.json',import.meta.url),'utf8')).version; } catch {}
+    thinking=createThinkingBrain({file:brainFile,study,mode:c.mode,buySol:c.buySol,rules,defaults:ruleDefaults,version,solUsd,backup:brainBackup,journalFile:studyFile,
+      notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, autoTune:c.mode==='paper'&&val('BRAIN_AUTOTUNE','true')!=='false', veto:c.mode==='paper'&&val('BRAIN_VETO','true')!=='false',
+      bankrollUsd:number('BRAIN_BANKROLL_USD',1000), brainPerDay:number('NTFY_BRAIN_PER_DAY',60), gateSec:number('MAX_HOLD_SEC',15), log:m=>console.log(m)});
+    if(c.mode==='paper' && JSON.stringify(rules)!==JSON.stringify(ruleDefaults)) console.log(`brain: paper rules restored from memory: premium cap ${rules.maxPayPct}% · stop -${rules.stopLossPct}% · gate +${rules.gainGatePct}% (settings: ${ruleDefaults.maxPayPct}% / -${ruleDefaults.stopLossPct}% / +${ruleDefaults.gainGatePct}%)`);
+  }
   // A Decu buy the bot did not take (filtered, paused, style off, too late, failed): still priced
   // every second for 15 s from a quote of the same size, so the research data has no survivor bias.
   // Read-only; one quote per skipped buy, never on the trading path.
@@ -291,10 +307,12 @@ export async function startRuntime(k, {demo=false}={}) {
       const q=demo?{raw:Math.floor(job.sol*1e9)}:await k.quoteBuy(job.mint,job.sol*0.995);
       if(!q?.raw) return {status:'failed',error:'no paper buy quote'};
       const pp=stamp(job.mint,'landedAt'); pp.simulatedMs=waitMs; const sl=await slotP; if(Number.isInteger(sl)) { pp.landSlot??=sl; pp.slotEstimated=true; }
-      const ref=refFor(job.mint), maxPay=maxPayPct/100;
+      const ref=refFor(job.mint), maxPay=rules.maxPayPct/100;
       if(maxPay>0 && !(ref?.sol>0 && ref.raw>0)) return {status:'failed',error:"no Decu price to check the entry premium against: not bought (fail-closed)"};
       const entry=netPrice(job.sol*0.995,q.raw); pp.entryPrice=entry; pp.buyFeeSol=fee;
       if(maxPay>0) { const gap=entry/(ref.sol/ref.raw)-1; pp.premiumAtFill=gap; if(gap>maxPay) return {status:'failed',error:`entry premium ${Math.round(gap*100)}% above Decu's price (limit ${Math.round(maxPay*100)}%): not bought`}; }
+      // THE BRAIN (paper only): skip a buy it clearly expects to lose, once its predictions beat guessing
+      if(thinking && ref?.sol>0 && ref.raw>0) { const t=Date.parse(new Date().toISOString()), why=thinking.gate({mint:job.mint,time:new Date(t).toISOString(),hisSol:ref.sol,entryGap:entry/(ref.sol/ref.raw)-1,delaySec:ref.time?Math.round((t/1000-ref.time)*10)/10:null,latency:latencyOf(job.mint),ctx:{recent10m:(study?.records||[]).filter(r=>{const u=Date.parse(r.time);return u<t&&t-u<=600e3;}).length}}); if(why) return {status:'failed',error:why}; }
       if(job.quoteRaw && q.raw<job.quoteRaw/(1+k.config.slippagePct/100)) return {status:'failed',error:'paper landing price exceeded slippage limit'};
       return {status:'confirmed',rawDelta:BigInt(Math.floor(q.raw)).toString(),solDelta:-job.sol-fee};
     }
@@ -381,7 +399,7 @@ export async function startRuntime(k, {demo=false}={}) {
           try {
             const t0=Date.now();
             const f=fee(), tip=f.tipSol>0 ? k.TIP_ACCOUNTS[Math.floor(Math.random()*k.TIP_ACCOUNTS.length)] : null;
-            const ref=refFor(job.mint), maxPay=maxPayPct/100;
+            const ref=refFor(job.mint), maxPay=rules.maxPayPct/100;
             // the chain enforces the max-pay guard: the buy fails (fee only) if the price ran past it
             if(maxPay>0 && !(ref?.sol>0 && ref.raw>0)) throw new Error('no Decu price to check the entry premium against: not bought (fail-closed)');
             // price vs price: the SOL that reaches the curve (after the pool + creator fee in HIS trade event)
@@ -430,13 +448,13 @@ export async function startRuntime(k, {demo=false}={}) {
       // Exact token quantity in decimal text; never sell tokens outside the bot position.
       const raw=job.side==='sell'?job.raw.padStart(decimals+1,'0'):'';
       const amount=job.side==='buy'?job.sol:decimals?raw.slice(0,-decimals)+'.'+raw.slice(-decimals):raw;
-      const ref=refFor(job.mint), checkPrem=job.side==='buy' && maxPayPct>0;
+      const ref=refFor(job.mint), checkPrem=job.side==='buy' && rules.maxPayPct>0;
       if(checkPrem && !(ref?.sol>0 && ref.raw>0)) throw new Error('no Decu price to check the entry premium against: not bought (fail-closed)');
       const premQ=checkPrem ? k.quoteBuy(job.mint,job.sol*0.995).catch(()=>null) : null;
       let bytes=await k.http('https://pumpportal.fun/api/trade-local',{method:'POST',raw:true,body:{publicKey:k.kp.publicKey,action:job.side,mint:job.mint,amount,denominatedInSol:job.side==='buy'?'true':'false',slippage:job.side==='sell'?sellSlippagePct:k.config.slippagePct,priorityFee:ppFee.priorityFeeSol,pool:'auto'}});
       const pq=await premQ;
       if(checkPrem && !pq?.raw) throw new Error('no current price to check the entry premium: not bought (fail-closed)');
-      if(checkPrem) { const prem=netPrice(job.sol*0.995,pq.raw)/(ref.sol/ref.raw)-1; stamp(job.mint,'premiumAtBuild',prem); if(prem>maxPayPct/100) throw new Error(`entry premium ${Math.round(prem*100)}% above Decu's price (MAX_PAY_ABOVE_DECU_PCT ${maxPayPct}%): not bought`); }
+      if(checkPrem) { const prem=netPrice(job.sol*0.995,pq.raw)/(ref.sol/ref.raw)-1; stamp(job.mint,'premiumAtBuild',prem); if(prem>rules.maxPayPct/100) throw new Error(`entry premium ${Math.round(prem*100)}% above Decu's price (MAX_PAY_ABOVE_DECU_PCT ${rules.maxPayPct}%): not bought`); }
       if(ppFee.tipSol>0) bytes=k.addTransferInstruction(bytes,k.TIP_ACCOUNTS[Math.floor(Math.random()*k.TIP_ACCOUNTS.length)],Math.round(ppFee.tipSol*1e9));
       const signed=k.signTransaction(bytes,k.kp);
       await k.validateTrade(signed.bytes,job,balance,ppFee.priorityFeeSol+ppFee.tipSol);
@@ -500,7 +518,7 @@ export async function startRuntime(k, {demo=false}={}) {
   //  His sell always exits at once in auto-sell style (SELL_ALL_ON_LEADER_SELL).
   // STOP_LOSS_FROM=entry (default): the stop measures the coin's own move from the price right after
   // the bot's buy ("organic"), ignoring the fees and price impact already paid. =cost: from cost.
-  const stopLoss=number('STOP_LOSS_PCT',20)/100, gainGate=number('GAIN_GATE_PCT',15)/100, stopFromEntry=val('STOP_LOSS_FROM','entry')!=='cost';
+  const stopFromEntry=val('STOP_LOSS_FROM','entry')!=='cost';
   const holdLimitMs=number('HOLD_LIMIT_SEC',600)*1000, stopLossManual=val('STOP_LOSS_MANUAL','true')==='true';
   const monitors=new Map();
   // STOP-LOSS RELIABILITY:
@@ -573,10 +591,10 @@ export async function startRuntime(k, {demo=false}={}) {
         }
         const move=pnl==null?null:stopFromEntry?(1+pnl)/(1+m.base)-1:pnl;
         // The stop-loss ALWAYS sells, in both trading styles.
-        if(move!=null && stopLoss>0 && move<=-stopLoss && (auto||stopLossManual)) { unwatch(); return exitNow(mint,p,'stoploss',pnl,move); }
+        if(move!=null && rules.stopLossPct>0 && move<=-rules.stopLossPct/100 && (auto||stopLossManual)) { unwatch(); return exitNow(mint,p,'stoploss',pnl,move); }
         if(auto && maxHoldMs>0 && sinceHis>=maxHoldMs && !m.decided) {
           m.decided=true;
-          if(m.peak>=gainGate) { unwatch(); return exitNow(mint,p,'gain-target',pnl); }
+          if(m.peak>=rules.gainGatePct/100) { unwatch(); return exitNow(mint,p,'gain-target',pnl); }
           engine.event('exit-rule',{mint,rule:'hold-until-his-sell',pnl,peak:Number.isFinite(m.peak)?m.peak:null});
         }
         if(auto && holdLimitMs>0 && age>=holdLimitMs) { unwatch(); return exitNow(mint,p,'hold-limit',pnl); }
@@ -853,7 +871,7 @@ export async function startRuntime(k, {demo=false}={}) {
         res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean(snap)));
       }
       if(url.pathname==='/api/memory' && req.method==='GET') {const {memoryBank,memoryInsights}=await import('./study.mjs');res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?{bank:memoryBank(study.records),insights:memoryInsights(study.records)}:{bank:[]}));}
-      if(url.pathname==='/api/brain' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?study.learning():{journey:null}));}
+      if(url.pathname==='/api/brain' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?{...study.learning(),thinking:thinking?.status()||null}:{journey:null}));}
       if(url.pathname==='/api/study' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?{...study.summary(),text:summaryText(study.summary()),active:[...study.active.keys()]}:{trades:0,text:'Study is off.'}));}
       if(url.pathname==='/api/wallet' && req.method==='GET') {
         res.writeHead(200,{'Content-Type':'application/json'});
@@ -883,7 +901,7 @@ export async function startRuntime(k, {demo=false}={}) {
       if(url.pathname==='/api/export.csv' && req.method==='GET') {const {toCsv}=await import('./study.mjs');res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':`attachment; filename="decu-trades-${c.mode}-${new Date().toISOString().slice(0,10)}.csv"`});return res.end(toCsv(study?study.records:[]));}
       if(url.pathname==='/api/analytics' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean({...analyticsNow(),ntfy:k.ntfyUsage?.()||null})));}
       if(url.pathname==='/api/analytics/send' && req.method==='POST') {const msg=await sendDigest();res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8'});return res.end(msg);}
-      if(url.pathname==='/api/research' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean({...(study?study.research():{trades:0}),live:{fees:fee(),feeMode:val('FEE_MODE','max'),push:!!k.stream?.connected?.(),priceChecks:status.priceChecks,sellDesk:desk?{...desk.snapshot(),liveSells:status.localSells||0,lastLiveSellMs:status.lastLocalSellMs??null,paperSellBuilds:status.paperSellBuilds||0,pushedBalances:status.pushedBalances||0}:null,solscan:k.solscanUsage?.()||null,pumpportal:{...pumpPortalStatus(),fastBuys:status.pumpportalFast||0,chainContexts:status.chainCtx||0,race:status.feedRace||null,builderCheck:ppCheck.result}}})));}
+      if(url.pathname==='/api/research' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean({...(study?study.research():{trades:0}),thinking:(()=>{const t=thinking?.status();return t?{rank:t.rank,rules:t.rules,defaults:t.defaults,autoTune:t.autoTune,veto:t.veto,vetoes:t.vetoes,mirror:t.mirror,decisions:t.decisions.slice(-5)}:null;})(),live:{fees:fee(),feeMode:val('FEE_MODE','max'),push:!!k.stream?.connected?.(),priceChecks:status.priceChecks,sellDesk:desk?{...desk.snapshot(),liveSells:status.localSells||0,lastLiveSellMs:status.lastLocalSellMs??null,paperSellBuilds:status.paperSellBuilds||0,pushedBalances:status.pushedBalances||0}:null,solscan:k.solscanUsage?.()||null,pumpportal:{...pumpPortalStatus(),fastBuys:status.pumpportalFast||0,chainContexts:status.chainCtx||0,race:status.feedRace||null,builderCheck:ppCheck.result}}})));}
       if(req.method==='POST' && ['/api/autocopy/on','/api/autocopy/off'].includes(url.pathname)) {
         engine.autoCopy(url.pathname==='/api/autocopy/on');res.writeHead(200);return res.end('OK');
       }
@@ -916,5 +934,5 @@ export async function startRuntime(k, {demo=false}={}) {
     if(Date.now()-(engine.d.analyticsDigestAt||0)>=number('ANALYTICS_DIGEST_HOURS',24)*3600e3 && n>(engine.d.analyticsDigestN||0)) sendDigest().then(m=>engine.event('analytics-digest',{message:m})).catch(()=>{});
   },number('ANALYTICS_CHECK_MS',600_000)); digestTimer?.unref?.();
   const boughtCount=()=>(study?.records||[]).filter(r=>r.taken!==false && !r.skipReason).length;
-  return {engine,server,study,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;clearInterval(digestTimer);desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,thinking,rules,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;clearInterval(digestTimer);desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }
