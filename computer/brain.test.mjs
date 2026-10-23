@@ -181,3 +181,13 @@ test('end to end: a studied trade carries the mirror prices and the brain note f
   const n = notes.find((x) => x.kind === 'brain');
   assert.ok(n, 'brain note sent'); assert.match(n.body, /\$10 MIRROR/);
 });
+
+test('the $1000 profit goal is tracked, announced at 25/50/75/100%, and patterns show in the note', () => {
+  const { b, records, notes } = setup({ opts: { goalUsd: 10 } });
+  for (let i = 0; i < 6; i++) { const r = rec(i, { fcat: 0.5 }); records.push(r); b.onTrade(r); } // +$10 per trade at 0.1 SOL x $200
+  assert.ok(notes.some((x) => /GOAL REACHED/.test(x.title)));
+  assert.equal(notes.filter((x) => /GOAL REACHED/.test(x.title)).length, 1, 'once');
+  const n = notes.filter((x) => x.kind === 'brain').at(-1);
+  assert.match(n.body, /GOAL \$10\.00 profit/); assert.match(n.body, /Patterns I remember/);
+  assert.equal(b.status().goal.reached, true);
+});

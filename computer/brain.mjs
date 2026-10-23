@@ -215,7 +215,7 @@ export async function restoreIfEmpty({ backup, memoryFile, journalFile, log = ()
  *  change it in place. defaults: the rules from the settings (what a revert goes back to).
  */
 export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1, rules, defaults, notify = null, version = '0', solUsd = () => null,
-  autoTune = mode === 'paper', veto = mode === 'paper', bankrollUsd = 1000, tuneEvery = 10, minEvidence = 50, demoteAfter = 10, revertAfter = 20,
+  autoTune = mode === 'paper', veto = mode === 'paper', bankrollUsd = 1000, goalUsd = 1000, tuneEvery = 10, minEvidence = 50, demoteAfter = 10, revertAfter = 20,
   limits = { maxPayPct: [5, 25], stopLossPct: [10, 30], gainGatePct: [10, 30] }, gateSec = 15, backup = null, backupHours = 24, journalFile = null, brainPerDay = 60, log = () => {}, now = () => Date.now() }) {
   const tag = mode === 'live' ? '' : mode === 'paper' ? '[PAPER] ' : '[DEMO] ';
   let mem = null;
@@ -247,6 +247,24 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
   const facts = () => rankFacts(records, { buySol, bankrollUsd, solUsd: solUsd(), accuracy: learn.accuracy(), now: now() });
   const rankLine = (f = facts()) => { const i = mem.rank.index, next = RANKS[i + 1]; const left = next ? rankChecks(next, f).filter((c) => !c.ok) : []; return `${RANKS[i].name} (${i + 1}/${RANKS.length}) · bankroll ${money(f.bank)} (${usd(f.bank - f.start)})${next ? ` · next ${next.name}: ${left.length ? left.map((c) => c.text).join('; ') : 'all checks pass'}` : ' · top rank'}`; };
 
+  // ----- the goal: $1000 of profit (BRAIN_GOAL_USD) on bought trades; alerts at 25 / 50 / 75 / 100% -----
+  mem.goal = { usd: goalUsd, hit: [], ...(mem.goal || {}) }; mem.goal.usd = goalUsd;
+  const goalLine = (f = facts()) => { const p = f.bank - f.start; return `GOAL ${money(goalUsd)} profit: ${usd(p)} so far (${Math.max(0, Math.round((p / goalUsd) * 100))}%)${p >= goalUsd ? ' · REACHED: you are in profit' : ` · ${money(goalUsd - p)} to go`}`; };
+  function judgeGoal() {
+    const f = facts(), p = f.bank - f.start;
+    for (const step of [25, 50, 75, 100]) {
+      if (p < (goalUsd * step) / 100 || mem.goal.hit.includes(step)) continue;
+      mem.goal.hit.push(step); remember('goal', `${step}% of the ${money(goalUsd)} goal reached (${usd(p)}).`);
+      send({ title: `${tag}Brain: ${step === 100 ? 'GOAL REACHED' : `${step}% of the goal`} · ${usd(p)} profit`, priority: step === 100 ? 5 : 4, tags: [step === 100 ? 'tada' : 'chart_with_upwards_trend'], body: [step === 100 ? `${money(goalUsd)} of profit made: the bot is in profit.` : `${step}% of the way to ${money(goalUsd)} profit.`, goalLine(f), `${f.trades} bought trades, ${Math.round(f.win * 100)}% won.`, mode === 'live' ? '' : 'Paper: no real money used.'].join('\n') });
+      backupSoon();
+    }
+  }
+  // ----- pattern recognition, from the memory bank: the strongest patterns this trade matches -----
+  const patternLines = (rec) => {
+    const all = learn.lessons(), out = [];
+    for (const l of all.slice(0, 3)) out.push(`${l.status === 'confirmed' ? '✔' : '…'} ${l.dev >= 0 ? '▲' : '▼'} ${l.label}: ${l.wins}/${l.n} won, avg FCAT ${pct(l.avg)}`);
+    return out.length ? out : ['No pattern strong enough yet (5+ trades to appear, 8+ to confirm).'];
+  };
   // ----- ranks -----
   function judgeRank() {
     const f = facts(), earned = earnedRank(f), cur = mem.rank.index;
@@ -344,6 +362,7 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
   function onTrade(rec) {
     if (rec.taken === false || rec.skipReason) { save(); return; } // skipped buys teach the patterns, not the rank
     judgeRank();
+    judgeGoal();
     think();
     const m = mirror10(rec, { rules: { stopLossPct: rules.stopLossPct, gainGatePct: rules.gainGatePct, gateSec }, solUsd: solUsd() });
     const day = mirrorTotals(records.filter((r) => String(r.time).slice(0, 10) === String(rec.time).slice(0, 10)), { solUsd: solUsd() });
@@ -352,9 +371,12 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
     const name = rec.symbol ? `$${rec.symbol}` : `${rec.mint.slice(0, 6)}…`;
     const body = [
       `BRAIN · ${rankLine()}`,
+      goalLine(),
       '',
       'What I think:',
       ...(rec.thinking || []).slice(0, 4).map((x) => '• ' + x),
+      'Patterns I remember:',
+      ...patternLines(rec).map((x) => '• ' + x),
       m ? '' : null,
       m ? `$10 MIRROR (bought at your real entry, sold ${m.exitAt}):` : '$10 mirror: no Decu price for this trade.',
       m ? `• Decu perfect $10: ${usd(m.perfectUsd)} (his price in, same exit)` : null,
@@ -385,7 +407,8 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
 
   function status() {
     const f = facts(), i = mem.rank.index;
-    return { rank: { name: RANKS[i].name, index: i + 1, of: RANKS.length, since: mem.rank.since, history: mem.rank.history.slice(-20), next: RANKS[i + 1] ? { name: RANKS[i + 1].name, checks: rankChecks(RANKS[i + 1], f) } : null, bankrollUsd: f.bank },
+    const gp = f.bank - f.start;
+    return { goal: { usd: goalUsd, profitUsd: gp, pct: gp / goalUsd, reached: gp >= goalUsd }, patterns: learn.lessons().slice(0, 10).map((l) => ({ label: l.label, status: l.status, trades: l.n, wins: l.wins, avgFcat: l.avg })), rank: { name: RANKS[i].name, index: i + 1, of: RANKS.length, since: mem.rank.since, history: mem.rank.history.slice(-20), next: RANKS[i + 1] ? { name: RANKS[i + 1].name, checks: rankChecks(RANKS[i + 1], f) } : null, bankrollUsd: f.bank },
       ranks: RANKS.map((r) => r.name), mode, autoTune, veto, rules: { ...rules }, defaults: { ...defaults }, tuning: mem.tuning.history.slice(-20), decisions: mem.decisions.slice(-30), vetoes: vetoScore(),
       mirror: mirrorTotals(records, { solUsd: solUsd() }), versions: mem.versions.slice(-10), backup: backup ? { lastAt: mem.backupAt || null } : null };
   }

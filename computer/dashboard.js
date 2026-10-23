@@ -62,6 +62,8 @@ function renderResearch(r){
   const rs=Object.entries(r.skipReasons||{});if(rs.length)item(out,'Why buys were skipped',rs.map(([k,v])=>`${v}× ${k}`).join(' · '));
   if(r.brain)item(out,`Brain: L${r.brain.level} ${r.brain.name}`,`${r.brain.trades} trades · go-live ${r.brain.readiness.passed}/${r.brain.readiness.of}${r.brain.accuracy?' · predictions '+Math.round(r.brain.accuracy.rate*100)+'% right':''}`);
   const T=r.thinking; if(T){const u=x=>Number.isFinite(x)?`${x<0?'−':'+'}$${Math.abs(x).toFixed(2)}`:'—';
+    if(T.goal)item(out,`Goal: ${u(T.goal.usd).slice(1)} profit`,`${u(T.goal.profitUsd)} so far (${Math.max(0,Math.round(T.goal.pct*100))}%)${T.goal.reached?' · REACHED: in profit':''}`);
+    for(const p of (T.patterns||[]).slice(0,5))item(out,`Pattern ${p.status}: ${p.label}`,`${p.wins}/${p.trades} won · avg FCAT ${(p.avgFcat*100).toFixed(1)}%`);
     item(out,`Brain rank: ${T.rank.name} (${T.rank.index}/${T.rank.of})`,`$1000 paper bankroll now $${T.rank.bankrollUsd.toFixed(2)}${T.rank.next?` · next ${T.rank.next.name}: ${T.rank.next.checks.map(c=>(c.ok?'✔ ':'✘ ')+c.text).join(' · ')}`:' · top rank'}`);
     item(out,'Brain rules',`premium cap ${T.rules.maxPayPct}% · stop −${T.rules.stopLossPct}% · gate +${T.rules.gainGatePct}% (your settings ${T.defaults.maxPayPct}% / −${T.defaults.stopLossPct}% / +${T.defaults.gainGatePct}%) · auto-tune ${T.autoTune?'on (paper)':'off'} · skips ${T.vetoes.skipped} (${T.vetoes.rightSkips} right)`);
     if(T.mirror.trades)item(out,`$10 mirror over ${T.mirror.trades} trades`,`Decu perfect ${u(T.mirror.perfectUsd)} · yours ${u(T.mirror.yourUsd)} · delay cost ${u(T.mirror.delayUsd)} · fees ${u(-T.mirror.feesUsd)} · after fees ${u(T.mirror.afterFeesUsd)}`);
