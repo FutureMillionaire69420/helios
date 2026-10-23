@@ -10,4 +10,4 @@ Restore these on Render to undo the test:
 # Max-tip test (2026-10-23)
 - PRIORITY_FEE_MAX_SOL=0.003
 - TIP_MAX_SOL=0.01
-- PAPER_LAND_MS=400 (a max tip is assumed to land about one block sooner)
+- PAPER_LAND_MS=90 (set 2026-10-23 at the user's request; was 400 for the max-tip test)
