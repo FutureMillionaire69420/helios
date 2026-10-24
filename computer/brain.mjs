@@ -22,6 +22,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { advise, simulateRules } from './learn.mjs';
+import { runTests, speedReport, findingsMarkdown, marketCapGroups } from './tests.mjs';
 
 const fin = (x) => typeof x === 'number' && Number.isFinite(x);
 const pct = (x, d = 1) => (!fin(x) ? '—' : `${x >= 0 ? '+' : ''}${(x * 100).toFixed(d)}%`);
@@ -216,7 +217,7 @@ export async function restoreIfEmpty({ backup, memoryFile, journalFile, log = ()
  */
 export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1, rules, defaults, notify = null, version = '0', solUsd = () => null,
   autoTune = mode === 'paper', veto = mode === 'paper', bankrollUsd = 1000, goalUsd = 1000, tuneEvery = 10, minEvidence = 50, demoteAfter = 10, revertAfter = 20,
-  limits = { maxPayPct: [5, 25], stopLossPct: [10, 30], gainGatePct: [10, 30] }, gateSec = 15, backup = null, backupHours = 24, journalFile = null, brainPerDay = 60, log = () => {}, now = () => Date.now() }) {
+  limits = { maxPayPct: [5, 25], stopLossPct: [10, 30], gainGatePct: [10, 30] }, gateSec = 15, backup = null, backupHours = 24, journalFile = null, brainPerDay = 60, vaultDir = null, poolFee = 0.0125, log = () => {}, now = () => Date.now() }) {
   const tag = mode === 'live' ? '' : mode === 'paper' ? '[PAPER] ' : '[DEMO] ';
   let mem = null;
   try { mem = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* first run */ }
@@ -306,8 +307,36 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
     } else remember('kept', `Kept ${ruleText(last.to)}: ${(after - before) >= 0 ? '+' : ''}${(after - before).toFixed(4)} SOL vs before on ${since.length} trades.`);
   }
   const triedAndFailed = (to) => mem.tuning.history.some((h) => h.judged && h.resultSol != null && h.resultSol < -0.002 && JSON.stringify(h.to) === JSON.stringify(to) && records.length - h.fromRecord < 200);
+  // ----- the paper-test pack (tests.mjs): side by side, never skips; suggests a test only when it is SUPPORTED -----
+  let lastTests = null, lastSpeed = null;
+  function runPack() {
+    lastTests = runTests(records, { buySol, stopLossPct: rules.stopLossPct, gainGatePct: rules.gainGatePct, gateSec, minTrades: minEvidence, poolFee });
+    lastSpeed = speedReport(records, { buySol });
+    mem.tests = { at: new Date(now()).toISOString(), results: lastTests.map((t) => ({ id: t.id, verdict: t.verdict, supported: t.supported, best: t.best?.label ?? null, trades: t.trades })) };
+    mem.testAlerts ||= {};
+    for (const t of lastTests) {
+      const key = `${t.best?.key}`;
+      if (!t.supported || mem.testAlerts[t.id] === key) continue;
+      mem.testAlerts[t.id] = key;
+      remember('suggest', `Test "${t.name}": ${t.best.label} is SUPPORTED (${t.best.train >= 0 ? '+' : ''}${t.best.train.toFixed(4)} SOL on older trades, ${t.best.test >= 0 ? '+' : ''}${t.best.test.toFixed(4)} SOL on newer ones).`);
+      send({ title: `${tag}Brain suggests: ${t.name.replace(/ \(.*\)$/, '')}`, priority: 4, tags: ['bulb'], body: [`${t.what}`, '', `Best version: ${t.best.label}.`, `On older trades: ${t.best.train >= 0 ? '+' : ''}${t.best.train.toFixed(4)} SOL vs what the bot does now. On ${t.test} newer trades it never saw: ${t.best.test >= 0 ? '+' : ''}${t.best.test.toFixed(4)} SOL.`, '', t.sideOnly ? 'This is a side test: it never skips a paper trade.' : 'Nothing was changed. Say the word and it can become a rule.', mode === 'live' ? '' : 'Paper: no real money used.'].join('\n') });
+    }
+    writeVault();
+    return lastTests;
+  }
+  // OBSIDIAN-READY: the findings as a markdown note (front matter + tables) in the second brain's machine side
+  function writeVault() {
+    if (!vaultDir || !lastTests) return;
+    try {
+      fs.mkdirSync(path.join(vaultDir, 'machine'), { recursive: true });
+      fs.writeFileSync(path.join(vaultDir, 'machine', 'findings.md'), findingsMarkdown({ tests: lastTests, speed: lastSpeed, mode, updated: new Date(now()).toISOString(), solUsd: solUsd() }), { mode: 0o600 });
+      const agents = path.join(vaultDir, 'AGENTS.md');
+      if (!fs.existsSync(agents)) fs.writeFileSync(agents, ['# Decu bot second brain', '', '- `machine/`: written by the bot (findings, tests). It rewrites these files; do not edit them.', '- `human/`: yours. The bot reads it and never writes there.', ''].join('\n'), { mode: 0o600 });
+    } catch (e) { log('second brain not written: ' + e.message); }
+  }
   function think() {
     if (boughtN() % tuneEvery !== 0) return;
+    try { runPack(); } catch (e) { log('test pack: ' + e.message); }
     judgeLastChange();
     const studied = records.filter((r) => fin(r.fcat));
     if (studied.length < minEvidence) return;
@@ -383,6 +412,7 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
       m ? `• Your $10 mirror: ${usd(m.yourUsd)} → the delay cost ${usd(m.delayUsd)} (you paid ${pct(m.premium)} ${m.premium >= 0 ? 'more' : 'less'}, ${rec.delaySec ?? '?'} s${rec.latency?.blocksAfter != null ? ` / ${rec.latency.blocksAfter} blocks` : ''} after him)` : null,
       m && m.feesUsd != null ? `• Network fees: ${usd(-m.feesUsd)} (${m.feeSol.toFixed(4)} SOL priority + tip, the same at any size) → after fees ${usd(m.afterFeesUsd)}` : null,
       m ? `• Same trade at $10: FCAT ${usd(m.fcatUsd)} · PCAT ${usd(m.pcatUsd)} · your stop/gate rules ${usd(m.rulesUsd)}${m.rulesHow ? ` (${m.rulesHow})` : ''}` : null,
+      rec.crowd ? `• Place in line: #${rec.crowd.place} after Decu (${rec.crowd.trades} trade${rec.crowd.trades === 1 ? '' : 's'} by others landed between his buy and yours${rec.crowd.sol != null ? `, ${rec.crowd.sol >= 0 ? '+' : ''}${rec.crowd.sol} SOL into the curve` : ''}${rec.crowd.exact ? '' : ', paper estimate'})` : null,
       day.trades ? `Today at $10: Decu ${usd(day.perfectUsd)} · you ${usd(day.yourUsd)} · delay cost ${usd(day.delayUsd)} · fees ${usd(-day.feesUsd)} over ${day.trades} trades` : null,
       '',
       `My rules now: ${ruleText(rules)}${JSON.stringify(rules) !== JSON.stringify(defaults) ? ` (your settings: ${ruleText(defaults)})` : ''}`,
@@ -410,8 +440,10 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
     const gp = f.bank - f.start;
     return { goal: { usd: goalUsd, profitUsd: gp, pct: gp / goalUsd, reached: gp >= goalUsd }, patterns: learn.lessons().slice(0, 10).map((l) => ({ label: l.label, status: l.status, trades: l.n, wins: l.wins, avgFcat: l.avg })), rank: { name: RANKS[i].name, index: i + 1, of: RANKS.length, since: mem.rank.since, history: mem.rank.history.slice(-20), next: RANKS[i + 1] ? { name: RANKS[i + 1].name, checks: rankChecks(RANKS[i + 1], f) } : null, bankrollUsd: f.bank },
       ranks: RANKS.map((r) => r.name), mode, autoTune, veto, rules: { ...rules }, defaults: { ...defaults }, tuning: mem.tuning.history.slice(-20), decisions: mem.decisions.slice(-30), vetoes: vetoScore(),
+      tests: (lastTests || (records.length ? runPack() : [])).map((t) => ({ id: t.id, name: t.name, what: t.what, verdict: t.verdict, supported: t.supported, sideOnly: !!t.sideOnly, trades: t.trades, best: t.best ? { label: t.best.label, train: t.best.train, test: t.best.test } : null, groups: t.groups || null })),
+      speed: lastSpeed || speedReport(records, { buySol }), marketCaps: marketCapGroups(records),
       mirror: mirrorTotals(records, { solUsd: solUsd() }), versions: mem.versions.slice(-10), backup: backup ? { lastAt: mem.backupAt || null } : null };
   }
 
-  return { onTrade, gate, status, save, backup: backupSoon, rankLine, memory: () => mem };
+  return { onTrade, gate, status, save, backup: backupSoon, rankLine, memory: () => mem, runPack, findings: () => findingsMarkdown({ tests: lastTests || runPack(), speed: lastSpeed, mode, updated: new Date(now()).toISOString(), solUsd: solUsd() }) };
 }

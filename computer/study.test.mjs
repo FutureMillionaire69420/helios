@@ -205,7 +205,7 @@ test('walk-forward advisor: chosen on older trades, judged on newer unseen ones;
   // a pattern that only worked early is rejected on the unseen part
   const flip = Array.from({length: 60}, (_, i) => (i < 42 ? (i % 2 ? mk(i, 1.2, -0.3, bad) : mk(i, 0.3, 0.2, good)) : (i % 2 ? mk(i, 1.2, 0.2, good) : mk(i, 0.3, -0.3, bad))));
   assert.match(advise(flip, {buySol: 0.1}).filterWF.verdict, /not supported/);
-  assert.ok(Array.isArray(advise(many, {buySol: 0.1}).exits) && advise(many, {buySol: 0.1}).exits.length === 9);
+  assert.ok(Array.isArray(advise(many, {buySol: 0.1}).exits) && advise(many, {buySol: 0.1}).exits.length === 11);
 });
 
 test('research summary: latency percentiles, drawdown, profit factor; latency line marks simulated time', () => {

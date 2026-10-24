@@ -1078,7 +1078,7 @@ async function jupQuote(inputMint, outputMint, amount) {
 /** Raw tokens for spending `sol` right now (curve, or Jupiter once the coin has graduated). */
 async function quoteBuy(mint, sol) {
   const c = await readCurve(mint).catch(() => null);
-  if (c && !c.complete) return { raw: curveBuy(c, sol), venue: 'curve' };
+  if (c && !c.complete) return { raw: curveBuy(c, sol), venue: 'curve', vSol: Number(c.vSol), vTok: Number(c.vTok) }; // the curve before this buy: crowd SOL
   const raw = await jupQuote(WSOL, mint, sol * LAMPORTS).catch(() => null);
   return raw ? { raw, venue: 'pumpswap' } : null;
 }
@@ -2814,7 +2814,8 @@ async function runStudyCmd(argv = process.argv) {
   const { summarize, summaryText } = await import('./study.mjs');
   const file = env('STUDY_FILE', path.resolve(`study-${argv.includes('--live') ? 'live' : 'paper'}.jsonl`));
   let records = [];
-  try { records = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { console.log(`No study journal yet (${file}).`); return; }
+  // tail lines (the price after the 15 s study) belong to their trade, not a trade of their own
+  try { records = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); const tails = records.filter((r) => r.patch === 'tail'); records = records.filter((r) => !r.patch); for (const t of tails) { const r = records.findLast((x) => x.mint === t.mint && x.time === t.time); if (r) { r.tail = t.tail; if (t.extra) Object.assign(r, t.extra); } } } catch { console.log(`No study journal yet (${file}).`); return; }
   const sm = summarize(records, { buySol: config.buySol });
   console.log(summaryText(sm));
   if (!sm.trades) return;

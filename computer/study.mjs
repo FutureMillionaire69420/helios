@@ -287,7 +287,7 @@ export function summaryText(sm) {
  * leaderSell(mint, {time, sol, soldRaw}) records his first sell during the window.
  * learnOpts go to the brain (learn.mjs): stopLossPct, gainGatePct, gateSec, maxPayPct, reportEvery.
  */
-export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, notesOpts = {}, learnOpts = {}, skippedAlerts = true, coinCharts = true, reportPcts = [], holderRule = HOLDER_RULES, sampleHolders = null, holderEverySec = 5, onRecord = null, log = () => {} }) {
+export function createStudy({ file, quoteSell, notify = null, meta = null, mode = 'paper', buySol = 0.1, feeSol = 0.0015, slip = 0.005, windowSec = 15, stepMs = 1000, quoteTimeoutMs = 2500, maxConcurrent = 5, label = 'Decu', bandPct = 0.1, notesOpts = {}, learnOpts = {}, skippedAlerts = true, coinCharts = true, reportPcts = [], holderRule = HOLDER_RULES, sampleHolders = null, holderEverySec = 5, onRecord = null, tailSec = 60, tailStepMs = 2000, poolFee = 0.0125, log = () => {} }) {
   const sellFee = () => (typeof feeSol === 'function' ? feeSol() : feeSol);
   const filterPct = notesOpts.maxPayPct ?? 60;
   const ruleOpts = { stopLossPct: notesOpts.stopLossPct ?? 20, gainGatePct: notesOpts.gainGatePct ?? 15, gateSec: learnOpts.gateSec ?? windowSec };
@@ -296,7 +296,13 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
   const alertSkipped = (gap) => skippedAlerts === true || skippedAlerts === 'true' || (skippedAlerts === 'report' && gap != null && reportPcts.length > 0 && gap <= Math.max(...reportPcts) / 100 + 1e-9);
   const records = [];
   try {
-    for (const line of fs.readFileSync(file, 'utf8').split('\n')) if (line.trim()) records.push(JSON.parse(line));
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      const o = JSON.parse(line);
+      // a TAIL line adds the price path after the 15 s study (for the buy-the-dip test) to its trade
+      if (o.patch === 'tail') { const r = records.findLast((x) => x.mint === o.mint && x.time === o.time); if (r) { r.tail = o.tail; if (o.extra) Object.assign(r, o.extra); } continue; }
+      records.push(o);
+    }
   } catch { /* first run */ }
   // How many Decu trades the bot studied in the 10 minutes before this one (how busy he was).
   const recentCount = (time, list) => { const t = Date.parse(time); return list.filter((r) => { const u = Date.parse(r.time); return u < t && t - u <= 600e3; }).length; };
@@ -351,6 +357,12 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
       taken: !st.shadow, skipReason: st.shadow || null, latency: st.his.latency || null, hisTime: st.his.time ?? null,
       // prices for the $10 mirror (brain.mjs): his copied buy, the bot's entry, the exit (his sell or the 15 s mark)
       hisPrice, entryPrice: st.entryPrice > 0 ? st.entryPrice : botPrice, exitPrice: Number.isFinite(exitPrice) ? exitPrice : null,
+      // the price per raw token each second (from the sell quote, pool fee added back): the buy-the-dip test
+      px: st.values.map((v) => (Number.isFinite(v) && v > 0 ? Math.round((v / st.raw / (1 - poolFee)) * 1e18) / 1e18 : null)),
+      // Decu's market cap when he bought, from his own trade's curve numbers (what a skip rule can know in time)
+      hisMcapUsd: st.his.vSol > 0 && st.his.vTok > 0 && st.his.usd > 0 && st.his.sol > 0 ? Math.round((st.his.vSol / st.his.vTok) * 1e6 * (st.his.usd / st.his.sol)) : null,
+      // trades by others that landed between his buy and yours (runtime: note(mint, {crowd}))
+      crowd: st.extra?.crowd ?? null,
       copiedLaterBuy: !!(f && f.time && st.his.time && st.his.time - f.time > 1), hisFirstTime: f?.time ?? null,
       coin: m ? { holders: m.holders ?? null, marketCapUsd: m.marketCapUsd ?? null, ageSec: m.createdTime ? Math.round(st.startedAt / 1000 - m.createdTime) : null } : null,
     };
@@ -371,6 +383,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
     rec.prediction = learned.prediction ? { fcat: learned.prediction.fcat, right: learned.prediction.win === rec.fcat > 0 } : null;
     try { fs.appendFileSync(file, JSON.stringify(rec) + '\n', { mode: 0o600 }); } catch (e) { log(`study journal unavailable: ${e.message}`); }
     if (onRecord) { try { onRecord(rec); } catch (e) { log(`brain: ${e.message}`); } }
+    startTail(st, rec);
     if (notify) {
       const name = rec.symbol ? `$${rec.symbol}` : `${st.mint.slice(0, 6)}…`;
       const at = (s) => (curve[s] == null ? '—' : pct(curve[s]));
@@ -409,9 +422,36 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
     return rec;
   }
 
+  // THE TAIL: after the 15 s study, the price keeps being read every tailStepMs until tailSec after Decu's
+  // buy (one quote each, ~23 more), and his first sell is caught, for the buy-the-dip test. The trade is
+  // already in the journal; the tail is appended as its own line when done (merged back at load).
+  const tails = new Map();
+  function startTail(st, rec) {
+    const delay = Math.max(0, rec.delaySec ?? 0), endAt = st.startedAt + (tailSec - delay) * 1000;
+    // he already sold inside the 15 s: the dip test has its exit, nothing more to read
+    if (!(tailSec > windowSec) || st.hisSell || Date.now() >= endAt || tails.size >= 8) return; // at most 8 at once (2 s apart: ≤ 4 reads a second)
+    const tail = { px: [], hisSell: null };
+    const t = { st, rec, tail, at: st.startedAt / 1000, extra: null };
+    tails.set(st.mint, t);
+    const step = async () => {
+      if (Date.now() >= endAt || tail.hisSell) {
+        tails.delete(st.mint); rec.tail = tail;
+        try { fs.appendFileSync(file, JSON.stringify({ patch: 'tail', mint: rec.mint, time: rec.time, tail, ...(t.extra ? { extra: t.extra } : {}) }) + '\n', { mode: 0o600 }); } catch {}
+        return;
+      }
+      const v = await Promise.race([quoteSell(st.mint, st.raw).then((x) => (Number.isFinite(x) ? x : null)).catch(() => null), new Promise((r) => setTimeout(() => r(null), quoteTimeoutMs).unref?.())]);
+      if (v > 0) tail.px.push([Math.round((Date.now() - st.startedAt) / 100) / 10, v / st.raw / (1 - poolFee)]);
+      setTimeout(step, tailStepMs).unref?.();
+    };
+    setTimeout(step, tailStepMs).unref?.();
+  }
+
   return {
     records,
     active,
+    tails,
+    /** Facts learned while a study runs (the crowd count): kept on the trade's record. */
+    note(mint, fields) { const st = active.get(mint); if (st) st.extra = { ...(st.extra || {}), ...fields }; else { const t = tails.get(mint); if (t) { Object.assign(t.rec, fields); t.extra = { ...(t.extra || {}), ...fields }; } } },
     brain,
     summary: () => summarize(records, { buySol, filterPct }),
     research: () => ({ ...research(records, { buySol, filterPct, reportPcts }), brain: brain.snapshot(records).journey }),
@@ -440,6 +480,8 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
       });
     },
     leaderSell(mint, { time, sol: received, soldRaw }) {
+      const t = tails.get(mint);
+      if (t && !t.tail.hisSell && Number(soldRaw) > 1000 && Number(received) > 0) t.tail.hisSell = { atSec: Math.round(((time || Date.now() / 1000) - t.at) * 10) / 10, price: Number(received) / Number(soldRaw) };
       const st = active.get(mint);
       if (!st || st.hisSell) return;
       st.hisSell = { sol: Number(received) || 0, soldRaw: Number(soldRaw) || 0, atSec: Math.round(((time || Date.now() / 1000) - st.startedAt / 1000) * 10) / 10 };

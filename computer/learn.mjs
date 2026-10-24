@@ -35,6 +35,9 @@ export const DIMENSIONS = {
   'holders': { kind: 'pre', f: (r) => r.coin?.holders == null ? null : r.coin.holders < 50 ? '<50' : r.coin.holders < 200 ? '50-200' : '200+' },
   'Decu activity': { kind: 'pre', f: (r) => r.ctx?.recent10m == null ? null : r.ctx.recent10m === 0 ? 'first in 10 min' : r.ctx.recent10m < 4 ? '2-4 in 10 min' : '5+ in 10 min (hot)' },
   'hour (UTC)': { kind: 'pre', pairs: false, f: (r) => (r.time ? `${String(new Date(r.time).getUTCHours()).padStart(2, '0')}h` : null) },
+  // trades by others that landed between Decu's buy and yours (your place in line): known just after the buy
+  'crowd before you': { kind: 'early', f: (r) => { const n = r.crowd?.trades; return n == null ? null : n === 0 ? '0' : n <= 2 ? '1-2' : n <= 4 ? '3-4' : '5+'; } },
+  'Decu buy #': { kind: 'pre', f: (r) => (r.copiedLaterBuy == null ? null : r.copiedLaterBuy ? 'later buy' : 'first buy') },
   'holder rule': { kind: 'early', f: (r) => (r.holderVerdict?.heldUsd != null ? (r.holderVerdict.safe ? 'SAFE' : 'RISKY') : null) },
   'first second': { kind: 'early', f: (r) => { const c = r.curve || []; if (c[0] == null || c[1] == null) return null; const d = c[1] - c[0]; return d < -0.03 ? 'falling' : d > 0.03 ? 'rising' : 'flat'; } },
   'Decu sold': { kind: 'post', f: (r) => !Array.isArray(r.curve) ? null : r.hisSoldAtSec == null ? 'held past 15s' : r.hisSoldAtSec + Math.max(0, r.delaySec ?? 0) < 5 ? 'within 5s of his buy' : 'within 15s of his buy' },
@@ -137,6 +140,7 @@ function holderStateAt(rec, s) {
  * strat: {} = your rules · {fixed:N} sell at N s · {trail:X} trailing stop X below the peak ·
  * {half:true} sell half at +gain gate, the rest by your rules. All keep his sell and the organic stop.
  * {costStop:0.2} your rules, but the stop is -20% on your MONEY (vs cost, fees included) instead of organic.
+ * {breakeven:0.1} your rules, but once the trade is up +10% the stop moves to break-even on your money (0%).
  * {holders:true} your rules PLUS your holder rule: sell the moment the market cap outgrows the money its
  *   holders (dev excluded) hold. Needs holder samples (newer trades); null without them (incomplete, never 0).
  */
@@ -149,7 +153,7 @@ export function exitSim(rec, strat = {}, { stopLossPct = 20, gainGatePct = 15, g
   const stop = stopLossPct / 100, gate = gainGatePct / 100;
   const gateAt = Math.max(0, Math.ceil(gateSec - Math.max(0, rec.delaySec ?? 0) - 1e-9));
   const hisSell = rec.hisSoldAtSec != null ? Math.max(0, Math.ceil(rec.hisSoldAtSec - 1e-9)) : null;
-  let peak = -Infinity, decided = false, half = null, last = null, at = null;
+  let peak = -Infinity, decided = false, half = null, last = null, at = null, armed = false;
   const fin = (x, how, open = false) => ({ pnl: half != null ? 0.5 * half + 0.5 * x : x, how, open, sec: open ? null : at });
   for (let s = 0; s < c.length; s++) {
     const v = c[s];
@@ -157,6 +161,7 @@ export function exitSim(rec, strat = {}, { stopLossPct = 20, gainGatePct = 15, g
     last = v; peak = Math.max(peak, v); at = s;
     if (hisSell != null && s >= hisSell) return fin(fillAt(s), 'his sell');
     if (strat.fixed != null && s >= strat.fixed) return fin(fillAt(s), `${strat.fixed} s`);
+    if (strat.breakeven != null) { if (armed && v <= 0) return fin(fillAt(s), 'break-even stop'); if (v >= strat.breakeven) armed = true; }
     if (strat.trail != null && s > 0 && (1 + v) / (1 + peak) - 1 <= -strat.trail) return fin(fillAt(s), 'trailing stop');
     if (strat.costStop != null) { if (v <= -strat.costStop) return fin(fillAt(s), 'stop on your money'); }
     else if (stop > 0 && (1 + v) / (1 + base) - 1 <= -stop) return fin(fillAt(s), 'stop');
@@ -170,7 +175,8 @@ export const EXIT_STRATEGIES = [
   { name: 'your rules', strat: {} }, { name: 'sell at 3 s', strat: { fixed: 3 } }, { name: 'sell at 5 s', strat: { fixed: 5 } },
   { name: 'sell at 10 s', strat: { fixed: 10 } }, { name: 'trailing 10%', strat: { trail: 0.1 } }, { name: 'trailing 20%', strat: { trail: 0.2 } },
   { name: 'half at +gate', strat: { half: true } },
-  { name: 'stop -20% on your money', strat: { costStop: 0.2 } }, { name: 'holder momentum', strat: { holders: true } },
+  { name: 'stop -20% on your money', strat: { costStop: 0.2 } },
+  { name: 'break-even after +10%', strat: { breakeven: 0.1 } }, { name: 'break-even after +20%', strat: { breakeven: 0.2 } }, { name: 'holder momentum', strat: { holders: true } },
 ];
 
 /**
