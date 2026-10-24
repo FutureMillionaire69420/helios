@@ -383,13 +383,28 @@ async function http(url, { method = 'GET', headers = {}, body, timeoutMs = 10000
 
 let id = 1;
 /** JSON-RPC read. Rate limits (HTTP 429) and server errors are retried 3 times with backoff. */
+// RPC HEALTH: every Helius call counted per minute (refused = HTTP 429 "too many requests", timed out, other
+// errors, by method). A minute with any trouble is logged as one line, so a burst of refusals is visible.
+const rpcHealth = { calls: 0, refused: 0, timedOut: 0, errors: 0, byMethod: {}, refusedBy: {}, since: Date.now(), last: null };
+function rpcCount(method, kind) {
+  rpcHealth[kind]++; const b = kind === 'calls' ? rpcHealth.byMethod : kind === 'refused' ? rpcHealth.refusedBy : null;
+  if (b) b[method] = (b[method] || 0) + 1;
+}
+setInterval(() => {
+  const h = rpcHealth, top = (o) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([m, n]) => `${m} ${n}`).join(', ');
+  if (h.refused || h.timedOut || h.errors) console.log(`rpc health (last ${Math.round((Date.now() - h.since) / 1000)} s): ${h.calls} calls · ${h.refused} refused (HTTP 429, too many requests)${h.refused ? ` [${top(h.refusedBy)}]` : ''} · ${h.timedOut} timed out · ${h.errors} other errors · busiest: ${top(h.byMethod)}`);
+  h.last = { at: new Date().toISOString(), calls: h.calls, refused: h.refused, timedOut: h.timedOut, errors: h.errors, busiest: top(h.byMethod) };
+  Object.assign(h, { calls: 0, refused: 0, timedOut: 0, errors: 0, byMethod: {}, refusedBy: {}, since: Date.now() });
+}, 60_000).unref();
 async function rpc(method, params, timeoutMs = 10000) {
   for (let attempt = 0; ; attempt++) {
     try {
+      rpcCount(method, 'calls');
       const r = await http(config.rpcUrl, { method: 'POST', body: { jsonrpc: '2.0', id: id++, method, params }, timeoutMs });
       if (r.error) throw new Error(`RPC ${method}: ${r.error.message || JSON.stringify(r.error)}`.slice(0, 240));
       return r.result;
     } catch (e) {
+      rpcCount(method, /HTTP 429/.test(e.message) ? 'refused' : /timed out/.test(e.message) ? 'timedOut' : 'errors');
       if (attempt >= 3 || !/HTTP (429|5\d\d)/.test(e.message)) throw e;
       await new Promise((res) => setTimeout(res, 300 * 2 ** attempt));
     }
@@ -989,9 +1004,16 @@ function curveSell(curve, raw) {
   return r > 0n ? (Number((curve.vSol * r) / (curve.vTok + r)) / LAMPORTS) * (1 - poolFee()) : 0;
 }
 
-async function readCurve(mint) {
-  const r = await rpc('getAccountInfo', [bondingCurvePda(mint), { encoding: 'base64', commitment: 'processed' }], 5000);
-  return r?.value?.data?.[0] ? decodeCurve(r.value.data[0]) : null;
+// One read per coin at a time: callers asking at the same moment (study, price watch, paper sells) share it.
+const curveReads = new Map();
+function readCurve(mint) {
+  const busy = curveReads.get(mint);
+  if (busy) return busy;
+  const p = rpc('getAccountInfo', [bondingCurvePda(mint), { encoding: 'base64', commitment: 'processed' }], 5000)
+    .then((r) => (r?.value?.data?.[0] ? decodeCurve(r.value.data[0]) : null))
+    .finally(() => curveReads.delete(mint));
+  curveReads.set(mint, p);
+  return p;
 }
 
 /** Market cap in SOL from the bonding curve (1 billion tokens, 6 decimals). */
@@ -2626,7 +2648,7 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
     idle: () => {},
   };
   if (power) stopSol = stopFees = stopWarm = power.idle;
-  const r = await startRuntime({config,kp,notify,ntfyUsage:()=>ntfyToday(),solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,startPumpPortalWatcher:pumpPortalWatch,checkPumpPortalBuild,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  const r = await startRuntime({config,kp,notify,rpcHealth:()=>rpcHealth.last,ntfyUsage:()=>ntfyToday(),solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,startPumpPortalWatcher:pumpPortalWatch,checkPumpPortalBuild,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();stopWarm();solscan.flush();process.exit(0);});
   // The settings that decide speed and filtering, as the bot actually uses them (no keys).
   if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'false')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.001)} + ${num('TIP_MAX_SOL', 0.002)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · PumpPortal feed ${pumpPortalWatch ? 'on' : 'off (no PUMPPORTAL_API_KEY)'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {startRuntime} from './runtime.mjs';
+import {startRuntime,alertFor} from './runtime.mjs';
 import {config, detectBuy, detectSell, leaderPumpBuys, leaderPumpSells, b58encode} from './copybot.mjs';
 import {buyContextFromLogs, tokensOut} from './pumpbuild.mjs';
 
@@ -434,4 +434,27 @@ test('PumpPortal: his sells still wait for the confirmed transaction; PumpSwap b
   assert.equal(r.setPower(false), null); assert.equal(h.stops, 1, 'OFF closes the feed');
   assert.equal((await statusOf(r)).connection.pumpportal.on, false);
   assert.equal(r.setPower(true), null); assert.equal(h.starts, 2, 'ON opens it again');
+});
+
+test('a failed price request falls back to the last websocket push; the paper sell uses it too; one failure alert per coin', async (t) => {
+  let push = null, quoteOk = true;
+  const watchCurve = (mint, cb) => { push = cb; const un = () => {}; un.ready = () => false; return un; }; // subscription not confirmed: polls first
+  const {r, ws} = await bot(t, {MAX_HOLD_SEC: '0', MONITOR_MS: '40', PRICE_FAIL_SELL: '0'}, async () => (quoteOk ? 0.11 : null), {watchCurve, curveSell: (curve) => curve.v});
+  r.engine.style('auto');
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  await sleep(60);
+  quoteOk = false; // the data provider stops answering
+  push({v: 0.12, complete: false}, Date.now()); // but the websocket just pushed the curve
+  await sleep(150);
+  assert.ok(r.engine.d.events.every((e) => e.type !== 'price-check-failing'), 'a fresh push stands in for the failed requests');
+  // pushes too old to trust: price checks fail, and the alert comes once, not every 3 failures
+  push({v: 0.12, complete: false}, Date.now() - 60_000);
+  await sleep(600);
+  assert.equal(r.engine.d.events.filter((e) => e.type === 'price-check-failing').length, 1, 'one alert per coin per 5 minutes');
+  // his sell: the paper sell has no quote, but a push from a moment ago prices it
+  push({v: 0.13, complete: false}, Date.now());
+  await ws(fx.sell.signature, 'ws', fx.sell.logs); await r.engine.idle(); await sleep(50); await r.engine.idle();
+  assert.equal(r.engine.d.positions[MINT].raw, '0', 'sold at the pushed price');
+  assert.equal(alertFor({type: 'failed', side: 'sell', mint: MINT, message: 'no paper sell quote'}, 'paper'), null, 'paper retries are logged, not pushed to the phone');
+  assert.ok(alertFor({type: 'failed', side: 'sell', mint: MINT, message: 'no paper sell quote'}, 'live'), 'live failures always alert');
 });

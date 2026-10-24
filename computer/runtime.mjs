@@ -89,10 +89,12 @@ export function alertFor(e, mode, leaderLabel='Decu') {
   }
   if (e.type==='submitted' && e.side==='sell' && mode==='live') return {title:`${tag}SELL SENT ${short(e.mint)}${e.rule?` (${RULE[e.rule]||e.rule})`:''}`, body:`Sell transaction sent; waiting for it to land.\nTx: ${e.signature}`, priority:3, tags:['outbox_tray'], click:tx(e.signature)};
   if (e.type==='price-check-failing') return {title:`${tag}Price checks failing: ${short(e.mint)}`, body:`${e.fails} price checks in a row failed (last known ${pc(e.last)}). The stop-loss cannot see the price. ${'The bot sells anyway if it keeps failing.'}\nToken: ${e.mint}`, priority:4, tags:['warning'], click:pump(e.mint)};
-  if (e.type==='unsellable') return {title:`${tag}CAN'T SELL ${short(e.mint)}`, body:`${e.attempts} sell attempts failed: ${String(e.message||'').slice(0,200)}\nThe bot keeps trying. Check the coin; you may need to sell by hand in Phantom.\nToken: ${e.mint}`, priority:5, tags:['rotating_light'], click:pump(e.mint)};
+  if (e.type==='unsellable') return {title:`${tag}CAN'T SELL ${short(e.mint)}`, body:`${e.attempts} sell attempts failed: ${String(e.message||'').slice(0,200)}\n${mode==='paper'?'Paper: no price to sell at yet; the bot keeps trying. No real money involved.':'The bot keeps trying. Check the coin; you may need to sell by hand in Phantom.'}\nToken: ${e.mint}`, priority:5, tags:['rotating_light'], click:pump(e.mint)};
   if (e.type==='breaker') return {title:`${tag}New buys paused (circuit breaker)`, body:e.message, priority:4, tags:['no_entry']};
   if (e.type==='power-off') return {title:`${tag}Bot OFF: no Helius or Solscan use`, body:`Not watching ${leaderLabel} and not using any data credits${e.open?` (${e.open} position(s) still open: no stop-loss while off)`:''}.\nTurn it back ON from the dashboard.${e.by&&e.by!=='dashboard'?`\n(${e.by})`:''}`, priority:3, tags:['zzz']};
   if (e.type==='power-on') return {title:`${tag}Bot ON: watching ${leaderLabel} again`, body:'Helius and Solscan are in use again.', priority:3, tags:['white_check_mark']};
+  // PAPER: a sell retried for want of a price is logged only (CAN'T SELL says it once); live failures always alert
+  if (e.type==='failed' && mode==='paper' && e.side==='sell' && /no paper sell quote/.test(e.message||'')) return null;
   if (e.type==='failed') return {title:`${tag}Trade FAILED (${e.side})`, body:`${e.message||'unknown error'}\nToken: ${e.mint}\nNo tokens changed hands.`, priority:4, tags:['x'], click:pump(e.mint)};
   if (e.type==='unresolved') return {title:`${tag}Trade outcome UNKNOWN`, body:`${e.message||''}\nThe bot keeps checking and will not double-trade.\nTx: ${e.signature||'?'}`, priority:5, tags:['warning'], click:e.signature?tx(e.signature):undefined};
   if (e.type==='unsupported' && e.kind==='paid-with-pump') return {title:`${tag}${leaderLabel} bought with PUMP tokens (not copied)`, body:`He paid with PUMP tokens he held, not SOL. This bot buys with SOL only, so it skipped this one.\nToken: ${e.mint}`, priority:2, tags:['eyes'], click:pump(e.mint)};
@@ -272,12 +274,25 @@ export async function startRuntime(k, {demo=false}={}) {
   const holderRuleCfg = String(val('HOLDER_RULES','10000:1000,20000:2500,30000:4000')).split(',').map(x=>x.split(':').map(Number)).filter(([a,b])=>a>0&&b>0).sort((a,b)=>a[0]-b[0]);
   // the dev comes from Decu's trade event (written by pump.fun itself); the curve account is the fallback
   const holderSample = mint => k.holderStats(mint,{creator:creators.get(mint)}).catch(()=>null);
+  // LIVE CURVE PUSHES: the latest state of each held coin's bonding curve, as the websocket pushed it. Used first
+  // (no data request) while its subscription is live; a price request that fails falls back to a push from the
+  // last PUSH_FALLBACK_MS (5000) instead of counting as "no price".
+  const pushedCurves=new Map();
+  const pushedSell=(mint,raw,{maxAgeMs=null}={})=>{
+    const x=pushedCurves.get(mint); if(!x || x.curve.complete || !k.curveSell) return null;
+    if(maxAgeMs!=null) return Date.now()-x.at<=maxAgeMs ? k.curveSell(x.curve,raw) : null;
+    const since=x.sub?.readyAt?.(); if(!x.sub?.ready?.() || (since!=null && x.at<since)) return null;
+    return k.curveSell(x.curve,raw);
+  };
+  const pushFallbackMs=number('PUSH_FALLBACK_MS',5000);
+  // the study prices from the live push when it can, else one request (shared with others at that moment)
+  const studyQuote=async(mint,raw)=>pushedSell(mint,raw) ?? await k.quoteSell(mint,raw);
   const studyFile=val('STUDY_FILE',path.resolve(`study-${c.mode}.jsonl`)), brainFile=val('BRAIN_FILE',path.join(path.dirname(studyFile),`brain-memory-${c.mode}.json`));
   // GITHUB_BACKUP_TOKEN: a GitHub token for ONE repo (contents read/write). Off without it.
   const brainBackup=demo?null:createBackup({token:val('GITHUB_BACKUP_TOKEN',''),repo:val('GITHUB_BACKUP_REPO','FutureMillionaire69420/DECU-BOT-RENDER-'),branch:val('GITHUB_BACKUP_BRANCH',`brain-backup-${c.mode}`),log:m=>console.log(m)});
   if(brainBackup) await restoreIfEmpty({backup:brainBackup,memoryFile:brainFile,journalFile:studyFile,log:m=>console.log(m)}).catch(()=>{});
   const study = demo || val('STUDY','true')==='false' || !k.quoteSell ? null : createStudy({
-    file:studyFile, onRecord:r=>thinking?.onTrade(r), quoteSell:k.quoteSell, mode:c.mode, buySol:c.buySol,
+    file:studyFile, onRecord:r=>thinking?.onTrade(r), quoteSell:studyQuote, mode:c.mode, buySol:c.buySol,
     feeSol:()=>sideFee(), reportPcts, holderRule:holderRuleCfg, sampleHolders:k.holderStats&&!demo?holderSample:null, windowSec:number('STUDY_WINDOW_SEC',15), tailSec:number('DIP_WINDOW_SEC',60), poolFee:(k.config.pumpFeePct ?? 1.25)/100, bandPct:number('BAND_PCT',10)/100, notesOpts:{stopLossPct:number('STOP_LOSS_PCT',20),gainGatePct:number('GAIN_GATE_PCT',15),maxPayPct:filterPct}, learnOpts:{gateSec:number('MAX_HOLD_SEC',15),maxPayPct:filterPct,reportEvery:number('LEARN_REPORT_EVERY',10),digestHours:number('LEARN_DIGEST_HOURS',24)}, label:k.config.leaderLabel,
     skippedAlerts:val('SKIPPED_ALERTS','false'), coinCharts:val('COIN_CHARTS','true')!=='false', meta:k.tokenMeta||null, notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, log:m=>engine?.event('connection',{message:m})});
   if(study) {
@@ -339,7 +354,8 @@ export async function startRuntime(k, {demo=false}={}) {
     // PAPER: assemble the same local sell live would send (not signed, never sent): proves the sell desk
     // works on every paper exit before any real money depends on it.
     if(desk && !demo && desk.kit(job.mint)) { try { const f=fee(); desk.build({mint:job.mint,raw:job.raw,slippagePct:sellSlippagePct,blockhash:'11111111111111111111111111111111',priorityLamports:Math.round(f.priorityFeeSol*1e9),tipAccount:k.TIP_ACCOUNTS?.[0]||null,tipLamports:Math.round(f.tipSol*1e9),closeAccount:job.chainRaw!=null&&job.raw===job.chainRaw,global:null,unknownFlagsOk:true}); status.paperSellBuilds=(status.paperSellBuilds||0)+1; } catch(e) { desk.stats.lastError=String(e?.message||e).slice(0,160); } }
-    const sol=demo?Number(job.raw)/1e9:await k.quoteSell(job.mint,Number(job.raw));
+    let sol=demo?Number(job.raw)/1e9:await k.quoteSell(job.mint,Number(job.raw)).catch(()=>null);
+    if(!demo && !Number.isFinite(sol)) { sol=pushedSell(job.mint,Number(job.raw),{maxAgeMs:pushFallbackMs}); if(Number.isFinite(sol)) status.priceChecks.pushFallback=(status.priceChecks.pushFallback||0)+1; }
     if(sol===null || !Number.isFinite(sol)) return {status:'failed',error:'no paper sell quote'};
     return {status:'confirmed',rawDelta:(-BigInt(job.raw)).toString(),solDelta:sol*0.995-fee};
   };
@@ -540,7 +556,7 @@ export async function startRuntime(k, {demo=false}={}) {
   // the bot's buy ("organic"), ignoring the fees and price impact already paid. =cost: from cost.
   const stopFromEntry=val('STOP_LOSS_FROM','entry')!=='cost';
   const holdLimitMs=number('HOLD_LIMIT_SEC',600)*1000, stopLossManual=val('STOP_LOSS_MANUAL','true')==='true';
-  const monitors=new Map();
+  const monitors=new Map(), failAlerted=new Map();
   // STOP-LOSS RELIABILITY:
   //  - priced every MONITOR_MS (500 ms), each price check gives up after QUOTE_TIMEOUT_MS (1500 ms)
   //  - PRICE_FAIL_ALERT (3) failed checks in a row -> alert; PRICE_FAIL_SELL (6) -> sell anyway
@@ -579,14 +595,16 @@ export async function startRuntime(k, {demo=false}={}) {
     const alive=()=>monitors.get(mint)===m && !stopped;
     const unwatch=()=>{ try{ m.unwatch?.(); }catch{} m.unwatch=null; };
     if(desk && !desk.kit(mint)) armSell(mint); // e.g. after a restart: re-armed from the saved position
-    if(k.watchCurve) { try { m.unwatch=k.watchCurve(mint,(curve,at)=>{ if(!alive()) return unwatch(); m.pushed={curve,at}; desk?.update(mint,curve,at); if(!curve.complete) evaluate('push'); }); } catch { m.unwatch=null; } }
+    if(k.watchCurve) { try { m.unwatch=k.watchCurve(mint,(curve,at)=>{ if(!alive()) return unwatch(); m.pushed={curve,at}; pushedCurves.set(mint,{curve,at,sub:m.unwatch}); if(pushedCurves.size>200) pushedCurves.delete(pushedCurves.keys().next().value); desk?.update(mint,curve,at); if(!curve.complete) evaluate('push'); }); } catch { m.unwatch=null; } }
     const valueNow=async(p)=>{
       // a push from before a websocket reconnect may have missed trades made while it was down: poll until the next one
       const since=m.unwatch?.readyAt?.();
       if(m.pushed && !m.pushed.curve.complete && m.unwatch?.ready?.() && !(since!=null && m.pushed.at<since) && k.curveSell) { status.priceChecks.push++; return k.curveSell(m.pushed.curve,Number(p.raw)); }
       const t0=Date.now();
-      const v=await Promise.race([k.quoteSell(mint,Number(p.raw)),new Promise(r=>setTimeout(()=>r(null),quoteTimeoutMs).unref?.())]).catch(()=>null);
+      let v=await Promise.race([k.quoteSell(mint,Number(p.raw)),new Promise(r=>setTimeout(()=>r(null),quoteTimeoutMs).unref?.())]).catch(()=>null);
       status.priceChecks.poll++; status.priceChecks.pollMsLast=Date.now()-t0;
+      if(!Number.isFinite(v) && m.pushed && !m.pushed.curve.complete && k.curveSell && Date.now()-m.pushed.at<=pushFallbackMs) { v=k.curveSell(m.pushed.curve,Number(p.raw)); status.priceChecks.pushFallback=(status.priceChecks.pushFallback||0)+1; }
+      if(!Number.isFinite(v)) status.priceChecks.failed=(status.priceChecks.failed||0)+1;
       return v;
     };
     const evaluate=async(trigger)=>{
@@ -606,7 +624,7 @@ export async function startRuntime(k, {demo=false}={}) {
         if(pnl!=null) { m.peak=Math.max(m.peak,pnl); m.last=pnl; m.base??=pnl; m.fails=0; status.lastPriceOkAt=Date.now(); }
         else if(trigger==='tick') {
           m.fails++;
-          if(m.fails===priceFailAlert) engine.event('price-check-failing',{mint,fails:m.fails,last:m.last??null});
+          if(m.fails===priceFailAlert && Date.now()-(failAlerted.get(mint)||0)>number('PRICE_FAIL_ALERT_EVERY_SEC',300)*1000) { failAlerted.set(mint,Date.now()); engine.event('price-check-failing',{mint,fails:m.fails,last:m.last??null}); }
           if(priceFailSell>0 && m.fails>=priceFailSell && (auto||stopLossManual)) { unwatch(); return exitNow(mint,p,'no-price',m.last??null,null); }
         }
         const move=pnl==null?null:stopFromEntry?(1+pnl)/(1+m.base)-1:pnl;
@@ -885,7 +903,7 @@ export async function startRuntime(k, {demo=false}={}) {
       if(token && !authorized()) {res.writeHead(401);return res.end('Unauthorized');}
       if(!token && c.mode==='live') {res.writeHead(403);return res.end('Token required');}
       if(url.pathname==='/api/status' && req.method==='GET') {
-        status.pumpportal=pumpPortalStatus(); status.pumpportalBuilder=ppCheck.result;
+        status.pumpportal=pumpPortalStatus(); status.pumpportalBuilder=ppCheck.result; status.rpcHealth=k.rpcHealth?.()||null;
         const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',solscanUsage:k.solscanUsage?.()||null,paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
           wallet:{publicKey:c.wallet||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true}};
         res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean(snap)));
