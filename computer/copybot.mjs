@@ -392,8 +392,10 @@ function rpcCount(method, kind) {
 }
 setInterval(() => {
   const h = rpcHealth, top = (o) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([m, n]) => `${m} ${n}`).join(', ');
-  if (h.refused || h.timedOut || h.errors) console.log(`rpc health (last ${Math.round((Date.now() - h.since) / 1000)} s): ${h.calls} calls · ${h.refused} refused (HTTP 429, too many requests)${h.refused ? ` [${top(h.refusedBy)}]` : ''} · ${h.timedOut} timed out · ${h.errors} other errors · busiest: ${top(h.byMethod)}`);
-  h.last = { at: new Date().toISOString(), calls: h.calls, refused: h.refused, timedOut: h.timedOut, errors: h.errors, busiest: top(h.byMethod) };
+  const ps = priceStats, priceLine = `prices: curve ${ps.curve}, PumpSwap ${ps.pumpswap}, Jupiter ${ps.jupiter} (${ps.jupiterFailed} failed)`;
+  if (h.refused || h.timedOut || h.errors || ps.jupiterFailed) console.log(`rpc health (last ${Math.round((Date.now() - h.since) / 1000)} s): ${h.calls} calls · ${h.refused} refused (HTTP 429, too many requests)${h.refused ? ` [${top(h.refusedBy)}]` : ''} · ${h.timedOut} timed out · ${h.errors} other errors · busiest: ${top(h.byMethod)} · ${priceLine}`);
+  h.last = { at: new Date().toISOString(), calls: h.calls, refused: h.refused, timedOut: h.timedOut, errors: h.errors, busiest: top(h.byMethod), prices: { ...ps } };
+  for (const k of Object.keys(ps)) ps[k] = 0;
   Object.assign(h, { calls: 0, refused: 0, timedOut: 0, errors: 0, byMethod: {}, refusedBy: {}, since: Date.now() });
 }, 60_000).unref();
 async function rpc(method, params, timeoutMs = 10000) {
@@ -994,32 +996,107 @@ const poolFee = () => config.pumpFeePct / 100;
 
 /** Raw tokens received for `sol` SOL (after pool fee). */
 function curveBuy(curve, sol) {
-  const net = BigInt(Math.floor(sol * LAMPORTS * (1 - poolFee())));
+  const net = BigInt(Math.floor(sol * LAMPORTS * (1 - (curve.pumpswap ? pumpSwapFee() : poolFee()))));
   return net > 0n ? Number((curve.vTok * net) / (curve.vSol + net)) : 0;
 }
 
 /** SOL received for selling `raw` tokens (after pool fee). */
 function curveSell(curve, raw) {
   const r = BigInt(Math.floor(raw));
-  return r > 0n ? (Number((curve.vSol * r) / (curve.vTok + r)) / LAMPORTS) * (1 - poolFee()) : 0;
+  return r > 0n ? (Number((curve.vSol * r) / (curve.vTok + r)) / LAMPORTS) * (1 - (curve.pumpswap ? pumpSwapFee() : poolFee())) : 0;
 }
 
 // One read per coin at a time: callers asking at the same moment (study, price watch, paper sells) share it.
-const curveReads = new Map();
+// A coin whose curve is complete has moved to PumpSwap for good: it is remembered and its curve not read again.
+const curveReads = new Map(), graduated = new Set();
 function readCurve(mint) {
   const busy = curveReads.get(mint);
   if (busy) return busy;
   const p = rpc('getAccountInfo', [bondingCurvePda(mint), { encoding: 'base64', commitment: 'processed' }], 5000)
-    .then((r) => (r?.value?.data?.[0] ? decodeCurve(r.value.data[0]) : null))
+    .then((r) => { const c = r?.value?.data?.[0] ? decodeCurve(r.value.data[0]) : null; if (c?.complete) graduated.add(mint); return c; })
     .finally(() => curveReads.delete(mint));
   curveReads.set(mint, p);
   return p;
 }
 
+// ===== PumpSwap: coins that finished their bonding curve =====
+// Decu often buys coins that already moved to PumpSwap. Their curve never changes again, so it can't price them;
+// Jupiter's free quote API (the old fallback) kept refusing the bot's ~3 quotes a second, which left the stop-loss and
+// paper sells without a price. The pool is read straight from the chain instead: pump.fun's canonical pool
+// (seeds "pool", index 0, the coin's pool authority, the coin, SOL), then its two token vaults in ONE read
+// (getMultipleAccounts: both balances from the same block). Jupiter stays as the last resort (non-pump.fun pools).
+const pumpSwapFee = () => num('PUMPSWAP_FEE_PCT', config.pumpFeePct) / 100; // conservative: the curve's fee unless set
+const pools = new Map(); // mint -> { info, at } (a missing pool is retried after 60 s)
+function canonicalPoolPda(mint) {
+  const authority = findProgramAddress([Buffer.from('pool-authority'), b58decode(mint)], PROGRAMS.PUMP)[0];
+  return findProgramAddress([Buffer.from('pool'), Buffer.alloc(2), b58decode(authority), b58decode(mint), b58decode(WSOL)], PROGRAMS.PUMP_AMM)[0];
+}
+/** The pool layout: discriminator 8 · bump 1 · index 2 · creator 32 · base mint @43 · quote mint @75 · lp mint · base vault @139 · quote vault @171. */
+function decodePool(b64) {
+  const b = Buffer.from(b64, 'base64');
+  if (b.length < 203) return null;
+  const pk = (o) => b58encode(b.subarray(o, o + 32));
+  return { baseMint: pk(43), quoteMint: pk(75), baseVault: pk(139), quoteVault: pk(171) };
+}
+async function poolInfo(mint) {
+  const hit = pools.get(mint);
+  if (hit && (hit.info || Date.now() - hit.at < 60_000)) return hit.info;
+  const pool = canonicalPoolPda(mint);
+  const r = await rpc('getAccountInfo', [pool, { encoding: 'base64', commitment: 'confirmed' }], 5000);
+  const d = r?.value?.owner === PROGRAMS.PUMP_AMM && r.value.data?.[0] ? decodePool(r.value.data[0]) : null;
+  const info = d && d.baseMint === mint && d.quoteMint === WSOL ? { pool, ...d } : null;
+  pools.set(mint, { info, at: Date.now() }); if (pools.size > 500) pools.delete(pools.keys().next().value);
+  return info;
+}
+const vaultAmount = (b64) => { const b = Buffer.from(b64, 'base64'); return b.length >= 72 ? b.readBigUInt64LE(64) : null; }; // SPL / Token-2022 account: amount @64
+const poolReads = new Map();
+/** The pool's state as a curve-like object {vSol, vTok} (real reserves), so the same price math applies. */
+function readPool(mint) {
+  const busy = poolReads.get(mint);
+  if (busy) return busy;
+  const p = (async () => {
+    const info = await poolInfo(mint);
+    if (!info) return null;
+    const r = await rpc('getMultipleAccounts', [[info.baseVault, info.quoteVault], { encoding: 'base64', commitment: 'processed' }], 5000);
+    const [b, q] = r?.value || [];
+    const vTok = b?.data?.[0] ? vaultAmount(b.data[0]) : null, vSol = q?.data?.[0] ? vaultAmount(q.data[0]) : null;
+    return vTok > 0n && vSol > 0n ? { vSol, vTok, complete: false, pumpswap: true, pool: info.pool } : null;
+  })().finally(() => poolReads.delete(mint));
+  poolReads.set(mint, p);
+  return p;
+}
+/** The PumpSwap pool of a coin that has graduated (else null): the crowd counter counts trades there. */
+const graduatedPool = async (mint) => (graduated.has(mint) ? (await poolInfo(mint).catch(() => null))?.pool ?? null : null);
+// PRICE SOURCES: which source priced each quote, counted per minute next to the RPC health
+const priceStats = { curve: 0, pumpswap: 0, jupiter: 0, jupiterFailed: 0, none: 0 };
+
 /** Market cap in SOL from the bonding curve (1 billion tokens, 6 decimals). */
 function curveMcapSol(c) { return c && Number(c.vTok) > 0 ? (Number(c.vSol) / Number(c.vTok)) * 1e6 : null; }
 /** Every change of the coin's bonding curve, pushed over the websocket (null when no stream). */
-function watchCurve(mint, cb) { return stream ? stream.watchAccount(bondingCurvePda(mint), (b64, at) => { const c = decodeCurve(b64); if (c) cb(c, at); }) : null; }
+function watchCurve(mint, cb) {
+  if (!stream) return null;
+  let poolUn = null, starting = false, stopped = false;
+  // GRADUATED COINS: both pool vaults are watched; a price is pushed only when both balances come from the same block
+  // and nothing changed for POOL_PUSH_SETTLE_MS (one vault's update arriving before the other's would be a false price).
+  const startPool = async () => {
+    if (poolUn || starting || stopped) return; starting = true;
+    const info = await poolInfo(mint).catch(() => null); starting = false;
+    if (!info || stopped || poolUn) return;
+    const st = { b: null, q: null }; let t = null;
+    const emit = () => { if (st.b && st.q && st.b.slot != null && st.b.slot === st.q.slot && st.b.v > 0n && st.q.v > 0n) cb({ vSol: st.q.v, vTok: st.b.v, complete: false, pumpswap: true, pool: info.pool }, Math.max(st.b.at, st.q.at)); };
+    const on = (side) => (b64, at, slot) => { const v = vaultAmount(b64); if (v == null) return; st[side] = { v, at, slot }; clearTimeout(t); t = setTimeout(emit, num('POOL_PUSH_SETTLE_MS', 120)); t.unref?.(); };
+    const ub = stream.watchAccount(info.baseVault, on('b')), uq = stream.watchAccount(info.quoteVault, on('q'));
+    poolUn = () => { clearTimeout(t); ub(); uq(); };
+    poolUn.ready = () => ub.ready() && uq.ready();
+    poolUn.readyAt = () => (ub.readyAt() && uq.readyAt() ? Math.max(ub.readyAt(), uq.readyAt()) : null);
+  };
+  const curveUn = stream.watchAccount(bondingCurvePda(mint), (b64, at) => { const c = decodeCurve(b64); if (!c) return; if (c.complete) { graduated.add(mint); startPool(); } cb(c, at); });
+  if (graduated.has(mint)) startPool(); else readCurve(mint).then((c) => { if (c?.complete) startPool(); }).catch(() => {});
+  const un = () => { stopped = true; curveUn(); poolUn?.(); };
+  un.ready = () => (poolUn ? poolUn.ready() : curveUn.ready());
+  un.readyAt = () => (poolUn ? poolUn.readyAt() : curveUn.readyAt());
+  return un;
+}
 
 /** Who holds a pump.fun coin right now, in DOLLARS at the current curve price (Helius DAS + the bonding
  *  curve, read together): valueUsd = every wallet except the bonding curve and the DEV (the coin's creator:
@@ -1099,17 +1176,23 @@ async function jupQuote(inputMint, outputMint, amount) {
 
 /** Raw tokens for spending `sol` right now (curve, or Jupiter once the coin has graduated). */
 async function quoteBuy(mint, sol) {
-  const c = await readCurve(mint).catch(() => null);
-  if (c && !c.complete) return { raw: curveBuy(c, sol), venue: 'curve', vSol: Number(c.vSol), vTok: Number(c.vTok) }; // the curve before this buy: crowd SOL
+  const c = graduated.has(mint) ? null : await readCurve(mint).catch(() => null);
+  if (c && !c.complete) { priceStats.curve++; return { raw: curveBuy(c, sol), venue: 'curve', vSol: Number(c.vSol), vTok: Number(c.vTok) }; } // the curve before this buy: crowd SOL
+  const p = await readPool(mint).catch(() => null);
+  if (p) { priceStats.pumpswap++; return { raw: curveBuy(p, sol), venue: 'pumpswap', vSol: Number(p.vSol), vTok: Number(p.vTok) }; }
   const raw = await jupQuote(WSOL, mint, sol * LAMPORTS).catch(() => null);
+  priceStats[raw ? 'jupiter' : 'jupiterFailed']++;
   return raw ? { raw, venue: 'pumpswap' } : null;
 }
 
 /** SOL for selling `raw` tokens right now. */
 async function quoteSell(mint, raw) {
-  const c = await readCurve(mint).catch(() => null);
-  if (c && !c.complete) return curveSell(c, raw);
+  const c = graduated.has(mint) ? null : await readCurve(mint).catch(() => null);
+  if (c && !c.complete) { priceStats.curve++; return curveSell(c, raw); }
+  const p = await readPool(mint).catch(() => null);
+  if (p) { priceStats.pumpswap++; return curveSell(p, raw); }
   const out = await jupQuote(mint, WSOL, raw).catch(() => null);
+  priceStats[out ? 'jupiter' : 'jupiterFailed']++;
   return out ? out / LAMPORTS : null;
 }
 
@@ -2648,7 +2731,7 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
     idle: () => {},
   };
   if (power) stopSol = stopFees = stopWarm = power.idle;
-  const r = await startRuntime({config,kp,notify,rpcHealth:()=>rpcHealth.last,ntfyUsage:()=>ntfyToday(),solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,startPumpPortalWatcher:pumpPortalWatch,checkPumpPortalBuild,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  const r = await startRuntime({config,kp,notify,rpcHealth:()=>rpcHealth.last,graduatedPool,ntfyUsage:()=>ntfyToday(),solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,startPumpPortalWatcher:pumpPortalWatch,checkPumpPortalBuild,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();stopWarm();solscan.flush();process.exit(0);});
   // The settings that decide speed and filtering, as the bot actually uses them (no keys).
   if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'false')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.001)} + ${num('TIP_MAX_SOL', 0.002)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · PumpPortal feed ${pumpPortalWatch ? 'on' : 'off (no PUMPPORTAL_API_KEY)'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);
@@ -2969,5 +3052,5 @@ async function main(argv = process.argv) {
 // ===== entry =====
 const setStream = (s) => (stream = s); // tests
 export {refreshFees,currentFees,solUsdNow,confirm,holderStats,setStream,startSenderWarm,senderUrl,checkTradeInstructions,checkPumpPortalBuild,describeInstructions};
-export {config,setFetch,rpc,relevantLogs,venueOf,quoteSell,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,findProgramAddress,associatedTokenAddress as ata,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
+export {config,setFetch,rpc,relevantLogs,venueOf,quoteSell,quoteBuy,watchCurve,canonicalPoolPda,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,findProgramAddress,associatedTokenAddress as ata,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);

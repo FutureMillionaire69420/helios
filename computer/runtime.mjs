@@ -259,7 +259,8 @@ export async function startRuntime(k, {demo=false}={}) {
     const sig=copiedSig.get(mint)||lastSig.get(mint), his=sig?hisBySig.get(hisKey(sig,mint)):null, p=pipe.get(hisKey(sig||'unknown',mint))||{};
     if(!sig || (!ownSig && !Number.isInteger(landSlot))) return;
     try {
-      const curvePk=k.findProgramAddress([Buffer.from('bonding-curve'),Buffer.from(k.b58decode(mint))],PUMP)[0];
+      // a coin on PumpSwap trades in its pool, not on its (finished) curve
+      const curvePk=(await k.graduatedPool?.(mint).catch(()=>null)) || k.findProgramAddress([Buffer.from('bonding-curve'),Buffer.from(k.b58decode(mint))],PUMP)[0];
       const list=(await k.rpc('getSignaturesForAddress',[curvePk,{until:sig,limit:100,commitment:'confirmed'}],4000))||[];
       const mineAt=ownSig?list.findIndex(x=>x.signature===ownSig):-1;
       const ahead=(mineAt>=0?list.slice(mineAt+1):list.filter(x=>Number.isInteger(landSlot)&&x.slot<=landSlot)).filter(x=>!x.err&&x.signature!==ownSig);
@@ -595,7 +596,8 @@ export async function startRuntime(k, {demo=false}={}) {
     const alive=()=>monitors.get(mint)===m && !stopped;
     const unwatch=()=>{ try{ m.unwatch?.(); }catch{} m.unwatch=null; };
     if(desk && !desk.kit(mint)) armSell(mint); // e.g. after a restart: re-armed from the saved position
-    if(k.watchCurve) { try { m.unwatch=k.watchCurve(mint,(curve,at)=>{ if(!alive()) return unwatch(); m.pushed={curve,at}; pushedCurves.set(mint,{curve,at,sub:m.unwatch}); if(pushedCurves.size>200) pushedCurves.delete(pushedCurves.keys().next().value); desk?.update(mint,curve,at); if(!curve.complete) evaluate('push'); }); } catch { m.unwatch=null; } }
+    // (a PumpSwap pool price, curve.pumpswap, never feeds the curve sell builder)
+    if(k.watchCurve) { try { m.unwatch=k.watchCurve(mint,(curve,at)=>{ if(!alive()) return unwatch(); m.pushed={curve,at}; pushedCurves.set(mint,{curve,at,sub:m.unwatch}); if(pushedCurves.size>200) pushedCurves.delete(pushedCurves.keys().next().value); if(!curve.pumpswap) desk?.update(mint,curve,at); if(!curve.complete) evaluate('push'); }); } catch { m.unwatch=null; } }
     const valueNow=async(p)=>{
       // a push from before a websocket reconnect may have missed trades made while it was down: poll until the next one
       const since=m.unwatch?.readyAt?.();

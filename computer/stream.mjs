@@ -111,9 +111,9 @@ export function createStream({ url, WebSocketImpl = globalThis.WebSocket, log = 
         un = add('signatureSubscribe', [sig, { commitment }], 'signatureUnsubscribe', (r) => finish({ err: r?.value?.err ?? null }));
       });
     },
-    /** onData(base64Data, receivedAt) on every change of the account. Returns an unsubscribe function. */
+    /** onData(base64Data, receivedAt, slot) on every change of the account. Returns an unsubscribe function. */
     watchAccount(pubkey, onData, { commitment = 'processed' } = {}) {
-      const un = add('accountSubscribe', [pubkey, { encoding: 'base64', commitment }], 'accountUnsubscribe', (r, at) => { const d = r?.value?.data; if (Array.isArray(d)) onData(d[0], at); });
+      const un = add('accountSubscribe', [pubkey, { encoding: 'base64', commitment }], 'accountUnsubscribe', (r, at) => { const d = r?.value?.data; if (Array.isArray(d)) onData(d[0], at, r?.context?.slot ?? null); }); // the block of this state
       return un;
     },
     /** True once the server acknowledged every current subscription (pushes are flowing). */
