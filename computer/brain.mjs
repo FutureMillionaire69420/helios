@@ -23,7 +23,9 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { advise, simulateRules } from './learn.mjs';
 import { runTests, speedReport, findingsMarkdown, marketCapGroups } from './tests.mjs';
-import { createVault, tradeNote, dailyNote, patternNote, homeNote, decisionsNote, tradeNoteName, patternNoteName, AGENTS_MD, zipFiles } from './vault.mjs';
+import { createVault, tradeNote, dailyNote, patternNote, homeNote, decisionsNote, tradeNoteName, patternNoteName, AGENTS_MD, zipFiles, safeName } from './vault.mjs';
+import { tradeAnalysis, dayCharts, delayAnalysis, analysisCharts, analysisMarkdown, renderPng, chartUrl } from './notecharts.mjs';
+import { coinChart } from './study.mjs';
 
 const fin = (x) => typeof x === 'number' && Number.isFinite(x);
 const pct = (x, d = 1) => (!fin(x) ? '—' : `${x >= 0 ? '+' : ''}${(x * 100).toFixed(d)}%`);
@@ -218,7 +220,7 @@ export async function restoreIfEmpty({ backup, memoryFile, journalFile, log = ()
  */
 export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1, rules, defaults, notify = null, version = '0', solUsd = () => null,
   autoTune = mode === 'paper', veto = mode === 'paper', bankrollUsd = 1000, goalUsd = 1000, tuneEvery = 10, minEvidence = 50, demoteAfter = 10, revertAfter = 20,
-  limits = { maxPayPct: [5, 25], stopLossPct: [10, 30], gainGatePct: [10, 30] }, gateSec = 15, backup = null, backupHours = 24, journalFile = null, brainPerDay = 60, vaultDir = null, gitSync = null, vaultSyncMin = 5, vaultBackfill = 300, poolFee = 0.0125, log = () => {}, now = () => Date.now() }) {
+  limits = { maxPayPct: [5, 25], stopLossPct: [10, 30], gainGatePct: [10, 30] }, gateSec = 15, backup = null, backupHours = 24, journalFile = null, brainPerDay = 60, vaultDir = null, gitSync = null, vaultSyncMin = 5, vaultBackfill = 300, noteCharts = true, chartFetch = globalThis.fetch, analysisEveryMin = 15, poolFee = 0.0125, log = () => {}, now = () => Date.now() }) {
   const tag = mode === 'live' ? '' : mode === 'paper' ? '[PAPER] ' : '[DEMO] ';
   let mem = null;
   try { mem = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* first run */ }
@@ -336,12 +338,47 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
   const vaultChanged = (paths) => { for (const p of paths || []) unsynced.add(p); };
   const matchedOf = (r) => [...new Set((r.thinking || []).map((t) => /pattern [▲▼] "([^"]+)"/.exec(t)?.[1]).filter(Boolean))].map((label) => ({ label }));
   const mirrorOf = (r) => mirror10(r, { rules: { stopLossPct: rules.stopLossPct, gainGatePct: rules.gainGatePct, gateSec }, solUsd: solUsd() });
+  // CHARTS IN THE NOTES (notecharts.mjs): saved as pictures in machine/charts/; a note embeds every chart file that
+  // exists for it, so a rewrite (or a restart) never drops a chart that was already made.
+  const CH = 'machine/charts', TRADE_CHARTS = ['price', 'delay', 'mirror', 'exits', 'vs-history'], DAY_CHARTS = ['day-compare', 'day-cumulative'];
+  const ANALYSIS_CHARTS = ['cumulative', 'missed-per-day', 'by-blocks', 'by-latency', 'by-crowd', 'by-premium', 'premium-vs-result'];
+  const chartFile = (stem, name) => `${CH}/${safeName(`${stem} ${name}`)}.png`;
+  const embedsOf = (stem, names) => Object.fromEntries(names.filter((n) => vault.has(chartFile(stem, n))).map((n) => [n, `![[${chartFile(stem, n)}]]`]));
+  const ruleOptsNow = () => ({ stopLossPct: rules.stopLossPct, gainGatePct: rules.gainGatePct, gateSec });
+  const analysisOf = (r) => tradeAnalysis(r, records, { mirror: mirrorOf(r), mirrorUrl: (() => { const m = mirrorOf(r); return m ? mirrorChart(r, m) : null; })(), pathUrl: coinChart(r, records, { gatePct: rules.gainGatePct, stopPct: rules.stopLossPct }), rules: ruleOptsNow(), poolFee });
+  async function renderInto(stem, specs) { // returns {name: embed}; a chart that can't be drawn keeps its old picture or links online
+    const out = {};
+    for (const sp of specs) {
+      const file = chartFile(stem, sp.name), png = await renderPng(sp, { fetchImpl: chartFetch });
+      if (png) { vaultChanged(vault.sync({ [file]: png })); out[sp.name] = `![[${file}]]`; }
+      else if (vault.has(file)) out[sp.name] = `![[${file}]]`;
+      else { const u = chartUrl(sp); if (u.length < 8000) out[sp.name] = `![${sp.name}](${u})`; }
+    }
+    return out;
+  }
+  let notesQueue = Promise.resolve(), analysisAt = 0;
+  /** A new bought trade: its note right away, then its charts, its day's charts and (at most every analysisEveryMin) the history's. */
+  function chartTrade(r) {
+    if (!vault || !noteCharts) return;
+    notesQueue = notesQueue.then(async () => {
+      try {
+        const a = analysisOf(r), stem = tradeNoteName(r), day = String(r.time).slice(0, 10);
+        const tc = await renderInto(stem, a.charts);
+        vaultChanged(vault.sync({ [`machine/trades/${stem}.md`]: tradeNote(r, { mirror: mirrorOf(r), matched: matchedOf(r), analysis: a.md, charts: { ...embedsOf(stem, TRADE_CHARTS), ...tc } }) }));
+        await renderInto(`daily ${day}`, dayCharts(day, records, mirrorOf));
+        if (now() - analysisAt >= analysisEveryMin * 60e3) { analysisAt = now(); await renderInto('analysis', analysisCharts(delayAnalysis(records, { buySol, solUsd: solUsd(), mirrorOf }))); }
+        writeNotes([]); // the day, Home and the analysis note pick up the new pictures
+      } catch (e) { log('second brain charts: ' + e.message); }
+    });
+  }
   function writeNotes(trades) {
     if (!vault) return;
     try {
       const st = status(), files = {}, days = new Set();
-      for (const r of trades) { files[`machine/trades/${tradeNoteName(r)}.md`] = tradeNote(r, { mirror: mirrorOf(r), matched: matchedOf(r) }); days.add(String(r.time).slice(0, 10)); }
-      for (const d of days) files[`machine/daily/${d}.md`] = dailyNote(d, records, { mirrorOf, decisions: mem.decisions, rank: st.rank?.name ?? null, bankrollUsd: st.rank?.bankrollUsd ?? null });
+      for (const r of trades) { const stem = tradeNoteName(r); files[`machine/trades/${stem}.md`] = tradeNote(r, { mirror: mirrorOf(r), matched: matchedOf(r), analysis: analysisOf(r).md, charts: embedsOf(stem, TRADE_CHARTS) }); days.add(String(r.time).slice(0, 10)); }
+      const lastDay = bought(records).at(-1)?.time; if (lastDay) days.add(String(lastDay).slice(0, 10));
+      for (const d of days) files[`machine/daily/${d}.md`] = dailyNote(d, records, { mirrorOf, decisions: mem.decisions, rank: st.rank?.name ?? null, bankrollUsd: st.rank?.bankrollUsd ?? null, charts: embedsOf(`daily ${d}`, DAY_CHARTS) });
+      files['machine/analysis/Delays and missed profit.md'] = analysisMarkdown(delayAnalysis(records, { buySol, solUsd: solUsd(), mirrorOf }), { charts: embedsOf('analysis', ANALYSIS_CHARTS), updated: new Date(now()).toISOString(), buySol });
       for (const l of learn.lessons()) files[`machine/patterns/${patternNoteName(l.label)}.md`] = patternNote({ label: l.label, status: l.status, trades: l.n, wins: l.wins, avgFcat: l.avg }, records);
       files['machine/decisions.md'] = decisionsNote(mem.decisions);
       files['Home.md'] = homeNote({ mode, status: st, records, updated: new Date(now()).toISOString() });
@@ -455,6 +492,7 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
     mem.stats = { bought: boughtN(), studied: records.length, updated: new Date(now()).toISOString() };
     save();
     writeNotes([rec]);
+    chartTrade(rec);
     if (now() - (mem.backupAt || 0) >= backupHours * 3600e3) backupSoon();
   }
 
@@ -479,6 +517,11 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
   }
 
   // the history as notes once at start (the newest vaultBackfill bought trades); a GitHub push soon after
-  if (vault) { writeNotes(bought(records).slice(-vaultBackfill)); if (gitSync) setTimeout(() => pushVault().catch(() => {}), 30_000).unref?.(); }
-  return { onTrade, gate, status, save, backup: backupSoon, rankLine, memory: () => mem, runPack, vaultZip, pushVault, vaultStatus: () => (vault ? { files: vault.list().length, unsynced: unsynced.size, sync: gitSync ? gitSync.status() || { pending: true } : null } : null), stop: () => clearInterval(syncTimer), findings: () => findingsMarkdown({ tests: lastTests || runPack(), speed: lastSpeed, mode, updated: new Date(now()).toISOString(), solUsd: solUsd() }) };
+  if (vault) {
+    writeNotes(bought(records).slice(-vaultBackfill));
+    // the history's charts once at start (the trades' own charts come with each new trade)
+    if (noteCharts) notesQueue = notesQueue.then(async () => { analysisAt = now(); await renderInto('analysis', analysisCharts(delayAnalysis(records, { buySol, solUsd: solUsd(), mirrorOf }))); writeNotes([]); }).catch((e) => log('second brain charts: ' + e.message));
+    if (gitSync) setTimeout(() => pushVault().catch(() => {}), 30_000).unref?.();
+  }
+  return { onTrade, gate, status, save, backup: backupSoon, rankLine, memory: () => mem, runPack, vaultZip, pushVault, notesIdle: () => notesQueue, vaultStatus: () => (vault ? { files: vault.list().length, unsynced: unsynced.size, sync: gitSync ? gitSync.status() || { pending: true } : null } : null), stop: () => clearInterval(syncTimer), findings: () => findingsMarkdown({ tests: lastTests || runPack(), speed: lastSpeed, mode, updated: new Date(now()).toISOString(), solUsd: solUsd() }) };
 }

@@ -49,6 +49,7 @@ export function tradeNote(r, ctx = {}) {
     '## What I thought before the result',
     ...(r.thinking?.length ? r.thinking.map((x) => `- ${x}`) : ['- (no thoughts recorded)']),
     '',
+    ...(ctx.analysis ? [ctx.charts?.price || '', ctx.charts?.delay || '', ctx.charts?.mirror || '', '', ctx.analysis, '', ctx.charts?.exits || '', ctx.charts?.['vs-history'] || '', ''] : []),
     '## What happened',
     `- Decu bought ${fin(r.hisSol) ? r.hisSol.toFixed(3) : '?'} SOL; I bought ${r.delaySec ?? '?'} s${r.latency?.blocksAfter != null ? ` / ${r.latency.blocksAfter} blocks` : ''} later${fin(r.entryGap) ? ` and paid ${Math.abs(r.entryGap * 100).toFixed(1)}% ${r.entryGap >= 0 ? 'more' : 'less'} than him` : ''}.`,
     r.crowd ? `- Place in line: #${r.crowd.place} (${r.crowd.trades} trades by others landed between his buy and mine${r.crowd.exact ? '' : ', paper estimate'}).` : null,
@@ -69,7 +70,7 @@ export function tradeNote(r, ctx = {}) {
 }
 
 /** The day as one note: its numbers as front matter (one row per day for Obsidian queries) and its trades. */
-export function dailyNote(day, records, { mirrorOf = () => null, decisions = [], rank = null, bankrollUsd = null } = {}) {
+export function dailyNote(day, records, { mirrorOf = () => null, decisions = [], rank = null, bankrollUsd = null, charts = null } = {}) {
   const rs = bought(records).filter((r) => String(r.time).slice(0, 10) === day);
   const ms = rs.map(mirrorOf).filter(Boolean), sum = (k) => ms.reduce((a, m) => a + (fin(m[k]) ? m[k] : 0), 0);
   const dec = decisions.filter((d) => String(d.time).slice(0, 10) === day);
@@ -78,7 +79,8 @@ export function dailyNote(day, records, { mirrorOf = () => null, decisions = [],
     mirror_usd: ms.length ? sum('yourUsd') : null, decu_perfect_usd: ms.length ? sum('perfectUsd') : null, delay_cost_usd: ms.length ? sum('delayUsd') : null, fees_usd: ms.length ? sum('feesUsd') : null,
     rank, bankroll_usd: bankrollUsd, studied: records.filter((r) => String(r.time).slice(0, 10) === day).length,
   }) + [
-    `# ${day}`, '', `[[Home]]`, '',
+    `# ${day}`, '', `[[Home]] · [[machine/analysis/Delays and missed profit|Delays and missed profit]]`, '',
+    ...(charts?.['day-compare'] ? [charts['day-compare'], ''] : []), ...(charts?.['day-cumulative'] ? [charts['day-cumulative'], ''] : []),
     `## Trades (${rs.length} bought, ${rs.filter((r) => r.fcat > 0).length} won)`,
     ...(rs.length ? rs.map((r) => `- ${String(r.time).slice(11, 16)} [[trades/${tradeNoteName(r)}|${coin(r)}]] FCAT ${pct(r.fcat)} · paid ${pct(r.entryGap)} over Decu${r.prediction ? ` · predicted ${pct(r.prediction.fcat)} (${r.prediction.right ? 'right' : 'wrong'})` : ''}`) : ['- none']),
     '',
@@ -111,7 +113,7 @@ export function homeNote({ mode = 'paper', status = null, records = [], updated 
     '',
     '## Days', ...days.map((d) => `- [[daily/${d}|${d}]]`), '',
     '## What I trust', ...((s.patterns || []).length ? s.patterns.map((p) => `- [[patterns/${patternNoteName(p.label)}|${p.label}]] (${p.status}, ${p.wins}/${p.trades} won)`) : ['- nothing strong enough yet']), '',
-    '## More', '- [[machine/findings|Paper tests and findings]]', '- [[machine/decisions|Every decision I made]]', '- [[AGENTS|How this vault works]]', '',
+    '## More', '- [[machine/analysis/Delays and missed profit|Delays and missed profit (charts)]]', '- [[machine/findings|Paper tests and findings]]', '- [[machine/decisions|Every decision I made]]', '- [[AGENTS|How this vault works]]', '',
   ].filter((x) => x != null).join('\n');
 }
 
@@ -133,11 +135,11 @@ const HUMAN_README = ['# Your notes', '', 'This folder is yours: the bot never w
  */
 export function createVault(dir, { log = () => {} } = {}) {
   const hashes = new Map(), sha = (t) => crypto.createHash('sha1').update(t).digest('hex');
-  const write = (rel, text) => {
+  const write = (rel, text) => { // text: a string (note) or a Buffer (chart picture)
     const h = sha(text);
     if (hashes.get(rel) === h) return false;
     const abs = path.join(dir, rel);
-    try { if (fs.readFileSync(abs, 'utf8') === text) { hashes.set(rel, h); return false; } } catch {}
+    try { const old = fs.readFileSync(abs); if (Buffer.isBuffer(text) ? old.equals(text) : old.toString('utf8') === text) { hashes.set(rel, h); return false; } } catch {}
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, text, { mode: 0o600 });
     hashes.set(rel, h);
@@ -145,7 +147,7 @@ export function createVault(dir, { log = () => {} } = {}) {
   };
   return {
     dir,
-    /** files: {relPath: text}. Never writes under human/ except its README once. */
+    /** files: {relPath: text or Buffer}. Never writes under human/ except its README once. */
     sync(files) {
       const changed = [];
       try {
@@ -158,11 +160,12 @@ export function createVault(dir, { log = () => {} } = {}) {
     /** Every file of the vault (relative paths), for the zip and the GitHub sync. */
     list() {
       const out = [];
-      const walk = (rel) => { for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) { const r = rel ? `${rel}/${e.name}` : e.name; if (e.isDirectory()) walk(r); else if (e.name.endsWith('.md')) out.push(r); } };
+      const walk = (rel) => { for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) { const r = rel ? `${rel}/${e.name}` : e.name; if (e.isDirectory()) walk(r); else if (/\.(md|png)$/.test(e.name)) out.push(r); } };
       try { walk(''); } catch {}
       return out.sort();
     },
     read: (rel) => fs.readFileSync(path.join(dir, rel)),
+    has: (rel) => fs.existsSync(path.join(dir, rel)),
   };
 }
 

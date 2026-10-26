@@ -1,11 +1,12 @@
 ---
 type: "decisions"
-count: 5
+count: 6
 ---
 # Every decision I made
 
 [[Home]]
 
+- 2026-10-26 07:37 **upgrade**: Started on v3.8.0 with 10 bought trades remembered.
 - 2026-10-26 06:53 **upgrade**: Started on v3.7.2 with 9 bought trades remembered.
 - 2026-10-26 06:47 **upgrade**: Started on v3.7.1 with 7 bought trades remembered.
 - 2026-10-24 20:26 **upgrade**: Started on v3.7.0 with 5 bought trades remembered.
