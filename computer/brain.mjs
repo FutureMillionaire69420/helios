@@ -23,6 +23,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { advise, simulateRules } from './learn.mjs';
 import { runTests, speedReport, findingsMarkdown, marketCapGroups } from './tests.mjs';
+import { createVault, tradeNote, dailyNote, patternNote, homeNote, decisionsNote, tradeNoteName, patternNoteName, AGENTS_MD, zipFiles } from './vault.mjs';
 
 const fin = (x) => typeof x === 'number' && Number.isFinite(x);
 const pct = (x, d = 1) => (!fin(x) ? '—' : `${x >= 0 ? '+' : ''}${(x * 100).toFixed(d)}%`);
@@ -217,7 +218,7 @@ export async function restoreIfEmpty({ backup, memoryFile, journalFile, log = ()
  */
 export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1, rules, defaults, notify = null, version = '0', solUsd = () => null,
   autoTune = mode === 'paper', veto = mode === 'paper', bankrollUsd = 1000, goalUsd = 1000, tuneEvery = 10, minEvidence = 50, demoteAfter = 10, revertAfter = 20,
-  limits = { maxPayPct: [5, 25], stopLossPct: [10, 30], gainGatePct: [10, 30] }, gateSec = 15, backup = null, backupHours = 24, journalFile = null, brainPerDay = 60, vaultDir = null, poolFee = 0.0125, log = () => {}, now = () => Date.now() }) {
+  limits = { maxPayPct: [5, 25], stopLossPct: [10, 30], gainGatePct: [10, 30] }, gateSec = 15, backup = null, backupHours = 24, journalFile = null, brainPerDay = 60, vaultDir = null, gitSync = null, vaultSyncMin = 5, vaultBackfill = 300, poolFee = 0.0125, log = () => {}, now = () => Date.now() }) {
   const tag = mode === 'live' ? '' : mode === 'paper' ? '[PAPER] ' : '[DEMO] ';
   let mem = null;
   try { mem = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* first run */ }
@@ -326,14 +327,45 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
   }
   // OBSIDIAN-READY: the findings as a markdown note (front matter + tables) in the second brain's machine side
   function writeVault() {
-    if (!vaultDir || !lastTests) return;
-    try {
-      fs.mkdirSync(path.join(vaultDir, 'machine'), { recursive: true });
-      fs.writeFileSync(path.join(vaultDir, 'machine', 'findings.md'), findingsMarkdown({ tests: lastTests, speed: lastSpeed, mode, updated: new Date(now()).toISOString(), solUsd: solUsd() }), { mode: 0o600 });
-      const agents = path.join(vaultDir, 'AGENTS.md');
-      if (!fs.existsSync(agents)) fs.writeFileSync(agents, ['# Decu bot second brain', '', '- `machine/`: written by the bot (findings, tests). It rewrites these files; do not edit them.', '- `human/`: yours. The bot reads it and never writes there.', ''].join('\n'), { mode: 0o600 });
-    } catch (e) { log('second brain not written: ' + e.message); }
+    if (!vault || !lastTests) return;
+    vaultChanged(vault.sync({ 'machine/findings.md': findingsMarkdown({ tests: lastTests, speed: lastSpeed, mode, updated: new Date(now()).toISOString(), solUsd: solUsd() }), 'AGENTS.md': AGENTS_MD }));
   }
+  // THE SECOND BRAIN (vault.mjs): every bought trade, its day, the patterns, the decisions and Home as Obsidian notes
+  const vault = vaultDir ? createVault(vaultDir, { log }) : null;
+  const unsynced = new Set();
+  const vaultChanged = (paths) => { for (const p of paths || []) unsynced.add(p); };
+  const matchedOf = (r) => [...new Set((r.thinking || []).map((t) => /pattern [▲▼] "([^"]+)"/.exec(t)?.[1]).filter(Boolean))].map((label) => ({ label }));
+  const mirrorOf = (r) => mirror10(r, { rules: { stopLossPct: rules.stopLossPct, gainGatePct: rules.gainGatePct, gateSec }, solUsd: solUsd() });
+  function writeNotes(trades) {
+    if (!vault) return;
+    try {
+      const st = status(), files = {}, days = new Set();
+      for (const r of trades) { files[`machine/trades/${tradeNoteName(r)}.md`] = tradeNote(r, { mirror: mirrorOf(r), matched: matchedOf(r) }); days.add(String(r.time).slice(0, 10)); }
+      for (const d of days) files[`machine/daily/${d}.md`] = dailyNote(d, records, { mirrorOf, decisions: mem.decisions, rank: st.rank?.name ?? null, bankrollUsd: st.rank?.bankrollUsd ?? null });
+      for (const l of learn.lessons()) files[`machine/patterns/${patternNoteName(l.label)}.md`] = patternNote({ label: l.label, status: l.status, trades: l.n, wins: l.wins, avgFcat: l.avg }, records);
+      files['machine/decisions.md'] = decisionsNote(mem.decisions);
+      files['Home.md'] = homeNote({ mode, status: st, records, updated: new Date(now()).toISOString() });
+      files['AGENTS.md'] = AGENTS_MD;
+      vaultChanged(vault.sync(files));
+    } catch (e) { log('second brain: ' + e.message); }
+  }
+  /** The whole vault as one zip (dashboard download). */
+  const vaultZip = () => (vault ? zipFiles(vault.list().map((name) => ({ name: `Decu Brain/${name}`, data: vault.read(name) }))) : null);
+  // GITHUB SYNC (optional): the changed notes as one commit every vaultSyncMin minutes, to a private repository
+  let syncing = false;
+  async function pushVault() {
+    if (!gitSync || !vault || syncing || !unsynced.size) return null;
+    syncing = true;
+    const paths = [...unsynced]; unsynced.clear();
+    try {
+      const files = paths.map((p) => { try { return { name: p, data: vault.read(p) }; } catch { return null; } }).filter(Boolean);
+      const r = await gitSync.push(files, `brain: ${files.length} note${files.length === 1 ? '' : 's'} updated`);
+      if (/^failed/.test(r)) for (const p of paths) unsynced.add(p); // tried again next time
+      return r;
+    } finally { syncing = false; }
+  }
+  const syncTimer = gitSync && vaultSyncMin > 0 ? setInterval(() => { pushVault().catch(() => {}); }, vaultSyncMin * 60e3) : null;
+  syncTimer?.unref?.();
   function think() {
     if (boughtN() % tuneEvery !== 0) return;
     try { runPack(); } catch (e) { log('test pack: ' + e.message); }
@@ -422,6 +454,7 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
     send({ kind: 'brain', title: `${tag}Brain: ${name} $10 mirror ${m ? usd(m.yourUsd) : '—'} vs Decu ${m ? usd(m.perfectUsd) : '—'} · delay ${m ? usd(m.delayUsd) : '—'}`, body, priority: 3, click: `https://pump.fun/coin/${rec.mint}`, image: m ? mirrorChart(rec, m) : undefined });
     mem.stats = { bought: boughtN(), studied: records.length, updated: new Date(now()).toISOString() };
     save();
+    writeNotes([rec]);
     if (now() - (mem.backupAt || 0) >= backupHours * 3600e3) backupSoon();
   }
 
@@ -445,5 +478,7 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
       mirror: mirrorTotals(records, { solUsd: solUsd() }), versions: mem.versions.slice(-10), backup: backup ? { lastAt: mem.backupAt || null } : null };
   }
 
-  return { onTrade, gate, status, save, backup: backupSoon, rankLine, memory: () => mem, runPack, findings: () => findingsMarkdown({ tests: lastTests || runPack(), speed: lastSpeed, mode, updated: new Date(now()).toISOString(), solUsd: solUsd() }) };
+  // the history as notes once at start (the newest vaultBackfill bought trades); a GitHub push soon after
+  if (vault) { writeNotes(bought(records).slice(-vaultBackfill)); if (gitSync) setTimeout(() => pushVault().catch(() => {}), 30_000).unref?.(); }
+  return { onTrade, gate, status, save, backup: backupSoon, rankLine, memory: () => mem, runPack, vaultZip, pushVault, vaultStatus: () => (vault ? { files: vault.list().length, unsynced: unsynced.size, sync: gitSync ? gitSync.status() || { pending: true } : null } : null), stop: () => clearInterval(syncTimer), findings: () => findingsMarkdown({ tests: lastTests || runPack(), speed: lastSpeed, mode, updated: new Date(now()).toISOString(), solUsd: solUsd() }) };
 }

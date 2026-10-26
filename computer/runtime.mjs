@@ -7,6 +7,7 @@ import {PUMP_TOKEN,QUOTES} from './solscan.mjs';
 import {createStudy,summaryText} from './study.mjs';
 import {buildAnalytics,digestMessages} from './analytics.mjs';
 import {createThinkingBrain,createBackup,restoreIfEmpty} from './brain.mjs';
+import {createGitSync} from './vault.mjs';
 import {buyContextFromLogs,tokensOut,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache,createSellDesk,decodeBondingCurve,quotedInSol,PUMP,TOKEN,TOKEN_2022} from './pumpbuild.mjs';
 
 const val = (key, fallback) => process.env[key]?.trim() || fallback;
@@ -160,7 +161,7 @@ export async function startRuntime(k, {demo=false}={}) {
   try { if (fs.statSync(k.config.logFile).size > 50e6) fs.renameSync(k.config.logFile, k.config.logFile+'.1'); } catch {}
   const token = val('DASHBOARD_TOKEN','');
   if (!demo && !k.config.dryRun && token.length<24) throw new Error('LIVE requires DASHBOARD_TOKEN of at least 24 characters');
-  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey,k.config.pumpPortalKey].filter(Boolean);
+  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey,k.config.pumpPortalKey,val('GITHUB_VAULT_TOKEN',''),val('GITHUB_BACKUP_TOKEN','')].filter(Boolean);
   const clean = v => { let s=JSON.stringify(v); for(const secret of secrets) s=s.split(secret).join('[REDACTED]'); return JSON.parse(k.redact(s)); };
   const log = e => {
     // Sell outcomes: was the position closed, and how did the fill compare with the exit trigger?
@@ -300,7 +301,9 @@ export async function startRuntime(k, {demo=false}={}) {
     let version='0'; try { version=JSON.parse(fs.readFileSync(new URL('./package.json',import.meta.url),'utf8')).version; } catch {}
     thinking=createThinkingBrain({file:brainFile,study,mode:c.mode,buySol:c.buySol,rules,defaults:ruleDefaults,version,solUsd,backup:brainBackup,journalFile:studyFile,
       notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, autoTune:c.mode==='paper'&&val('BRAIN_AUTOTUNE','true')!=='false', veto:c.mode==='paper'&&val('BRAIN_VETO','true')!=='false',
-      bankrollUsd:number('BRAIN_BANKROLL_USD',1000), goalUsd:number('BRAIN_GOAL_USD',1000), vaultDir:val('SECOND_BRAIN_DIR',path.join(path.dirname(studyFile),`second-brain-${c.mode}`)), poolFee:(k.config.pumpFeePct ?? 1.25)/100, brainPerDay:number('NTFY_BRAIN_PER_DAY',60), gateSec:number('MAX_HOLD_SEC',15), log:m=>console.log(m)});
+      bankrollUsd:number('BRAIN_BANKROLL_USD',1000), goalUsd:number('BRAIN_GOAL_USD',1000), vaultDir:val('SECOND_BRAIN_DIR',path.join(path.dirname(studyFile),`second-brain-${c.mode}`)), vaultSyncMin:number('VAULT_SYNC_MIN',5),
+      // GITHUB_VAULT_TOKEN + GITHUB_VAULT_REPO (owner/name): a PRIVATE repository just for the brain's notes, pulled by Obsidian's Git plugin
+      gitSync:demo?null:createGitSync({token:val('GITHUB_VAULT_TOKEN',''),repo:val('GITHUB_VAULT_REPO',''),branch:val('GITHUB_VAULT_BRANCH','main'),log:m=>console.log(m)}), poolFee:(k.config.pumpFeePct ?? 1.25)/100, brainPerDay:number('NTFY_BRAIN_PER_DAY',60), gateSec:number('MAX_HOLD_SEC',15), log:m=>console.log(m)});
     if(c.mode==='paper' && JSON.stringify(rules)!==JSON.stringify(ruleDefaults)) console.log(`brain: paper rules restored from memory: premium cap ${rules.maxPayPct}% · stop -${rules.stopLossPct}% · gate +${rules.gainGatePct}% (settings: ${ruleDefaults.maxPayPct}% / -${ruleDefaults.stopLossPct}% / +${ruleDefaults.gainGatePct}%)`);
   }
   // A Decu buy the bot did not take (filtered, paused, style off, too late, failed): still priced
@@ -911,6 +914,8 @@ export async function startRuntime(k, {demo=false}={}) {
         res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean(snap)));
       }
       if(url.pathname==='/api/memory' && req.method==='GET') {const {memoryBank,memoryInsights}=await import('./study.mjs');res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?{bank:memoryBank(study.records),insights:memoryInsights(study.records)}:{bank:[]}));}
+      if(url.pathname==='/api/brain/vault.zip' && req.method==='GET') {const z=thinking?.vaultZip?.(); if(!z){res.writeHead(404);return res.end('No second brain yet');} res.writeHead(200,{'Content-Type':'application/zip','Content-Disposition':`attachment; filename="decu-brain-${c.mode}.zip"`});return res.end(z);}
+      if(url.pathname==='/api/brain/vault/sync' && req.method==='POST') {const r=await thinking?.pushVault?.(); res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8'});return res.end(r||'GitHub sync is not set up (GITHUB_VAULT_TOKEN, GITHUB_VAULT_REPO), or nothing changed.');}
       if(url.pathname==='/api/brain/findings.md' && req.method==='GET') {res.writeHead(200,{'Content-Type':'text/markdown; charset=utf-8','Content-Disposition':`attachment; filename="decu-brain-findings-${c.mode}.md"`});return res.end(thinking?thinking.findings():'# No brain yet\n');}
       if(url.pathname==='/api/brain' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?{...study.learning(),thinking:thinking?.status()||null}:{journey:null}));}
       if(url.pathname==='/api/study' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?{...study.summary(),text:summaryText(study.summary()),active:[...study.active.keys()]}:{trades:0,text:'Study is off.'}));}
@@ -942,7 +947,7 @@ export async function startRuntime(k, {demo=false}={}) {
       if(url.pathname==='/api/export.csv' && req.method==='GET') {const {toCsv}=await import('./study.mjs');res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':`attachment; filename="decu-trades-${c.mode}-${new Date().toISOString().slice(0,10)}.csv"`});return res.end(toCsv(study?study.records:[]));}
       if(url.pathname==='/api/analytics' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean({...analyticsNow(),ntfy:k.ntfyUsage?.()||null})));}
       if(url.pathname==='/api/analytics/send' && req.method==='POST') {const msg=await sendDigest();res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8'});return res.end(msg);}
-      if(url.pathname==='/api/research' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean({...(study?study.research():{trades:0}),thinking:(()=>{const t=thinking?.status();return t?{tests:t.tests,speed:t.speed,marketCaps:t.marketCaps,goal:t.goal,patterns:t.patterns,rank:t.rank,rules:t.rules,defaults:t.defaults,autoTune:t.autoTune,veto:t.veto,vetoes:t.vetoes,mirror:t.mirror,decisions:t.decisions.slice(-5)}:null;})(),live:{fees:fee(),feeMode:val('FEE_MODE','max'),push:!!k.stream?.connected?.(),priceChecks:status.priceChecks,sellDesk:desk?{...desk.snapshot(),liveSells:status.localSells||0,lastLiveSellMs:status.lastLocalSellMs??null,paperSellBuilds:status.paperSellBuilds||0,pushedBalances:status.pushedBalances||0}:null,solscan:k.solscanUsage?.()||null,pumpportal:{...pumpPortalStatus(),fastBuys:status.pumpportalFast||0,chainContexts:status.chainCtx||0,race:status.feedRace||null,builderCheck:ppCheck.result}}})));}
+      if(url.pathname==='/api/research' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean({...(study?study.research():{trades:0}),thinking:(()=>{const t=thinking?.status();return t?{vault:thinking.vaultStatus?.()||null,tests:t.tests,speed:t.speed,marketCaps:t.marketCaps,goal:t.goal,patterns:t.patterns,rank:t.rank,rules:t.rules,defaults:t.defaults,autoTune:t.autoTune,veto:t.veto,vetoes:t.vetoes,mirror:t.mirror,decisions:t.decisions.slice(-5)}:null;})(),live:{fees:fee(),feeMode:val('FEE_MODE','max'),push:!!k.stream?.connected?.(),priceChecks:status.priceChecks,sellDesk:desk?{...desk.snapshot(),liveSells:status.localSells||0,lastLiveSellMs:status.lastLocalSellMs??null,paperSellBuilds:status.paperSellBuilds||0,pushedBalances:status.pushedBalances||0}:null,solscan:k.solscanUsage?.()||null,pumpportal:{...pumpPortalStatus(),fastBuys:status.pumpportalFast||0,chainContexts:status.chainCtx||0,race:status.feedRace||null,builderCheck:ppCheck.result}}})));}
       if(req.method==='POST' && ['/api/autocopy/on','/api/autocopy/off'].includes(url.pathname)) {
         engine.autoCopy(url.pathname==='/api/autocopy/on');res.writeHead(200);return res.end('OK');
       }
@@ -975,5 +980,5 @@ export async function startRuntime(k, {demo=false}={}) {
     if(Date.now()-(engine.d.analyticsDigestAt||0)>=number('ANALYTICS_DIGEST_HOURS',24)*3600e3 && n>(engine.d.analyticsDigestN||0)) sendDigest().then(m=>engine.event('analytics-digest',{message:m})).catch(()=>{});
   },number('ANALYTICS_CHECK_MS',600_000)); digestTimer?.unref?.();
   const boughtCount=()=>(study?.records||[]).filter(r=>r.taken!==false && !r.skipReason).length;
-  return {engine,server,study,thinking,rules,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;clearInterval(digestTimer);desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,thinking,rules,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;clearInterval(digestTimer);thinking?.stop?.();desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }
