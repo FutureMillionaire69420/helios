@@ -1006,9 +1006,9 @@ export async function startRuntime(k, {demo=false}={}) {
       }
       res.writeHead(404);return res.end('Not found');
     }
-    const files={'/':'dashboard.html','/dashboard.js':'dashboard.js','/charts.js':'charts.js','/dashcalc.mjs':'dashcalc.mjs','/watch.js':'watch.js','/wallet.js':'wallet.js','/dashboard.css':'dashboard.css','/manifest.webmanifest':'manifest.webmanifest','/icon.svg':'icon.svg'};
+    const files={'/':'dashboard.html','/dashboard.js':'dashboard.js','/charts.js':'charts.js','/dashcalc.mjs':'dashcalc.mjs','/watch.js':'watch.js','/wallet.js':'wallet.js','/dashboard.css':'dashboard.css','/manifest.webmanifest':'manifest.webmanifest','/icon.svg':'icon.svg','/rolex.jpg':'rolex.jpg'};
     if(!files[url.pathname]) {res.writeHead(404);return res.end('Not found');}
-    const types={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.webmanifest':'application/manifest+json'};
+    const types={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.webmanifest':'application/manifest+json','.jpg':'image/jpeg'};
     let body; try { body=fs.readFileSync(new URL(files[url.pathname],import.meta.url)); } catch { res.writeHead(404); return res.end('Not found'); }
     res.writeHead(200,{'Content-Type':types[path.extname(files[url.pathname])]});res.end(body);
   });

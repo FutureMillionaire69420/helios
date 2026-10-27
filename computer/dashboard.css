@@ -83,7 +83,7 @@ input::placeholder { color: var(--ink-3); }
 /* ---------- sign in ---------- */
 .login { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; }
 .login-card { width: min(420px, 100%); text-align: center; }
-.login-watch { width: 200px; margin: 0 auto 10px; }
+.login-photo { display: block; width: min(300px, 78vw); aspect-ratio: 3 / 4; object-fit: cover; margin: 0 auto 18px; border-radius: 22px; border: 1px solid transparent; background: linear-gradient(140deg, var(--steel-lo), var(--accent)) border-box; box-shadow: 0 18px 50px rgba(0,0,0,.6), 0 0 60px rgba(214,175,87,.12); }
 .login-card h1 { font-size: 26px; margin: 4px 0 6px; }
 .login-form { display: grid; gap: 12px; margin: 22px 0 10px; text-align: left; }
 .login-error { min-height: 20px; color: #ffb4b4; font-size: 13px; margin: 4px 0; }

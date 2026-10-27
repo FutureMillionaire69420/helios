@@ -70,7 +70,6 @@ const pressed = (container, v) => { for (const b of container.querySelectorAll('
 let loginWatch = null, homeWatch = null;
 function showLogin(msg = '') {
   $('app').hidden = true; $('login').hidden = false; $('login-error').textContent = msg;
-  if (!loginWatch) loginWatch = createWatch($('login-watch'), { label: 'Watch' });
   $('token').focus();
 }
 async function signIn(token, remember) {
