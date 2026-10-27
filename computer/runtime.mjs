@@ -2,12 +2,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import http from 'node:http';
+import zlib from 'node:zlib';
 import {Engine} from './engine.mjs';
 import {PUMP_TOKEN,QUOTES} from './solscan.mjs';
 import {createStudy,summaryText} from './study.mjs';
 import {buildAnalytics,digestMessages} from './analytics.mjs';
 import {createThinkingBrain,createBackup,restoreIfEmpty} from './brain.mjs';
 import {createGitSync} from './vault.mjs';
+import {tradeRows} from './dashcalc.mjs';
+import {createGoal} from './goal.mjs';
 import {buyContextFromLogs,tokensOut,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache,createSellDesk,decodeBondingCurve,quotedInSol,PUMP,TOKEN,TOKEN_2022} from './pumpbuild.mjs';
 
 const val = (key, fallback) => process.env[key]?.trim() || fallback;
@@ -81,7 +84,7 @@ export function alertFor(e, mode, leaderLabel='Decu') {
   const pump = m => 'https://pump.fun/coin/'+m, tx = s => 'https://solscan.io/tx/'+s;
   if (e.type==='leader-sold') return {title:`${tag}${leaderLabel} SOLD a coin you hold`, body:`He is selling ${short(e.mint)}. The bot will NOT sell (manual-sell style).\nSell by hand in Phantom if you want out.\nToken: ${e.mint}`, priority:5, tags:['rotating_light'], click:pump(e.mint)};
   if (e.type==='confirmed' && e.side==='buy') return {title:`${tag}Copied ${leaderLabel}: bought ${short(e.mint)}`, body:`Spent ${(-e.solDelta).toFixed(4)} SOL incl. fees\nToken: ${e.mint}`, priority:mode==='live'?5:3, tags:['white_check_mark'], click:mode==='live'?tx(e.signature):pump(e.mint)};
-  const RULE={stoploss:'stop-loss','gain-target':'+15% gate','hold-limit':'10 min limit','no-price':'no price','sell-all':'sell everything','retry-sell':'retry'};
+  const RULE={stoploss:'stop-loss','gain-target':'+15% gate','hold-limit':'10 min limit','no-price':'no price','sell-all':'sell everything','retry-sell':'retry','manual-sell':'sold from the dashboard'};
   const pc=x=>x==null||!Number.isFinite(x)?'?':`${x>=0?'+':''}${(x*100).toFixed(1)}%`;
   if (e.type==='confirmed' && e.side==='sell') {
     const how=e.rule?` (${RULE[e.rule]||e.rule})`:'';
@@ -101,7 +104,7 @@ export function alertFor(e, mode, leaderLabel='Decu') {
   if (e.type==='unsupported' && e.kind==='paid-with-pump') return {title:`${tag}${leaderLabel} bought with PUMP tokens (not copied)`, body:`He paid with PUMP tokens he held, not SOL. This bot buys with SOL only, so it skipped this one.\nToken: ${e.mint}`, priority:2, tags:['eyes'], click:pump(e.mint)};
   if (e.type==='exit-rule') {
     const p=e.pnl==null?'':` (${e.pnl>=0?'+':''}${(e.pnl*100).toFixed(1)}% incl. fees)`;
-    const t={stoploss:[`STOP TRIGGERED: selling ${short(e.mint)}${p}`,`The coin fell ${e.move!=null?(e.move*100).toFixed(0)+'%':'20%+'} from the bot's entry price: selling everything now.`,4,'stop_sign'],'gain-target':[`+15% reached: selling ${short(e.mint)}${p}`,`It reached +15% within 15 s of ${leaderLabel}'s buy: selling now.`,3,'moneybag'],'hold-until-his-sell':[`Holding ${short(e.mint)} until ${leaderLabel} sells${p}`,`Never reached +15% within 15 s of ${leaderLabel}'s buy, so the bot waits for his sell (stop-loss still on).`,2,'hourglass'],'hold-limit':[`Time limit: selling ${short(e.mint)}${p}`,'Held 10 minutes without his sell: selling everything.',3,'alarm_clock'],'sell-all':[`Selling ${short(e.mint)} (sell everything)`,'The sell-everything button was pressed on the dashboard.',4,'rotating_light'],'no-price':[`NO PRICE: selling ${short(e.mint)}`,'The price could not be checked several times in a row, so the bot is selling to be safe.',4,'warning']}[e.rule];
+    const t={stoploss:[`STOP TRIGGERED: selling ${short(e.mint)}${p}`,`The coin fell ${e.move!=null?(e.move*100).toFixed(0)+'%':'20%+'} from the bot's entry price: selling everything now.`,4,'stop_sign'],'gain-target':[`+15% reached: selling ${short(e.mint)}${p}`,`It reached +15% within 15 s of ${leaderLabel}'s buy: selling now.`,3,'moneybag'],'hold-until-his-sell':[`Holding ${short(e.mint)} until ${leaderLabel} sells${p}`,`Never reached +15% within 15 s of ${leaderLabel}'s buy, so the bot waits for his sell (stop-loss still on).`,2,'hourglass'],'hold-limit':[`Time limit: selling ${short(e.mint)}${p}`,'Held 10 minutes without his sell: selling everything.',3,'alarm_clock'],'sell-all':[`Selling ${short(e.mint)} (sell everything)`,'The sell-everything button was pressed on the dashboard.',4,'rotating_light'],'manual-sell':[`Selling ${short(e.mint)} (you pressed Sell)${p}`,'The Sell button for this coin was pressed on the dashboard: selling all of it now.',4,'outbox_tray'],'no-price':[`NO PRICE: selling ${short(e.mint)}`,'The price could not be checked several times in a row, so the bot is selling to be safe.',4,'warning']}[e.rule];
     if (t) return {title:`${tag}${t[0]}`, body:`${t[1]}\nToken: ${e.mint}`, priority:t[2], tags:[t[3]], click:pump(e.mint)};
   }
   if (e.type==='provider-gap' && false) return {title:`${tag}Helius missed a ${leaderLabel} trade`, body:`Solscan caught it and the bot processed it late.\nTx: ${e.leaderSignature}`, priority:3, tags:['satellite'], click:tx(e.leaderSignature)};
@@ -178,7 +181,7 @@ export async function startRuntime(k, {demo=false}={}) {
     if (e.type==='confirmed' && e.side==='sell' && e.closed) desk?.disarm(e.mint);
     // CLOSED-TRADE LEDGER (analytics): the realized result of every position the bot closed
     if (e.type==='confirmed' && e.side==='sell' && e.closed && engine) { const p=engine.d.positions[e.mint]; if(p && p.costSol>0) { const L=(engine.d.closedTrades ||= []);
-      L.push({mint:e.mint,symbol:study?.records?.findLast?.(r=>r.mint===e.mint)?.symbol||null,boughtAt:p.boughtAt||null,closedAt:Date.now(),costSol:p.costSol,pnlSol:Math.round((p.realizedSol-p.costSol)*1e6)/1e6,pnlPct:e.pnl??null,rule:e.rule||'his sell / other'}); if(L.length>2000) L.splice(0,L.length-2000); } }
+      L.push({mint:e.mint,symbol:study?.records?.findLast?.(r=>r.mint===e.mint)?.symbol||null,boughtAt:p.boughtAt||null,closedAt:Date.now(),costSol:p.costSol,pnlSol:Math.round((p.realizedSol-p.costSol)*1e6)/1e6,pnlPct:e.pnl??null,rule:e.rule||'his sell / other'}); if(L.length>2000) L.splice(0,L.length-2000); goal?.add(c.mode,L.at(-1),solUsd(),{soon:true}); } }
     // a failed sell may have used a wrong pushed balance: the retry reads the chain. A failed buy leaves
     // nothing to sell: its armed sell (and its token-account watch) goes too.
     if (e.type==='failed' && e.side==='sell') desk?.forgetBalance(e.mint);
@@ -223,7 +226,7 @@ export async function startRuntime(k, {demo=false}={}) {
     }
     if(e.type==='leader-sold'&&engine.d.paperStats?.[e.mint]) for(const s of AFTER) valueAt(e.mint,`his-sell+${s}s`,s*1000);
   };
-  let engine, scheduleMaxHold=null;
+  let engine, scheduleMaxHold=null, goal=null;
   const maxHoldMs=number('MAX_HOLD_SEC',15)*1000;
   // Decu's FIRST buy of each coin (for PCAT and the entry premium). Bounded.
   const leaderBuys=new Map();
@@ -539,7 +542,12 @@ export async function startRuntime(k, {demo=false}={}) {
     if(job.side==='buy') { const p=stamp(job.mint,'builtAt'); p.route??=out.built||(c.mode==='live'?'pumpportal':'paper'); }
     return out;
   };
-  engine=new Engine({file:val('ENGINE_STATE_FILE',path.resolve(`engine-${c.mode}.json`)),config:c,adapter,log});
+  const engineFile=val('ENGINE_STATE_FILE',path.resolve(`engine-${c.mode}.json`));
+  // THE ROLEX GOAL (goal.mjs): the realized profit of every closed position, paper and live, in one file next to the
+  // engine state (Render: /var/data/rolex-goal.json, shared by engine-paper.json and engine-live.json). Only LIVE
+  // profit counts toward ROLEX_GOAL_USD; paper is the practice meter.
+  goal=createGoal({file:demo&&!process.env.GOAL_FILE?null:val('GOAL_FILE',path.join(path.dirname(engineFile),'rolex-goal.json')),goalUsd:number('ROLEX_GOAL_USD',20000),name:val('ROLEX_GOAL_NAME','Rolex GMT-Master II'),timezone:c.timezone||'UTC',log:m=>console.log(m)});
+  engine=new Engine({file:engineFile,config:c,adapter,log});
   if(c.mode==='live') {
     const legacy=val('STATE_FILE',path.resolve('state.json'));
     if(fs.existsSync(legacy)) {
@@ -548,6 +556,7 @@ export async function startRuntime(k, {demo=false}={}) {
     }
   }
   await engine.recover();
+  goal.seed(c.mode,engine.d.closedTrades||[],solUsd()); // positions closed before the ledger existed
   // EXIT RULES: every held coin is priced once a second (Helius curve read) until it is sold.
   //  1. STOP_LOSS_PCT (20): down this much at any moment -> sell everything. Both styles
   //     (STOP_LOSS_MANUAL=false keeps manual-sell style hands-off).
@@ -626,7 +635,7 @@ export async function startRuntime(k, {demo=false}={}) {
         const v=await valueNow(p);
         if(Number.isFinite(v) && p.costSol>0) pnl=(v*0.995-sideFee()-p.costSol)/p.costSol;
         if(!alive()) return unwatch();
-        if(pnl!=null) { m.peak=Math.max(m.peak,pnl); m.last=pnl; m.base??=pnl; m.fails=0; status.lastPriceOkAt=Date.now(); }
+        if(pnl!=null) { m.peak=Math.max(m.peak,pnl); m.last=pnl; m.value=v; m.lastAt=Date.now(); m.base??=pnl; m.fails=0; status.lastPriceOkAt=Date.now(); }
         else if(trigger==='tick') {
           m.fails++;
           if(m.fails===priceFailAlert && Date.now()-(failAlerted.get(mint)||0)>number('PRICE_FAIL_ALERT_EVERY_SEC',300)*1000) { failAlerted.set(mint,Date.now()); engine.event('price-check-failing',{mint,fails:m.fails,last:m.last??null}); }
@@ -897,10 +906,18 @@ export async function startRuntime(k, {demo=false}={}) {
       else await engine.ingest({...base,sig:'demo-'+n,side:'sell',soldRaw:n%3===2?'250000':'750000',beforeRaw:n%3===2?'1000000':'750000'});
     },1500);
   }
+  // Coins held now, with the live value the price monitor last saw (pnl: fees in, as the stop-loss sees it).
+  const heldNow=()=>Object.entries(engine.d.positions).filter(([,p])=>BigInt(p.raw||'0')>0n).map(([mint,p])=>{ const m=monitors.get(mint), j=engine.d.jobs[mint];
+    return {mint,symbol:study?.records?.findLast?.(r=>r.mint===mint)?.symbol||null,raw:p.raw,costSol:p.costSol,realizedSol:p.realizedSol||0,boughtAt:p.boughtAt||null,
+      pnl:Number.isFinite(m?.last)?m.last:null,peak:Number.isFinite(m?.peak)?m.peak:null,valueSol:Number.isFinite(m?.value)?m.value:null,pricedAt:m?.lastAt||null,selling:j?.side==='sell'||!!exits?.has(mint),rule:exits?.get(mint)?.rule||null}; });
+  const balanceCache=new Map();
+  const sendJson=(req,res,obj)=>{ const body=JSON.stringify(obj);
+    if(body.length>4096 && /\bgzip\b/.test(req.headers['accept-encoding']||'')) { res.writeHead(200,{'Content-Type':'application/json','Content-Encoding':'gzip','Vary':'Accept-Encoding'}); return res.end(zlib.gzipSync(body)); }
+    res.writeHead(200,{'Content-Type':'application/json'}); return res.end(body); };
   const port=number('PORT',3000),host=val('DASHBOARD_HOST','127.0.0.1');
   const server=http.createServer(async(req,res)=>{
     res.setHeader('Cache-Control','no-store'); res.setHeader('X-Content-Type-Options','nosniff');
-    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'");
+    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"); // data: = wallet icons (Solflare, Phantom...)
     const url=new URL(req.url,'http://localhost');
     const authorized=()=> {const supplied=(req.headers.authorization||'').replace(/^Bearer /,'');return token && Buffer.byteLength(supplied)===Buffer.byteLength(token) && crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(token));};
     if(url.pathname==='/health') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({running:true,mode:c.mode}));}
@@ -910,7 +927,9 @@ export async function startRuntime(k, {demo=false}={}) {
       if(url.pathname==='/api/status' && req.method==='GET') {
         status.pumpportal=pumpPortalStatus(); status.pumpportalBuilder=ppCheck.result; status.rpcHealth=k.rpcHealth?.()||null;
         const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',solscanUsage:k.solscanUsage?.()||null,paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
-          wallet:{publicKey:c.wallet||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true}};
+          wallet:{publicKey:c.wallet||null,signerAddress:k.kp?.publicKey||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true},
+          held:heldNow(),solUsd:solUsd(),timezone:c.timezone,leader:{label:k.config.leaderLabel||'Decu',address:k.config.leader||null},
+          settings:{buySol:c.buySol,maxPositions:c.maxPositions,minLeaderUsd:c.minLeaderUsd,dailyCapUsd:c.dailyCapUsd||0,dailyLossLimit:c.dailyLossLimit||0,rules:{...rules},ruleDefaults:{...ruleDefaults},holdLimitSec:holdLimitMs/1000,gateSec:maxHoldMs/1000,autoTune:c.mode==='paper'&&val('BRAIN_AUTOTUNE','true')!=='false'}};
         res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean(snap)));
       }
       if(url.pathname==='/api/memory' && req.method==='GET') {const {memoryBank,memoryInsights}=await import('./study.mjs');res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(study?{bank:memoryBank(study.records),insights:memoryInsights(study.records)}:{bank:[]}));}
@@ -944,6 +963,40 @@ export async function startRuntime(k, {demo=false}={}) {
         for(const [mint,p] of held) exitNow(mint,p,'sell-all',null);
         engine.event('emergency-stop',{message:`sell everything from the dashboard: ${held.length} position(s)`}); res.writeHead(200); return res.end(String(held.length));
       }
+      // DASHBOARD DATA (v4): the trade list (one compact row per studied Decu buy, gzip; ?after=ms for the newest only),
+      // one trade in full, the Rolex goal, a coin sold from its card, the balance of a wallet connected in the browser.
+      if(url.pathname==='/api/trades' && req.method==='GET') {
+        const after=Number(url.searchParams.get('after'))||0, recs=(study?.records||[]).filter(r=>!after||Date.parse(r.time)>after);
+        return sendJson(req,res,clean({mode:c.mode,timezone:c.timezone,buySol:c.buySol,solUsd:solUsd(),total:study?.records?.length||0,generatedAt:Date.now(),rows:tradeRows(recs,{closed:engine.d.closedTrades||[],buySol:c.buySol})}));
+      }
+      if(url.pathname==='/api/trade' && req.method==='GET') {
+        const mint=url.searchParams.get('mint'), time=Number(url.searchParams.get('time'));
+        const r=study?.records?.findLast?.(x=>x.mint===mint && (!time || Date.parse(x.time)===time));
+        if(!r) { res.writeHead(404,{'Content-Type':'text/plain'}); return res.end('Trade not found'); }
+        const {tail,...rest}=r; return sendJson(req,res,clean({...rest,holderPath:Array.isArray(r.holderPath)?r.holderPath.slice(0,40):null,closed:(engine.d.closedTrades||[]).filter(t=>t.mint===mint).slice(-3)}));
+      }
+      if(url.pathname==='/api/goal' && req.method==='GET') {
+        const px=solUsd(), held=heldNow(), openSol=held.reduce((a,h)=>a+(Number.isFinite(h.pnl)?h.pnl*h.costSol:0),0);
+        return sendJson(req,res,clean(goal.summary({solUsd:px,mode:c.mode,open:{n:held.length,sol:openSol,usd:px>0?openSol*px:null,live:c.mode==='live'},entries:url.searchParams.get('entries')==='1'})));
+      }
+      const sellOne=url.pathname.match(/^\/api\/sell\/([1-9A-HJ-NP-Za-km-z]{32,44}|DEMO-\d+)$/);
+      if(req.method==='POST' && sellOne) {
+        // SELL ONE COIN from its card (LIVE = a real sell of all of it). Same path as the stop-loss: sell retries included.
+        const mint=sellOne[1], p=engine.d.positions[mint];
+        if(!p || BigInt(p.raw||'0')<=0n) { res.writeHead(404,{'Content-Type':'text/plain'}); return res.end('The bot does not hold this coin.'); }
+        if(engine.d.jobs[mint]?.side==='sell' || engine.d.queues[mint]?.some(x=>x.side==='sell')) { res.writeHead(409,{'Content-Type':'text/plain'}); return res.end('A sell of this coin is already on its way.'); }
+        const m=monitors.get(mint); exitNow(mint,p,'manual-sell',Number.isFinite(m?.last)?m.last:null,null);
+        res.writeHead(200,{'Content-Type':'text/plain'}); return res.end('OK');
+      }
+      if(url.pathname==='/api/wallet/balance' && req.method==='GET') {
+        // the SOL balance of the wallet connected in the browser (Solflare, Phantom...): one RPC read, cached 30 s
+        const a=url.searchParams.get('address')||'';
+        if(!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(a)) { res.writeHead(400,{'Content-Type':'text/plain'}); return res.end('Not a Solana address'); }
+        if(!k.getBalanceSol || engine.d.dataOff) { res.writeHead(503,{'Content-Type':'text/plain'}); return res.end('Balance lookups are off (bot power OFF or demo).'); }
+        const hit=balanceCache.get(a);
+        if(!hit || Date.now()-hit.at>30000) { try { balanceCache.set(a,{sol:await k.getBalanceSol(a),at:Date.now()}); if(balanceCache.size>20) balanceCache.delete(balanceCache.keys().next().value); } catch(e) { res.writeHead(502,{'Content-Type':'text/plain'}); return res.end('Balance lookup failed: '+e.message); } }
+        return sendJson(req,res,{address:a,...balanceCache.get(a)});
+      }
       if(url.pathname==='/api/export.csv' && req.method==='GET') {const {toCsv}=await import('./study.mjs');res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':`attachment; filename="decu-trades-${c.mode}-${new Date().toISOString().slice(0,10)}.csv"`});return res.end(toCsv(study?study.records:[]));}
       if(url.pathname==='/api/analytics' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean({...analyticsNow(),ntfy:k.ntfyUsage?.()||null})));}
       if(url.pathname==='/api/analytics/send' && req.method==='POST') {const msg=await sendDigest();res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8'});return res.end(msg);}
@@ -953,10 +1006,11 @@ export async function startRuntime(k, {demo=false}={}) {
       }
       res.writeHead(404);return res.end('Not found');
     }
-    const files={'/':'dashboard.html','/dashboard.js':'dashboard.js','/charts.js':'charts.js','/dashboard.css':'dashboard.css','/manifest.webmanifest':'manifest.webmanifest','/icon.svg':'icon.svg'};
+    const files={'/':'dashboard.html','/dashboard.js':'dashboard.js','/charts.js':'charts.js','/dashcalc.mjs':'dashcalc.mjs','/watch.js':'watch.js','/wallet.js':'wallet.js','/dashboard.css':'dashboard.css','/manifest.webmanifest':'manifest.webmanifest','/icon.svg':'icon.svg'};
     if(!files[url.pathname]) {res.writeHead(404);return res.end('Not found');}
-    const types={'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.webmanifest':'application/manifest+json'};
-    res.writeHead(200,{'Content-Type':types[path.extname(files[url.pathname])]});res.end(fs.readFileSync(new URL(files[url.pathname],import.meta.url)));
+    const types={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.webmanifest':'application/manifest+json'};
+    let body; try { body=fs.readFileSync(new URL(files[url.pathname],import.meta.url)); } catch { res.writeHead(404); return res.end('Not found'); }
+    res.writeHead(200,{'Content-Type':types[path.extname(files[url.pathname])]});res.end(body);
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});
   engine.event('started',{mode:c.mode,dashboard:`http://${host}:${port}`,note:demo?'SYNTHETIC DEMO; no chain or wallet connection':'confirmed leader signals; paper estimates are not guaranteed fills'});
@@ -980,5 +1034,5 @@ export async function startRuntime(k, {demo=false}={}) {
     if(Date.now()-(engine.d.analyticsDigestAt||0)>=number('ANALYTICS_DIGEST_HOURS',24)*3600e3 && n>(engine.d.analyticsDigestN||0)) sendDigest().then(m=>engine.event('analytics-digest',{message:m})).catch(()=>{});
   },number('ANALYTICS_CHECK_MS',600_000)); digestTimer?.unref?.();
   const boughtCount=()=>(study?.records||[]).filter(r=>r.taken!==false && !r.skipReason).length;
-  return {engine,server,study,thinking,rules,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;clearInterval(digestTimer);thinking?.stop?.();desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,thinking,rules,goal,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;goal?.flush?.();clearInterval(digestTimer);thinking?.stop?.();desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }

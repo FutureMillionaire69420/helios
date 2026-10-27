@@ -1,6 +1,6 @@
 {
   "name": "decu-copybot",
-  "version": "3.9.0",
+  "version": "4.0.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -22,7 +22,7 @@
     "study": "node copybot.mjs study",
     "backtest": "node copybot.mjs backtest",
     "export": "node copybot.mjs export",
-    "test": "node --test engine.test.mjs solscan.test.mjs stability.test.mjs phantom.test.mjs study.test.mjs fastpath.test.mjs pumpbuild.test.mjs speed.test.mjs sell.test.mjs pumpportal.test.mjs analytics.test.mjs brain.test.mjs tests.test.mjs pumpswap.test.mjs vault.test.mjs notecharts.test.mjs",
+    "test": "node --test engine.test.mjs solscan.test.mjs stability.test.mjs phantom.test.mjs study.test.mjs fastpath.test.mjs pumpbuild.test.mjs speed.test.mjs sell.test.mjs pumpportal.test.mjs analytics.test.mjs brain.test.mjs tests.test.mjs pumpswap.test.mjs vault.test.mjs notecharts.test.mjs dashcalc.test.mjs goal.test.mjs dashboard.test.mjs",
     "smoke": "node smoke.mjs",
     "demo": "node copybot.mjs demo",
     "report": "node copybot.mjs report"
