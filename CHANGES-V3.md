@@ -479,3 +479,10 @@ No trade setting changed.
     - emergencies, recovery and monitoring;
     - a dated sign-off table.
   - `setup --live` and `START-HERE.md` no longer say "no daily spending cap": `DAILY_CAP_USD` (600) has applied all along.
+
+## v4.1.1
+
+- **No "NOT READY" page while the bot is OFF on purpose.**
+  - Turned OFF with no coin held, the bot already sends "Bot OFF" at every start, so the readiness alert no longer pages for it. `/ready` still answers 503.
+  - OFF with a coin held is still paged: that coin's stop-loss is blind.
+- `READY_CHECK_MS` (15000): how often readiness is checked.

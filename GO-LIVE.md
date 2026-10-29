@@ -20,7 +20,7 @@ Update this section at every review, with the date.
 All must pass, in this order.
 
 1. **Tests.**
-   - `npm test` passes and exits on its own: 203 tests, about 15 s.
+   - `npm test` passes and exits on its own: 204 tests, about 15 s.
    - It leaves no files in the project folder.
    - `npm run smoke` passes.
 2. **Data providers.**
@@ -208,6 +208,7 @@ Raise the size only after these pass, and only once live fills match what paper 
 - **Phone alerts.**
   - "Bot NOT READY to trade" after 2 minutes not ready (`READY_ALERT_SEC`).
   - "Bot ready to trade again" when it recovers.
+  - No page while you keep the bot OFF on purpose with no coins held. `/ready` still answers 503 then. OFF with a coin held is paged: that coin's stop-loss is blind.
   - Alerts can fail themselves (ntfy daily limit, network). `NTFY_TOKEN` lifts the free limit.
 - **Helius rate limit.** Decu's wallet also runs arbitrage: one transaction swapping across several venues, about 100 in 43 s on 2026-10-28. These are downloaded 2 at a time (`ARB_DOWNLOADS`), so a burst can't use up the Helius limit. His normal trades never wait behind them.
 
@@ -241,7 +242,7 @@ Add a row for each gate as it's checked. Never delete old rows.
 | Date | Gate | Evidence | By | Result |
 |---|---|---|---|---|
 | 2026-10-28 | 3. Profit evidence | 46 paper trades, −0.017 SOL after fees; paper rules differ from live | Claude | **FAIL: NO-GO** |
-| 2026-10-29 | 1. Tests | `npm test` 203/203 in ~15 s, exits on its own, leaves no files; `npm run smoke` 2/2 | Claude | PASS |
+| 2026-10-29 | 1. Tests | `npm test` 204/204 in ~15 s, exits on its own, leaves no files; `npm run smoke` 2/2 | Claude | PASS |
 | | 2. Data providers | | | |
 | | 4. Preflight | | | |
 | | 5. Canary | | | |

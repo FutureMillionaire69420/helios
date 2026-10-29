@@ -950,9 +950,12 @@ export async function startRuntime(k, {demo=false}={}) {
   const readyTimer=demo?null:setInterval(()=>{
     if(stopped) return;
     const r=readiness(), tag=c.mode==='live'?'':'[PAPER] ';
-    if(!r.ready) { notReadySince??=Date.now(); if(!readyAlerted && Date.now()-notReadySince>=number('READY_ALERT_SEC',120)*1000) { readyAlerted=true; engine.event('not-ready',{message:`not ready to trade: ${r.blocking.join(', ')}`}); if(k.notify&&!engine.d.alertsOff) Promise.resolve(k.notify({title:`${tag}Bot NOT READY to trade`,body:r.checks.filter(x=>!x.ok).map(x=>`${x.warn?'⚠':'✕'} ${x.name}: ${x.detail}`).join('\n'),priority:4,tags:['warning']})).catch(()=>{}); } }
-    else { if(readyAlerted) { engine.event('ready',{message:'ready to trade again'}); if(k.notify&&!engine.d.alertsOff) Promise.resolve(k.notify({title:`${tag}Bot ready to trade again`,body:'Every readiness check passes.',priority:3,tags:['white_check_mark']})).catch(()=>{}); } notReadySince=null; readyAlerted=false; }
-  },15_000); readyTimer?.unref?.();
+    // Power OFF with no coin held is the owner's choice (the "Bot OFF" alert already said so): /ready still answers
+    // 503, but nobody is paged for it. OFF with a coin held is paged: that coin's stop-loss is blind.
+    const chosenOff=r.blocking.length===1 && r.blocking[0]==='Bot power';
+    if(r.ready || chosenOff) { if(readyAlerted && r.ready) { engine.event('ready',{message:'ready to trade again'}); if(k.notify&&!engine.d.alertsOff) Promise.resolve(k.notify({title:`${tag}Bot ready to trade again`,body:'Every readiness check passes.',priority:3,tags:['white_check_mark']})).catch(()=>{}); } notReadySince=null; readyAlerted=false; }
+    else { notReadySince??=Date.now(); if(!readyAlerted && Date.now()-notReadySince>=number('READY_ALERT_SEC',120)*1000) { readyAlerted=true; engine.event('not-ready',{message:`not ready to trade: ${r.blocking.join(', ')}`}); if(k.notify&&!engine.d.alertsOff) Promise.resolve(k.notify({title:`${tag}Bot NOT READY to trade`,body:r.checks.filter(x=>!x.ok).map(x=>`${x.warn?'⚠':'✕'} ${x.name}: ${x.detail}`).join('\n'),priority:4,tags:['warning']})).catch(()=>{}); } }
+  },number('READY_CHECK_MS',15000)); readyTimer?.unref?.();
   const balanceCache=new Map();
   const sendJson=(req,res,obj)=>{ const body=JSON.stringify(obj);
     if(body.length>4096 && /\bgzip\b/.test(req.headers['accept-encoding']||'')) { res.writeHead(200,{'Content-Type':'application/json','Content-Encoding':'gzip','Vary':'Accept-Encoding'}); return res.end(zlib.gzipSync(body)); }
