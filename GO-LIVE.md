@@ -317,6 +317,7 @@ Add a row for each gate as it's checked. Never delete old rows.
 |---|---|---|---|---|
 | 2026-10-28 | 3. Profit evidence | 46 paper trades, −0.017 SOL after fees; paper rules differ from live | Claude | **FAIL: NO-GO** |
 | 2026-10-29 | 1. Tests | `npm test` 204/204 in ~15 s, exits on its own, leaves no files; `npm run smoke` 2/2 | Claude | PASS |
+| 2026-10-29 | 1. Release and settings (paper) | Running: deploy commit `69ea9d8` (v4.2.0), Node 22.23.4 on Render. Tests run on GitHub at every push (206/206). Decu: `4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9`, checked: his own transactions reach the bot as the leader's. Bot wallet: see Dashboard → Bot → Wallets (not written here: this repository is public). Paper state `/var/data/engine-paper.json`, journal `/var/data/study-paper.jsonl`. Paper matches live from 05:06 UTC; the paper wallet was set to 3 SOL (it held 0.63). | Claude | PASS for paper. Redo with the live wallet and live files |
 | | 2. Data providers | | | |
 | | 4. Preflight | | | |
 | | 5. Canary | | | |
