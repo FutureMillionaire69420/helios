@@ -47,20 +47,25 @@ All must pass, in this order.
 
 Every trade pays on the buy **and** on the sell, whatever its size:
 
-- **Network fees.** Priority fee plus tip: up to **0.003 SOL per side** at the current caps (`FEE_MODE=max`, `PRIORITY_FEE_MAX_SOL` 0.001 + `TIP_MAX_SOL` 0.002). That is up to **0.006 SOL per round trip**.
+- **Network fees.** With `FEE_MODE=max`, each side pays a priority fee and a tip, each capped.
+  - Priority fee: Helius's "VeryHigh" estimate.
+  - Tip: Jito's top-1% landed tip, so the trade lands fast.
+  - The code's default caps are 0.001 + 0.002 SOL per side.
+  - **Your Render service sets higher caps:** `PRIORITY_FEE_MAX_SOL` 0.003 + `TIP_MAX_SOL` 0.01. One side can cost up to **0.013 SOL**, so up to 0.026 SOL per round trip.
+  - On paper the average was about **0.0035 SOL per side**, 0.007 per round trip.
 - **pump.fun's trading fee.** About 1.25% per side (2.5% per round trip), taken inside the price.
 - **Slippage and delay.** The price moves while your copy lands. On 2026-10-28 the median buy landed 26% above Decu's price.
 
-Costs below assume SOL at $100 and the network fees at their caps. They come before slippage.
+Costs below assume SOL at $100. They come before slippage.
 
-| Trade size | About | Network fees (round trip) | With pump.fun's 2.5% |
-|---|---|---|---|
-| 0.01 SOL | $1 | 60% | ~62% |
-| 0.05 SOL | $5 | 12% | ~15% |
-| **0.1 SOL** (`BUY_SOL` now) | $10 | 6% | ~8.5% |
-| 0.25 SOL | $25 | 2.4% | ~5% |
-| 0.5 SOL | $50 | 1.2% | ~3.7% |
-| 1 SOL | $100 | 0.6% | ~3.1% |
+| Trade size | About | Network fees, typical (0.007 SOL) | Network fees, worst case at your caps (0.026 SOL) | Typical, with pump.fun's 2.5% |
+|---|---|---|---|---|
+| 0.01 SOL | $1 | 70% | 260% | ~72% |
+| 0.05 SOL | $5 | 14% | 52% | ~16.5% |
+| **0.1 SOL** (`BUY_SOL` now) | $10 | 7% | 26% | ~9.5% |
+| 0.25 SOL | $25 | 2.8% | 10% | ~5.3% |
+| 0.5 SOL | $50 | 1.4% | 5.2% | ~3.9% |
+| 1 SOL | $100 | 0.7% | 2.6% | ~3.2% |
 
 A trade must gain more than this just to break even. At 0.1 SOL, paper's price moves earned about +6.6% per trade and fees took about 7%.
 
@@ -68,11 +73,17 @@ A trade must gain more than this just to break even. At 0.1 SOL, paper's price m
 
 ## Reading paper results
 
-Paper is not live, in three ways. Account for each before trusting a paper number.
+Paper is not live, in four ways. Account for each before trusting a paper number.
+
+- **Paper's landing time is assumed.**
+  - Every paper buy and sell is filled at the real market price **0.5 s** after the bot acts (`PAPER_LAND_MS`, 500 on your service).
+  - The rest is measured on real data: the bot sees Decu's trade in the same block. Its own work takes about 1 ms on the fast path, and about 0.6 s when it has to download the transaction.
+  - A real trade can take longer to land, and it can fail. A failed one still pays its priority fee.
+  - Only live trades can measure this. Each live buy's `Latency:` line shows the real landing time and block, so the canary tells you how far paper was off.
 
 - **Paper never runs out of money** (`PAPER_UNLIMITED=true`). It takes trades that a small live wallet couldn't afford. A live wallet needs this for each open coin:
   - `BUY_SOL` × (1 + `SLIPPAGE_PCT`/100)
-  - plus fees, about 0.006 SOL
+  - plus fees, about 0.007 SOL (up to 0.026 at your caps)
   - plus token-account rent, about 0.002 SOL (returned when the coin is fully sold)
 
   Keep `MIN_SOL_RESERVE` (0.02 SOL) on top. At 0.1 SOL and 2 open coins, that is about **0.28 SOL**.
@@ -131,7 +142,7 @@ Make the changes in Render → Environment. Saving restarts the bot.
 
 **For the canary days, tighten the limits.** For example:
 
-- `BUY_SOL` 0.05. The ~0.006 SOL in fees per round trip is the price of the test.
+- `BUY_SOL` 0.05. The fees, about 0.007 SOL per round trip (up to 0.026 at your caps), are the price of the test.
 - `MAX_OPEN_POSITIONS` 1
 - `DAILY_CAP_USD` 20
 - `DAILY_LOSS_LIMIT_SOL` 0.05
