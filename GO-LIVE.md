@@ -1,76 +1,250 @@
-# Going live with real money: checklist
+# Going live with real money (v4.1)
 
-Do these in order. Don't skip a step because an earlier one passed.
+**This guide changes nothing.** The bot keeps trading exactly as it is set until you change a setting yourself.
 
-## 1. Paper results first (DRY_RUN=true)
-- Run the bot in paper mode for **at least 3 trading days** with Decu active.
-- Dashboard (`/api/status` → `paper`) shows profit per sell timing:
-  `buy+4s`, `buy+5s` (sell 4–5 s after your buy) and `his-sell+0s`, `his-sell+10s` (sell after he does).
-- **Only go live if the timing you will actually use is positive over 100+ trades.**
-  Hand-selling realistically means `his-sell+10s` or slower. `buy+4s`/`buy+5s` needs automatic selling.
-- What the Solscan paper tests found on 2026-10-06/07 (sell 4–5 s after buy): 61 trades, 16 wins, −0.133 SOL.
-  Selling 8–15 s after he sold: 62 trades, 11 wins, −0.263 SOL. Neither was profitable.
+A "READY FOR LIVE" line, a green readiness check, or a finished checklist is not permission to spend money. Going live is your decision, written in the sign-off table at the end.
 
-## 2. Wallet
-- Use a **separate trading wallet** that holds only what you can lose. Never your main wallet.
-- Fund it with at least: copies you want per day × ~0.125 SOL + 0.02 SOL reserve.
-  (0.1 buy + 20% slippage room + 0.001 tip + 0.0005 priority fee + fees.)
-- The key goes ONLY in `.env` on the computer/server or Render's secret settings. Never in chat.
+## Where things stand: NO-GO (checked 2026-10-28)
 
-## 3. Settings (`.env` or Render Environment)
-| Setting | Value | Why |
+- **Paper results.** 46 closed trades.
+  - Net **−0.017 SOL** after fees.
+  - Before fees: +0.306 SOL. Fees: 0.323 SOL.
+  - Win rate 46%. Worst drop from a high point: −0.28 SOL.
+- **Paper isn't testing the live rules.** Paper was using the brain's tuned rules (25% premium limit, −25% stop). Live would use your settings (15% and −20%).
+- **Untested live.** No live buy or sell has ever run.
+
+Update this section at every review, with the date.
+
+## The gates
+
+All must pass, in this order.
+
+1. **Tests.**
+   - `npm test` passes and exits on its own: 203 tests, about 15 s.
+   - It leaves no files in the project folder.
+   - `npm run smoke` passes.
+2. **Data providers.**
+   - On the server, `node copybot.mjs diagnose` shows no WARN lines.
+   - Dashboard → Bot → Connections shows Helius with 0 refused calls.
+   - `/ready` answers 200 for a whole day (see Monitoring).
+3. **Profit evidence.**
+   - At least **100 closed paper trades over at least 3 separate days**.
+   - Positive **after fees**.
+   - Judged at the rules live will use (see "Reading paper results").
+4. **Preflight.** `node copybot.mjs check` prints `READY FOR LIVE` with the live settings in place. It builds and simulates a real buy but does not send it.
+5. **Canary.** One smallest-size live trade, bought and sold, checked on Solscan. Then the restart test (see "The canary").
+6. **Operations.** Rehearse these once:
+   - Emergency stop.
+   - Sell one coin.
+   - Sell all.
+   - A phone alert arriving.
+   - A restart with a coin held.
+7. **Sign-off.**
+   - Independent review (Victor).
+   - Your written approval, dated.
+
+## The money: fees by trade size
+
+Every trade pays on the buy **and** on the sell, whatever its size:
+
+- **Network fees.** Priority fee plus tip: up to **0.003 SOL per side** at the current caps (`FEE_MODE=max`, `PRIORITY_FEE_MAX_SOL` 0.001 + `TIP_MAX_SOL` 0.002). That is up to **0.006 SOL per round trip**.
+- **pump.fun's trading fee.** About 1.25% per side (2.5% per round trip), taken inside the price.
+- **Slippage and delay.** The price moves while your copy lands. On 2026-10-28 the median buy landed 26% above Decu's price.
+
+Costs below assume SOL at $100 and the network fees at their caps. They come before slippage.
+
+| Trade size | About | Network fees (round trip) | With pump.fun's 2.5% |
+|---|---|---|---|
+| 0.01 SOL | $1 | 60% | ~62% |
+| 0.05 SOL | $5 | 12% | ~15% |
+| **0.1 SOL** (`BUY_SOL` now) | $10 | 6% | ~8.5% |
+| 0.25 SOL | $25 | 2.4% | ~5% |
+| 0.5 SOL | $50 | 1.2% | ~3.7% |
+| 1 SOL | $100 | 0.6% | ~3.1% |
+
+A trade must gain more than this just to break even. At 0.1 SOL, paper's price moves earned about +6.6% per trade and fees took about 7%.
+
+**Trades of $1 can't work.**
+
+## Reading paper results
+
+Paper is not live, in three ways. Account for each before trusting a paper number.
+
+- **Paper never runs out of money** (`PAPER_UNLIMITED=true`). It takes trades that a small live wallet couldn't afford. A live wallet needs this for each open coin:
+  - `BUY_SOL` × (1 + `SLIPPAGE_PCT`/100)
+  - plus fees, about 0.006 SOL
+  - plus token-account rent, about 0.002 SOL (returned when the coin is fully sold)
+
+  Keep `MIN_SOL_RESERVE` (0.02 SOL) on top. At 0.1 SOL and 2 open coins, that is about **0.28 SOL**.
+- **In paper, the brain tunes its own rules** (`BRAIN_AUTOTUNE`). Live never auto-tunes: it uses your settings. To judge paper at the live rules, use dashboard → **What-if**: set the premium cap to 15% and the stop to 20%. It's the closest check, not an exact replay.
+- **Count only current-version trades.** Older results came from older exit rules.
+
+The Rolex meter counts **live** profit only. Paper is the practice meter.
+
+## Settings and their defaults
+
+The service uses what Render → Environment says. A value set there overrides the default below.
+
+`render.yaml` holds only the blueprint's starting values.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `DRY_RUN` | `true` | `false` = real trades |
+| `BUY_SOL` (`SIZING_MODE=fixed`) | 0.1 | SOL per copy |
+| `MAX_OPEN_POSITIONS` | 2 | coins held at once |
+| `DAILY_CAP_USD` | **600** | at most $600 of buys a day (0 = no dollar cap) |
+| `DAILY_CAP_SOL` | 0 | optional SOL cap on top (0 = none) |
+| `DAILY_LOSS_LIMIT_SOL` | **0 (off)** | stops new buys for the day after losing this much |
+| `MIN_SOL_RESERVE` | 0.02 | never spends below this |
+| `MAX_PAY_ABOVE_DECU_PCT` | 15 | skips a buy priced more than 15% above Decu's; also skips when a price is missing |
+| `MIN_LEADER_BUY_USD` | 50 | ignores Decu's smaller buys |
+| `PUMP_ONLY` | `true` | pump.fun and PumpSwap coins only |
+| `STOP_LOSS_PCT` | 20 | sells everything if the coin falls 20% from your entry; applies in both styles |
+| `GAIN_GATE_PCT` / `MAX_HOLD_SEC` | 15 / 15 | auto style: 15 s after Decu's buy, sells if the coin reached +15%; otherwise holds until he sells |
+| `SELL_ALL_ON_LEADER_SELL` | `true` | auto style: sells everything at his first sell |
+| `HOLD_LIMIT_SEC` | 600 | auto style: sells after 10 minutes whatever happens |
+| `PRICE_FAIL_SELL` | 6 | after 6 failed price checks in a row, sells anyway: a coin that can't be priced may be crashing |
+| `BUY_FAIL_BREAKER` | 3 | after 3 failed buys in a row, no new buys for 10 minutes |
+| `STALE_DATA_SEC` | 30 | no new buys while Decu's feed has been down this long |
+| `SLIPPAGE_PCT` / `SELL_SLIPPAGE_PCT` | 20 / 35 | how far the price may move on a buy and on a sell |
+| `FEE_MODE` | `max` | market fees, capped as above; `fixed` uses `PRIORITY_FEE_SOL` + `TIP_SOL` instead |
+
+**Trading style** is set on the dashboard:
+
+- **Auto buy + auto sell**: the bot sells with the exit rules above.
+- **Auto buy + manual sell**: you sell when the "Decu SOLD a coin you hold" alert arrives. The stop-loss still applies.
+- **Both off**: no new buys.
+
+## What going live changes
+
+These are your decision. Nothing here is set for you.
+
+Make the changes in Render → Environment. Saving restarts the bot.
+
+| Setting | Live value | Why |
 |---|---|---|
 | `DRY_RUN` | `false` | real trades |
-| `PRIVATE_KEY` | your trading wallet key | signing happens locally |
-| `ENGINE_STATE_FILE` | `engine-live.json` (Render: `/var/data/engine-live.json`) | the bot refuses to mix paper and live state |
-| `DASHBOARD_TOKEN` | 24+ random characters | required for live |
-| `HELIUS_API_KEY` | your key | fast detection + Helius Sender |
-| `SOLSCAN_API_KEY` | your key | second watcher, gap alerts, coin names |
-| `PUMPPORTAL_API_KEY` | your key (secret) | PumpPortal's live feed of Decu's trades, a second way to see them; keep at least 0.02 SOL in the key's linked PumpPortal wallet (0.01 SOL per 10,000 of his trades) |
-| `NTFY_TOPIC` | your topic | buy / SOLD / failure alerts |
-| `SIZING_MODE` / `BUY_SOL` / `DAILY_CAP_SOL` | `fixed` / `0.1` / `0` | `0` = no daily spending cap: only the wallet balance limits buys |
-| `AUTO_SELL` | `false` | you sell by hand from the SOLD alert |
-| `SLIPPAGE_PCT` | `20` | 10% failed often on his coins |
-| `MAX_PAY_ABOVE_DECU_PCT` | `15` (default) | entry-premium filter (price vs price), fail-closed: skip buys over 15% above Decu's price, or when a price is missing |
-| `FILTER_REPORT_PCTS` | `10,25` | alerts also show what a 10% and a 25% limit would have done (report only) |
-| `FEE_MODE` | `max` (default) | market fees on every buy and sell, capped by `PRIORITY_FEE_MAX_SOL` `0.001` + `TIP_MAX_SOL` `0.002` (at most 0.003 SOL per side). `fixed` = `PRIORITY_FEE_SOL` + `TIP_SOL` |
-| `LOCAL_SELL` / `CLOSE_TOKEN_ACCOUNT` | `true` / `true` | the bot builds its sells itself (PumpPortal as fallback) and closes the token account when it sells everything (rent back) |
-| `SOLSCAN_MAX_PER_DAY` | `2500` | hard daily Solscan request budget (100 CU each) |
-| `PUSH_STREAM` | `true` | blocks, confirmations and prices pushed over the websocket (faster stop-loss and confirmations) |
-| `NTFY_TOKEN` | optional | ntfy access token: lifts the free daily alert limit |
-| `SENDER_URL` | Render (Oregon): `http://slc-sender.helius-rpc.com/fast` | the regional Helius Sender nearest the server (the API key is never sent over http) |
-| `MAX_OPEN_POSITIONS` | `2` | at most 2 coins at once |
-| `DAILY_CAP_USD` | `600` | at most $600 of buys a day |
-| `SELL_SLIPPAGE_PCT` | `35` | sells fill even on a falling coin |
-| `DAILY_LOSS_LIMIT_SOL` | `0` (off) | optional: stop new buys for the day after losing this much |
+| `ENGINE_STATE_FILE` | `/var/data/engine-live.json` | the bot refuses to start live on the paper state |
+| `STUDY_FILE` | `/var/data/study-live.jsonl` | keeps the live journal and brain apart from paper |
+| `DASHBOARD_TOKEN` | a new value of 24+ characters | the current one was pasted in a chat |
+| `PHANTOM_PRIVATE_KEY` / `PHANTOM_WALLET_ADDRESS` | a **new** wallet holding only what you can lose | the current bot wallet's key was pasted in a chat |
 
-## 3b. Data health: `node copybot.mjs diagnose`
-Read-only. Compares Helius and Solscan: both answer, how far Solscan's index trails, SOL price from
-Solscan / Helius / Jupiter / DexScreener, every Solscan swap present in Helius history, and the
-bot's own trade parser vs Solscan's decoding of his last 15 swaps. Fix every WARN before going live.
-It also profiles him: coins per hour, wins, and the median seconds between his first buy over
-`MIN_LEADER_BUY_USD` and his first sell (your whole window). Report saved to `diagnose-<date>.json`.
+**For the canary days, tighten the limits.** For example:
 
-## 4. Preflight: must print "READY FOR LIVE"
-Easiest: double-click `go-live-mac.command` / `go-live-windows.bat` (or `node copybot.mjs setup --live`).
-It asks for the wallet key without showing it, sets DRY_RUN=false (no daily spending cap) and the
-live state file, then runs the check below. `setup --paper` switches back.
+- `BUY_SOL` 0.05. The ~0.006 SOL in fees per round trip is the price of the test.
+- `MAX_OPEN_POSITIONS` 1
+- `DAILY_CAP_USD` 20
+- `DAILY_LOSS_LIMIT_SOL` 0.05
 
-```
-node copybot.mjs check
-```
-With the key set, this builds a **real 0.1 SOL buy**, adds the tip, signs it and runs the full safety
-simulation. It **does not send it**. Every line must say OK. It checks:
-RPC, his wallet history, live SOL price, websocket subscription, wallet balance vs one copy,
-Helius (not public RPC), phone alert, dashboard token, live state file, the full buy path, Helius Sender.
+Keep the trading wallet in Phantom or Solflare on your phone, so you can sell by hand at any time.
 
-## 5. First live day: smallest possible
-- There is no daily spending cap: the SOL you put in the wallet is the limit. Fund it with only what you are willing to lose. Watch every alert and check each transaction on Solscan.
-- Raise to 1 SOL only after the real fills match what paper mode predicted.
+Connecting it to the dashboard only reads its address and balance. The dashboard never asks a wallet to sign.
+
+## The canary: first live trades
+
+1. **Wait until the bot is ready.** After the live settings restart the bot, Home must show no "Not ready to trade" banner, and `https://<your-dashboard-address>/ready` must answer 200.
+2. **Let it buy.** Leave the style on **Auto buy + auto sell**. The bot copies Decu's next buy that passes the rules.
+3. **Check the buy.** Open it on Solscan when the buy alert arrives. SOL out should be `BUY_SOL` plus fees, and the coin should be in the wallet.
+4. **Check the automatic sell.** Let the exit rules sell it. On Solscan: SOL came back, the coin is gone, and the token account was closed (rent back).
+5. **Check the manual sell.** On the next trade, press the coin's **Sell** button (Home → open coins) as soon as it's bought.
+6. **Compare.** The dashboard's numbers for both trades should match Solscan. The Rolex meter now shows live entries.
+7. **Restart test.** With one coin held, restart the service from the Render dashboard. When it's back:
+   - the coin is listed and priced;
+   - readiness is green;
+   - its exit rules still apply.
+
+Raise the size only after these pass, and only once live fills match what paper predicted.
+
+## Emergencies
+
+| Situation | Do this |
+|---|---|
+| Stop new buys now | Dashboard → **Emergency stop**. Coins held keep their stop-loss and exit rules. |
+| Sell everything now | Dashboard → **Sell all**. Live: real sells, at up to 35% slippage. |
+| Sell one coin | Its **Sell** button (Home → open coins) |
+| "CAN'T SELL" alert | The bot keeps retrying. If it persists, sell in Phantom or Solflare. |
+| "Bot NOT READY to trade" alert | Bot → Connections names the failing check. A coin with no price has a blind stop-loss: sell it by hand if it doesn't recover. |
+| Dashboard or Render down | Sell in Phantom or Solflare. |
+| Back to paper | Sell the live coins first: paper mode doesn't manage them. Then in Render → Environment: `DRY_RUN=true`, `ENGINE_STATE_FILE=/var/data/engine-paper.json`, `STUDY_FILE=/var/data/study-paper.jsonl`. |
+
+**Don't turn Power OFF while coins are held.** OFF stops the price checks, so the stop-loss can't fire. Readiness shows "Bot power" as blocking.
+
+## Recovery after a crash or restart
+
+- **What survives.** State is saved on the Render disk (`/var/data`). On restart the bot:
+  - reloads the state;
+  - re-checks every transaction it had signed, so it never buys twice;
+  - puts each held coin back under its price checks.
+- **Check after every restart.**
+  - Home: the open coins are listed and priced.
+  - Bot → Connections: every check OK.
+  - `/ready`: 200.
+- **Refusals are protection, not bugs.** The bot refuses to start when the state file belongs to the other mode or to another wallet. Fix the setting; don't delete the file.
+- **Never delete `engine-live.json` while coins are held.** The bot would forget them. Sell them first.
+- **Disk snapshots.** Render keeps a daily snapshot of the disk. Restore one only with the bot stopped. A restored state can miss trades made after the snapshot, so compare it with the wallet on Solscan.
+
+## Monitoring
+
+- **`/health`** answers "is the process running?". Render's health check stays on it.
+  - Don't point Render's check at `/ready`.
+  - A restart can't fix stale data, and it can interrupt a sell.
+- **`/ready`** answers **200** when ready. Otherwise it answers **503** with the names of the failing checks (no details, no secrets).
+  - Point an outside uptime monitor at `https://<your-dashboard-address>/ready`.
+  - Alert when a 503 lasts more than 2 minutes.
+- **What `/ready` checks.** Blocking checks:
+  - Bot power.
+  - Decu's trades feed: the Helius websocket. If only the backup poll is running (within 60 s), this is a warning instead.
+  - Open coins priced: each within 30 s (`READY_PRICE_STALE_SEC`).
+  - New buys allowed: no circuit breaker and no stale data.
+  - Disk writable.
+  - Wallet balance covers one buy (live only).
+
+  Warnings only:
+  - Helius: 10+ calls refused or 5+ timeouts in the last minute.
+  - Phone alerts: 3+ failed sends in a row, or no topic set.
+  - Buying paused (Emergency stop, or both styles off).
+
+  The dashboard shows them all under Bot → Connections. With the token, `/api/ready` gives the details.
+- **Phone alerts.**
+  - "Bot NOT READY to trade" after 2 minutes not ready (`READY_ALERT_SEC`).
+  - "Bot ready to trade again" when it recovers.
+  - Alerts can fail themselves (ntfy daily limit, network). `NTFY_TOKEN` lifts the free limit.
+- **Helius rate limit.** Decu's wallet also runs arbitrage: one transaction swapping across several venues, about 100 in 43 s on 2026-10-28. These are downloaded 2 at a time (`ARB_DOWNLOADS`), so a burst can't use up the Helius limit. His normal trades never wait behind them.
+
+## Running on a computer instead of Render
+
+- **Switch to live.** Double-click `go-live-mac.command` / `go-live-windows.bat`, or run `node copybot.mjs setup --live`.
+  - It asks for the wallet key without showing it.
+  - It sets `DRY_RUN=false` and the live state file.
+  - It then runs `node copybot.mjs check`.
+- **Back to paper.** `back-to-paper-*` or `node copybot.mjs setup --paper` switches back.
+- **Same caps.** The daily caps above apply on a computer too.
 
 ## What protects your money
-- Every live transaction is checked before sending: the only SOL that can leave is the buy itself
-  (max BUY_SOL + slippage), the tip, and fees. Transfers to any other address, token transfers and
-  approvals are refused. One pump.fun trade per transaction, then a full simulation must match.
-- Per-coin once rule, wallet reserve (optional DAILY_CAP_SOL), pause button (stops new buys) on the dashboard.
-- Signed transactions are saved before sending; after a crash the bot re-checks them instead of buying twice.
+
+- **Every live transaction is checked before sending.**
+  - The only SOL that can leave is the buy itself (up to `BUY_SOL` plus slippage), the tip, and fees.
+  - Transfers to any other address, token transfers and approvals are refused.
+  - One pump.fun trade per transaction, then a full simulation must match.
+- **Limits on buying.**
+  - One buy per coin.
+  - The wallet reserve.
+  - The daily caps.
+  - The circuit breakers.
+  - The Emergency stop button.
+- **Crash safety.** Signed transactions are saved before sending. After a crash the bot re-checks them instead of buying twice.
+
+## Sign-off
+
+Add a row for each gate as it's checked. Never delete old rows.
+
+| Date | Gate | Evidence | By | Result |
+|---|---|---|---|---|
+| 2026-10-28 | 3. Profit evidence | 46 paper trades, −0.017 SOL after fees; paper rules differ from live | Claude | **FAIL: NO-GO** |
+| 2026-10-29 | 1. Tests | `npm test` 203/203 in ~15 s, exits on its own, leaves no files; `npm run smoke` 2/2 | Claude | PASS |
+| | 2. Data providers | | | |
+| | 4. Preflight | | | |
+| | 5. Canary | | | |
+| | 6. Operations | | | |
+| | 7. Independent review (Victor) | | | |
+| | 7. Your written approval | | you | |

@@ -110,7 +110,8 @@ test('defaults follow the user rules: fixed 0.1 SOL, auto-sell off, ~$200 paper 
 test('paper mode closes nothing for real but values every position at quick and after-his-sell timings',async t=>{
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'decu-paper-'));
   const saved={...process.env};
-  Object.assign(process.env,{ENGINE_STATE_FILE:path.join(dir,'engine.json'),PORT:'0',DASHBOARD_TOKEN:'',PAPER_QUICK_SELL_SEC:'0.05',PAPER_AFTER_HIS_SELL_SEC:'0',AUTO_SELL:'false',AUTO_COPY:'false',SIZING_MODE:'fixed',PAPER_MAX_PAY_PCT:'0',STALE_DATA_SEC:'0'});
+  // the paper journal, brain memory and notes go next to STUDY_FILE: keep them in this test's folder
+  Object.assign(process.env,{ENGINE_STATE_FILE:path.join(dir,'engine.json'),STUDY_FILE:path.join(dir,'study.jsonl'),PORT:'0',DASHBOARD_TOKEN:'',PAPER_QUICK_SELL_SEC:'0.05',PAPER_AFTER_HIS_SELL_SEC:'0',AUTO_SELL:'false',AUTO_COPY:'false',SIZING_MODE:'fixed',PAPER_MAX_PAY_PCT:'0',STALE_DATA_SEC:'0'});
   const alerts=[];let sent=0;
   const k={config:{...config,dryRun:true,buySol:0.1,dailyCapSol:1,logFile:path.join(dir,'log'),tipSol:0.001,priorityFeeSol:0.0005,paperLandMs:0,slippagePct:20},
     notify:async a=>{alerts.push(a);},redact:x=>x,startWatcher:()=>()=>{},

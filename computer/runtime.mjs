@@ -688,6 +688,15 @@ export async function startRuntime(k, {demo=false}={}) {
   const recordLeaderBuy=s=>{ const was=hisBySig.get(hisKey(s.sig,s.mint)); remember(hisBySig,hisKey(s.sig,s.mint),{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time,sig:s.sig,vSol:s.vSol??was?.vSol??null,vTok:s.vTok??was?.vTok??null}); remember(lastSig,s.mint,s.sig); const old=leaderBuys.get(s.mint); if(!old || (old.usd<c.minLeaderUsd && s.usd>=c.minLeaderUsd)) remember(leaderBuys,s.mint,{sol:s.sol,raw:Number(s.raw)||0,usd:s.usd,time:s.time}); };
   let lastErrorEventAt=0, hiddenErrors=0;
   const fullPathDelayMs=number('FULL_PATH_DELAY_MS',500);
+  // ARBITRAGE BURSTS: his wallet also runs arbitrage through his router, one transaction swapping on two or more
+  // venues (PumpSwap, Raydium CLMM, USDC legs) and ending where it started: never a SOL trade the bot copies. On
+  // 2026-10-28 02:53 UTC ~100 came in 43 s; downloading them all at once drew 243 Helius calls in a minute, 60
+  // refused (HTTP 429), the bot's own fee checks among them. Logs can't prove such a transaction holds no trade
+  // of his, so each one is still downloaded, ARB_DOWNLOADS (2) at a time; his one-venue trades never wait.
+  const arb={slots:Math.max(1,number('ARB_DOWNLOADS',2)||2),busy:0,queue:[]};
+  status.arb={seen:0,waiting:0};
+  const arbSlot=()=>arb.busy<arb.slots ? (arb.busy++,Promise.resolve()) : new Promise(r=>{arb.queue.push(r);status.arb.waiting=arb.queue.length;});
+  const arbFree=()=>{ const next=arb.queue.shift(); status.arb.waiting=arb.queue.length; if(next) next(); else arb.busy--; };
   // FEED RACE: for each of his trades seen by both, which live feed delivered it first and by how many ms
   // (Helius websocket vs PumpPortal). Decides from real data whether PumpPortal ever beats Helius.
   const firstArrival=new Map(), race={pumpportalFirst:0,heliusFirst:0,leads:[]};
@@ -768,11 +777,13 @@ export async function startRuntime(k, {demo=false}={}) {
     }
     if(completed.has(sig)||inFlight.has(sig)) return;
     inFlight.add(sig);
+    const arbShaped=source==='ws' && (k.venuesOf?.(logs)?.length||0)>1;
     try {
       // Decu's buy was already acted on from the websocket: fetch the full transaction once it can exist
       // (confirmed, ~0.5 s later) instead of retrying for it while the bot's own buy uses the connection.
       if(fastBuyOnly && fullPathDelayMs>0) await new Promise(r=>setTimeout(r,fullPathDelayMs));
-      const tx=await k.getTransaction(sig);
+      if(arbShaped) { status.arb.seen++; await arbSlot(); }
+      let tx; try { tx=await k.getTransaction(sig); } finally { if(arbShaped) arbFree(); }
       if(!tx) throw new Error('transaction not available yet; will retry');
       // LaunchLab / bonk.fun / any non-pump.fun coin: ignored completely (no copy, no study, no alert).
       const venue=k.venueOf?k.venueOf(tx.meta?.logMessages||[]):'?', pumpVenue=['pump.fun','PumpSwap'].includes(venue);
@@ -910,6 +921,38 @@ export async function startRuntime(k, {demo=false}={}) {
   const heldNow=()=>Object.entries(engine.d.positions).filter(([,p])=>BigInt(p.raw||'0')>0n).map(([mint,p])=>{ const m=monitors.get(mint), j=engine.d.jobs[mint];
     return {mint,symbol:study?.records?.findLast?.(r=>r.mint===mint)?.symbol||null,raw:p.raw,costSol:p.costSol,realizedSol:p.realizedSol||0,boughtAt:p.boughtAt||null,
       pnl:Number.isFinite(m?.last)?m.last:null,peak:Number.isFinite(m?.peak)?m.peak:null,valueSol:Number.isFinite(m?.value)?m.value:null,pricedAt:m?.lastAt||null,selling:j?.side==='sell'||!!exits?.has(mint),rule:exits?.get(mint)?.rule||null}; });
+  // READINESS: is the bot fit to trade right now? /ready (yes/no for an outside monitor), /api/ready and the
+  // dashboard (every check), and one phone alert when it stays not-ready for READY_ALERT_SEC (120). /health stays a
+  // plain "the process runs" check for Render: restarting on stale data would leave held coins unwatched while the
+  // bot starts again, so readiness only reports. Blocking checks make it not ready; warnings are shown beside them.
+  const readiness=()=>{
+    const now=Date.now(), checks=[], off=!!engine.d.dataOff;
+    const add=(name,ok,detail,warn=false)=>checks.push({name,ok:!!ok,warn,detail});
+    add('Bot power',!off,off?'OFF: Decu is not being watched':'on');
+    if(!demo && !off) {
+      const ws=status.websocket==='subscribed', pollAge=status.lastPoll?Math.round((now-Date.parse(status.lastPoll))/1000):null;
+      if(ws) add("Decu's trades feed",true,'Helius websocket subscribed');
+      else add("Decu's trades feed",pollAge!=null&&pollAge<=60,`websocket ${status.websocket||'?'}${pollAge!=null?` · backup poll ${pollAge} s ago`:' · no backup poll yet'}`, pollAge!=null&&pollAge<=60);
+    }
+    const held=heldNow(), staleMs=number('READY_PRICE_STALE_SEC',30)*1000, blind=held.filter(h=>!h.pricedAt||now-h.pricedAt>staleMs);
+    add('Open coins priced',!blind.length,blind.length?`no price for ${blind.map(h=>h.symbol?'$'+h.symbol:h.mint.slice(0,6)+'…').join(', ')} for ${staleMs/1000}+ s: its stop-loss is blind`:held.length?`${held.length} held, all priced`:'no coins held');
+    const gate=c.gate?.(); add('New buys allowed',!gate,gate||'yes');
+    if(engine.d.paused) add('Buying',false,'paused: no new buys (Emergency stop or both styles off); coins held keep their exit rules',true);
+    const rh=k.rpcHealth?.(); if(rh) add('Helius (last minute)',!(rh.refused>=10||rh.timedOut>=5),`${rh.calls} calls · ${rh.refused} refused (too many requests) · ${rh.timedOut} timed out`,true);
+    const nh=k.ntfyHealth?.();
+    if(nh) add('Phone alerts',nh.topic&&nh.failsInRow<3,!nh.topic?'NTFY_TOPIC not set: no phone alerts':nh.failsInRow?`${nh.failsInRow} failed in a row: ${nh.lastError}`:nh.lastOkAt?`last delivered ${Math.max(0,Math.round((now-nh.lastOkAt)/60000))} min ago${nh.token?'':' · no NTFY_TOKEN (shared daily limit)'}`:'none sent yet',true);
+    try { fs.accessSync(path.dirname(engineFile),fs.constants.W_OK); add('Disk writable',true,path.dirname(engineFile)); } catch(e) { add('Disk writable',false,`${path.dirname(engineFile)}: ${e.code||e.message}`); }
+    if(c.mode==='live') { const need=c.buySol*(1+c.slippage/100)+c.feeBudget+c.reserve, bal=status.balance; add('Wallet balance',Number.isFinite(bal)&&bal>=need,Number.isFinite(bal)?`${bal.toFixed(4)} SOL (one buy needs ${need.toFixed(4)})`:'not read yet'); }
+    const blocking=checks.filter(x=>!x.ok&&!x.warn).map(x=>x.name), warnings=checks.filter(x=>!x.ok&&x.warn).map(x=>x.name);
+    return {ready:!blocking.length,mode:c.mode,at:new Date(now).toISOString(),blocking,warnings,checks};
+  };
+  let notReadySince=null, readyAlerted=false;
+  const readyTimer=demo?null:setInterval(()=>{
+    if(stopped) return;
+    const r=readiness(), tag=c.mode==='live'?'':'[PAPER] ';
+    if(!r.ready) { notReadySince??=Date.now(); if(!readyAlerted && Date.now()-notReadySince>=number('READY_ALERT_SEC',120)*1000) { readyAlerted=true; engine.event('not-ready',{message:`not ready to trade: ${r.blocking.join(', ')}`}); if(k.notify&&!engine.d.alertsOff) Promise.resolve(k.notify({title:`${tag}Bot NOT READY to trade`,body:r.checks.filter(x=>!x.ok).map(x=>`${x.warn?'⚠':'✕'} ${x.name}: ${x.detail}`).join('\n'),priority:4,tags:['warning']})).catch(()=>{}); } }
+    else { if(readyAlerted) { engine.event('ready',{message:'ready to trade again'}); if(k.notify&&!engine.d.alertsOff) Promise.resolve(k.notify({title:`${tag}Bot ready to trade again`,body:'Every readiness check passes.',priority:3,tags:['white_check_mark']})).catch(()=>{}); } notReadySince=null; readyAlerted=false; }
+  },15_000); readyTimer?.unref?.();
   const balanceCache=new Map();
   const sendJson=(req,res,obj)=>{ const body=JSON.stringify(obj);
     if(body.length>4096 && /\bgzip\b/.test(req.headers['accept-encoding']||'')) { res.writeHead(200,{'Content-Type':'application/json','Content-Encoding':'gzip','Vary':'Accept-Encoding'}); return res.end(zlib.gzipSync(body)); }
@@ -921,6 +964,7 @@ export async function startRuntime(k, {demo=false}={}) {
     const url=new URL(req.url,'http://localhost');
     const authorized=()=> {const supplied=(req.headers.authorization||'').replace(/^Bearer /,'');return token && Buffer.byteLength(supplied)===Buffer.byteLength(token) && crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(token));};
     if(url.pathname==='/health') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({running:true,mode:c.mode}));}
+    if(url.pathname==='/ready') { const r=readiness(); res.writeHead(r.ready?200:503,{'Content-Type':'application/json'}); return res.end(JSON.stringify({ready:r.ready,mode:r.mode,at:r.at,blocking:r.blocking,warnings:r.warnings})); }
     if(url.pathname.startsWith('/api/')) {
       if(token && !authorized()) {res.writeHead(401);return res.end('Unauthorized');}
       if(!token && c.mode==='live') {res.writeHead(403);return res.end('Token required');}
@@ -928,7 +972,7 @@ export async function startRuntime(k, {demo=false}={}) {
         status.pumpportal=pumpPortalStatus(); status.pumpportalBuilder=ppCheck.result; status.rpcHealth=k.rpcHealth?.()||null;
         const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',solscanUsage:k.solscanUsage?.()||null,paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
           wallet:{publicKey:c.wallet||null,signerAddress:k.kp?.publicKey||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true},
-          held:heldNow(),solUsd:solUsd(),timezone:c.timezone,leader:{label:k.config.leaderLabel||'Decu',address:k.config.leader||null},
+          held:heldNow(),readiness:readiness(),solUsd:solUsd(),timezone:c.timezone,leader:{label:k.config.leaderLabel||'Decu',address:k.config.leader||null},
           settings:{buySol:c.buySol,maxPositions:c.maxPositions,minLeaderUsd:c.minLeaderUsd,dailyCapUsd:c.dailyCapUsd||0,dailyLossLimit:c.dailyLossLimit||0,rules:{...rules},ruleDefaults:{...ruleDefaults},holdLimitSec:holdLimitMs/1000,gateSec:maxHoldMs/1000,autoTune:c.mode==='paper'&&val('BRAIN_AUTOTUNE','true')!=='false'}};
         res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean(snap)));
       }
@@ -965,6 +1009,7 @@ export async function startRuntime(k, {demo=false}={}) {
       }
       // DASHBOARD DATA (v4): the trade list (one compact row per studied Decu buy, gzip; ?after=ms for the newest only),
       // one trade in full, the Rolex goal, a coin sold from its card, the balance of a wallet connected in the browser.
+      if(url.pathname==='/api/ready' && req.method==='GET') return sendJson(req,res,clean(readiness()));
       if(url.pathname==='/api/trades' && req.method==='GET') {
         const after=Number(url.searchParams.get('after'))||0, recs=(study?.records||[]).filter(r=>!after||Date.parse(r.time)>after);
         return sendJson(req,res,clean({mode:c.mode,timezone:c.timezone,buySol:c.buySol,solUsd:solUsd(),total:study?.records?.length||0,generatedAt:Date.now(),rows:tradeRows(recs,{closed:engine.d.closedTrades||[],buySol:c.buySol})}));
@@ -1034,5 +1079,5 @@ export async function startRuntime(k, {demo=false}={}) {
     if(Date.now()-(engine.d.analyticsDigestAt||0)>=number('ANALYTICS_DIGEST_HOURS',24)*3600e3 && n>(engine.d.analyticsDigestN||0)) sendDigest().then(m=>engine.event('analytics-digest',{message:m})).catch(()=>{});
   },number('ANALYTICS_CHECK_MS',600_000)); digestTimer?.unref?.();
   const boughtCount=()=>(study?.records||[]).filter(r=>r.taken!==false && !r.skipReason).length;
-  return {engine,server,study,thinking,rules,goal,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;goal?.flush?.();clearInterval(digestTimer);thinking?.stop?.();desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,thinking,rules,goal,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;clearInterval(readyTimer);study?.stop?.();goal?.flush?.();clearInterval(digestTimer);thinking?.stop?.();desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }

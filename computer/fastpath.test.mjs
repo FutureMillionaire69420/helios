@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {startRuntime,alertFor} from './runtime.mjs';
-import {config, detectBuy, detectSell, leaderPumpBuys, leaderPumpSells, b58encode} from './copybot.mjs';
+import {config, detectBuy, detectSell, leaderPumpBuys, leaderPumpSells, b58encode, relevantLogs, venuesOf} from './copybot.mjs';
 import {buyContextFromLogs, tokensOut} from './pumpbuild.mjs';
 
 // Real websocket logs of Decu's trades on 2026-10-11 (coin siBF3b…): a 0.2475 SOL buy and his full sell.
@@ -457,4 +457,37 @@ test('a failed price request falls back to the last websocket push; the paper se
   assert.equal(r.engine.d.positions[MINT].raw, '0', 'sold at the pushed price');
   assert.equal(alertFor({type: 'failed', side: 'sell', mint: MINT, message: 'no paper sell quote'}, 'paper'), null, 'paper retries are logged, not pushed to the phone');
   assert.ok(alertFor({type: 'failed', side: 'sell', mint: MINT, message: 'no paper sell quote'}, 'live'), 'live failures always alert');
+});
+
+// A real arbitrage transaction of his (fixtures/leader-arb-logs.json): ~100 like it came in 43 s on 2026-10-28.
+const arb = JSON.parse(fs.readFileSync(new URL('./fixtures/leader-arb-logs.json', import.meta.url), 'utf8'));
+test('arbitrage-shaped: two or more venues in one transaction; his real one-venue trades are not', () => {
+  assert.equal(arb.signer, config.leader, 'signed by Decu himself');
+  assert.equal(relevantLogs(arb.logs), true, 'it touches trading programs, so the websocket filter lets it through');
+  assert.deepEqual(venuesOf(arb.logs), ['PumpSwap', 'Raydium CLMM']);
+  assert.deepEqual(leaderPumpBuys(arb.logs, config.leader), [], 'nothing for the fast path to copy');
+  assert.deepEqual(venuesOf(fx.buy.logs), ['pump.fun'], 'his real buy'); assert.deepEqual(venuesOf(fx.sell.logs), ['pump.fun'], 'his real sell');
+  assert.deepEqual(venuesOf(undefined), []);
+});
+test('a burst of his arbitrage swaps is downloaded 2 at a time, none skipped; his real sell meanwhile is fetched at once', async (t) => {
+  const sigs = Array.from({length: 20}, (_, i) => `Arb${i}`.padEnd(88, 'x')), fetchedAt = new Map();
+  let arbNow = 0, arbMost = 0;
+  const {r, ws} = await bot(t, {}, undefined, {venuesOf, getTransaction: async (sig) => {
+    fetchedAt.set(sig, Date.now()); const isArb = sig.startsWith('Arb');
+    if (isArb) { arbNow++; arbMost = Math.max(arbMost, arbNow); }
+    await sleep(40); if (isArb) arbNow--; return null;
+  }});
+  const burst = sigs.map((s) => ws(s, 'ws', arb.logs));
+  await sleep(60);
+  const sentAt = Date.now(), sell = ws(fx.sell.signature, 'ws', fx.sell.logs);
+  await sleep(10);
+  assert.ok(fetchedAt.get(fx.sell.signature) - sentAt < 30, 'his real sell did not wait behind the arbitrage swaps');
+  assert.ok([...fetchedAt.keys()].filter((s) => s.startsWith('Arb')).length < sigs.length, 'arbitrage swaps were still waiting');
+  assert.equal((await statusOf(r)).connection.arb.waiting > 0, true, 'the dashboard shows them waiting');
+  await Promise.all([...burst, sell]);
+  assert.equal(arbMost, 2, 'never more than 2 arbitrage downloads at once');
+  assert.ok(sigs.every((s) => fetchedAt.has(s)), 'every one was downloaded: nothing skipped');
+  const st = (await statusOf(r)).connection.arb;
+  assert.equal(st.seen, 20); assert.equal(st.waiting, 0);
+  assert.equal(Object.keys(r.engine.d.positions).length, 0, 'nothing bought');
 });

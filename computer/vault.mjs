@@ -135,6 +135,7 @@ const HUMAN_README = ['# Your notes', '', 'This folder is yours: the bot never w
  */
 export function createVault(dir, { log = () => {} } = {}) {
   const hashes = new Map(), sha = (t) => crypto.createHash('sha1').update(t).digest('hex');
+  let closed = false;
   const write = (rel, text) => { // text: a string (note) or a Buffer (chart picture)
     const h = sha(text);
     if (hashes.get(rel) === h) return false;
@@ -150,6 +151,7 @@ export function createVault(dir, { log = () => {} } = {}) {
     /** files: {relPath: text or Buffer}. Never writes under human/ except its README once. */
     sync(files) {
       const changed = [];
+      if (closed) return changed;
       try {
         fs.mkdirSync(path.join(dir, 'human'), { recursive: true });
         if (!fs.existsSync(path.join(dir, 'human', 'README.md'))) { fs.writeFileSync(path.join(dir, 'human', 'README.md'), HUMAN_README, { mode: 0o600 }); changed.push('human/README.md'); }
@@ -166,6 +168,8 @@ export function createVault(dir, { log = () => {} } = {}) {
     },
     read: (rel) => fs.readFileSync(path.join(dir, rel)),
     has: (rel) => fs.existsSync(path.join(dir, rel)),
+    /** The bot is stopping: notes and charts still being made are not written any more. */
+    close() { closed = true; },
   };
 }
 

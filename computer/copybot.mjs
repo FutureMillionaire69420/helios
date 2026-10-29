@@ -392,10 +392,11 @@ function rpcCount(method, kind) {
 }
 setInterval(() => {
   const h = rpcHealth, top = (o) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([m, n]) => `${m} ${n}`).join(', ');
-  const ps = priceStats, priceLine = `prices: curve ${ps.curve}, PumpSwap ${ps.pumpswap}, Jupiter ${ps.jupiter} (${ps.jupiterFailed} failed)`;
+  const ps = priceStats, why = Object.entries(ps.jupiterWhy).sort((a, b) => b[1] - a[1]).map(([w, n]) => `${w} ×${n}`).join(', ');
+  const priceLine = `prices: curve ${ps.curve}, PumpSwap ${ps.pumpswap}, Jupiter ${ps.jupiter} (${ps.jupiterFailed} failed${why ? `: ${why}` : ''}${ps.jupiterCoins.length ? `; coins ${ps.jupiterCoins.map((m) => m.slice(0, 6) + '…').join(', ')}` : ''})`;
   if (h.refused || h.timedOut || h.errors || ps.jupiterFailed) console.log(`rpc health (last ${Math.round((Date.now() - h.since) / 1000)} s): ${h.calls} calls · ${h.refused} refused (HTTP 429, too many requests)${h.refused ? ` [${top(h.refusedBy)}]` : ''} · ${h.timedOut} timed out · ${h.errors} other errors · busiest: ${top(h.byMethod)} · ${priceLine}`);
-  h.last = { at: new Date().toISOString(), calls: h.calls, refused: h.refused, timedOut: h.timedOut, errors: h.errors, busiest: top(h.byMethod), prices: { ...ps } };
-  for (const k of Object.keys(ps)) ps[k] = 0;
+  h.last = { at: new Date().toISOString(), calls: h.calls, refused: h.refused, timedOut: h.timedOut, errors: h.errors, busiest: top(h.byMethod), prices: { ...ps, jupiterWhy: { ...ps.jupiterWhy }, jupiterCoins: [...ps.jupiterCoins] } };
+  for (const k of Object.keys(ps)) ps[k] = 0; ps.jupiterWhy = {}; ps.jupiterCoins = [];
   Object.assign(h, { calls: 0, refused: 0, timedOut: 0, errors: 0, byMethod: {}, refusedBy: {}, since: Date.now() });
 }, 60_000).unref();
 async function rpc(method, params, timeoutMs = 10000) {
@@ -878,6 +879,8 @@ function ntfyToday() {
   return { ...ntfyUsage, max, chartCap: charts, chartsLeft: Math.max(0, Math.min(charts - ntfyUsage.charts, room)), tradeChartCap: coin, tradeChartsLeft: Math.max(0, Math.min(coin - (ntfyUsage.tradeCharts || 0), room)) };
 }
 
+// ALERT DELIVERY: the last delivery and failure, and failures in a row (the readiness check warns after 3)
+const ntfyHealth = { lastOkAt: null, lastFailAt: null, lastError: null, failsInRow: 0 };
 async function notify({ title, body, priority = 3, tags = [], click, actions = [], image, kind }) {
   const line = `[${new Date().toISOString()}] ${title} | ${body.replace(/\n/g, ' | ')}`;
   console.log(line);
@@ -899,9 +902,11 @@ async function notify({ title, body, priority = 3, tags = [], click, actions = [
     await http(`${config.ntfyServer.replace(/\/$/, '')}/${encodeURIComponent(config.ntfyTopic)}`, { method: 'POST', headers: { ...headers, 'content-type': 'text/plain; charset=utf-8' }, body: body, timeoutMs: 6000 });
     ntfyToday(); ntfyUsage.total++; if (kind === 'chart') ntfyUsage.charts++; if (kind === 'trade-chart') ntfyUsage.tradeCharts = (ntfyUsage.tradeCharts || 0) + 1;
     try { fs.writeFileSync(ntfyUsageFile, JSON.stringify(ntfyUsage), { mode: 0o600 }); } catch { /* best effort */ }
+    Object.assign(ntfyHealth, { lastOkAt: Date.now(), failsInRow: 0 });
     return 'sent';
   } catch (e) {
     console.error('ntfy failed:', e.message);
+    Object.assign(ntfyHealth, { lastFailAt: Date.now(), lastError: String(e.message).slice(0, 160), failsInRow: ntfyHealth.failsInRow + 1 });
     return 'failed';
   }
 }
@@ -1038,14 +1043,18 @@ function decodePool(b64) {
   const pk = (o) => b58encode(b.subarray(o, o + 32));
   return { baseMint: pk(43), quoteMint: pk(75), baseVault: pk(139), quoteVault: pk(171) };
 }
+// A coin that has just graduated has no pool for a few seconds (the migration lands after the curve completes):
+// "no pool" is asked again after 1 s, 2 s, 4 s ... at most every 60 s, instead of being remembered for 60 s. On
+// 2026-10-28 $Robotaxi's pool was missed for a minute that way: every price check fell to Jupiter, which did not
+// know the new pool yet, and the stop-loss was blind until the no-price safety sell.
 async function poolInfo(mint) {
   const hit = pools.get(mint);
-  if (hit && (hit.info || Date.now() - hit.at < 60_000)) return hit.info;
+  if (hit && (hit.info || Date.now() - hit.at < Math.min(60_000, 1000 * 2 ** Math.max(0, (hit.misses || 1) - 1)))) return hit.info;
   const pool = canonicalPoolPda(mint);
   const r = await rpc('getAccountInfo', [pool, { encoding: 'base64', commitment: 'confirmed' }], 5000);
   const d = r?.value?.owner === PROGRAMS.PUMP_AMM && r.value.data?.[0] ? decodePool(r.value.data[0]) : null;
   const info = d && d.baseMint === mint && d.quoteMint === WSOL ? { pool, ...d } : null;
-  pools.set(mint, { info, at: Date.now() }); if (pools.size > 500) pools.delete(pools.keys().next().value);
+  pools.set(mint, { info, at: Date.now(), misses: info ? 0 : (hit?.misses || 0) + 1 }); if (pools.size > 500) pools.delete(pools.keys().next().value);
   return info;
 }
 const vaultAmount = (b64) => { const b = Buffer.from(b64, 'base64'); return b.length >= 72 ? b.readBigUInt64LE(64) : null; }; // SPL / Token-2022 account: amount @64
@@ -1068,7 +1077,13 @@ function readPool(mint) {
 /** The PumpSwap pool of a coin that has graduated (else null): the crowd counter counts trades there. */
 const graduatedPool = async (mint) => (graduated.has(mint) ? (await poolInfo(mint).catch(() => null))?.pool ?? null : null);
 // PRICE SOURCES: which source priced each quote, counted per minute next to the RPC health
-const priceStats = { curve: 0, pumpswap: 0, jupiter: 0, jupiterFailed: 0, none: 0 };
+const priceStats = { curve: 0, pumpswap: 0, jupiter: 0, jupiterFailed: 0, none: 0, jupiterWhy: {}, jupiterCoins: [] };
+// a Jupiter miss: the reason (HTTP status, timeout, no route) and the first few coins, for the rpc health line
+function jupiterMiss(mint, e) {
+  const m = String(e?.message ?? e), why = !e ? 'no route' : /timed out/.test(m) ? 'timeout' : (m.match(/HTTP \d+/) || ['error'])[0];
+  priceStats.jupiterFailed++; priceStats.jupiterWhy[why] = (priceStats.jupiterWhy[why] || 0) + 1;
+  if (priceStats.jupiterCoins.length < 3 && !priceStats.jupiterCoins.includes(mint)) priceStats.jupiterCoins.push(mint);
+}
 
 /** Market cap in SOL from the bonding curve (1 billion tokens, 6 decimals). */
 function curveMcapSol(c) { return c && Number(c.vTok) > 0 ? (Number(c.vSol) / Number(c.vTok)) * 1e6 : null; }
@@ -1180,8 +1195,8 @@ async function quoteBuy(mint, sol) {
   if (c && !c.complete) { priceStats.curve++; return { raw: curveBuy(c, sol), venue: 'curve', vSol: Number(c.vSol), vTok: Number(c.vTok) }; } // the curve before this buy: crowd SOL
   const p = await readPool(mint).catch(() => null);
   if (p) { priceStats.pumpswap++; return { raw: curveBuy(p, sol), venue: 'pumpswap', vSol: Number(p.vSol), vTok: Number(p.vTok) }; }
-  const raw = await jupQuote(WSOL, mint, sol * LAMPORTS).catch(() => null);
-  priceStats[raw ? 'jupiter' : 'jupiterFailed']++;
+  let err = null; const raw = await jupQuote(WSOL, mint, sol * LAMPORTS).catch((e) => { err = e; return null; });
+  if (raw) priceStats.jupiter++; else jupiterMiss(mint, err);
   return raw ? { raw, venue: 'pumpswap' } : null;
 }
 
@@ -1191,8 +1206,8 @@ async function quoteSell(mint, raw) {
   if (c && !c.complete) { priceStats.curve++; return curveSell(c, raw); }
   const p = await readPool(mint).catch(() => null);
   if (p) { priceStats.pumpswap++; return curveSell(p, raw); }
-  const out = await jupQuote(mint, WSOL, raw).catch(() => null);
-  priceStats[out ? 'jupiter' : 'jupiterFailed']++;
+  let err = null; const out = await jupQuote(mint, WSOL, raw).catch((e) => { err = e; return null; });
+  if (out) priceStats.jupiter++; else jupiterMiss(mint, err);
   return out ? out / LAMPORTS : null;
 }
 
@@ -1984,6 +1999,11 @@ function venueOf(logs) {
   return seen.find((n) => n !== 'FLASHX router' && n !== 'Jupiter') || seen[0] || 'other';
 }
 
+/** Every venue a transaction swapped on, routers left out. Two or more in one transaction: arbitrage-shaped. */
+function venuesOf(logs) {
+  return [...new Set(Object.entries(TRADE_PROGRAMS).filter(([id, name]) => name !== 'FLASHX router' && name !== 'Jupiter' && (logs || []).some((l) => l.includes(id))).map(([, name]) => name))];
+}
+
 /**
  * Can this transaction be a trade? Measured 2026-10-08: ~26 successful transactions a second mention
  * his address, all from one unrelated program. Fetching each one exhausted the Helius rate limit, so
@@ -2731,7 +2751,7 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
     idle: () => {},
   };
   if (power) stopSol = stopFees = stopWarm = power.idle;
-  const r = await startRuntime({config,kp,notify,rpcHealth:()=>rpcHealth.last,graduatedPool,ntfyUsage:()=>ntfyToday(),solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,startPumpPortalWatcher:pumpPortalWatch,checkPumpPortalBuild,venueOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  const r = await startRuntime({config,kp,notify,rpcHealth:()=>rpcHealth.last,graduatedPool,ntfyUsage:()=>ntfyToday(),ntfyHealth:()=>({...ntfyHealth,topic:!!config.ntfyTopic,token:!!env('NTFY_TOKEN')}),solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,startPumpPortalWatcher:pumpPortalWatch,checkPumpPortalBuild,venueOf,venuesOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();stopWarm();solscan.flush();process.exit(0);});
   // The settings that decide speed and filtering, as the bot actually uses them (no keys).
   if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'false')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.001)} + ${num('TIP_MAX_SOL', 0.002)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · PumpPortal feed ${pumpPortalWatch ? 'on' : 'off (no PUMPPORTAL_API_KEY)'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);
@@ -2884,7 +2904,8 @@ async function runSetup(argv = process.argv) {
       if (/paper|demo/i.test(get('ENGINE_STATE_FILE'))) set('ENGINE_STATE_FILE', 'engine-live.json');
       if (get('DASHBOARD_TOKEN').length < 24) set('DASHBOARD_TOKEN', crypto.randomBytes(24).toString('hex'));
       save();
-      console.log(`\nLIVE settings saved. ${Number(get('DAILY_CAP_SOL')) > 0 ? `Daily spending cap: ${get('DAILY_CAP_SOL')} SOL (DAILY_CAP_SOL).` : 'No daily spending cap: the wallet balance is the only limit.'}`);
+      const capUsd = Number(get('DAILY_CAP_USD') || 600), capSol = Number(get('DAILY_CAP_SOL')) || 0, lossSol = Number(get('DAILY_LOSS_LIMIT_SOL')) || 0;
+      console.log(`\nLIVE settings saved. Daily spending cap: ${capUsd > 0 ? `$${capUsd} of buys a day (DAILY_CAP_USD)` : 'no dollar cap (DAILY_CAP_USD=0)'}${capSol > 0 ? ` and ${capSol} SOL (DAILY_CAP_SOL)` : ''}. Daily loss limit: ${lossSol > 0 ? `${lossSol} SOL (DAILY_LOSS_LIMIT_SOL)` : 'off (DAILY_LOSS_LIMIT_SOL=0)'}.`);
       console.log('Now running the go-live check. It builds and tests a real buy but does NOT send it.\n');
     } else {
       console.log('\n=== Decu copy bot setup (pretend trades, no real money) ===\n');
@@ -3052,5 +3073,5 @@ async function main(argv = process.argv) {
 // ===== entry =====
 const setStream = (s) => (stream = s); // tests
 export {refreshFees,currentFees,solUsdNow,confirm,holderStats,setStream,startSenderWarm,senderUrl,checkTradeInstructions,checkPumpPortalBuild,describeInstructions};
-export {config,setFetch,rpc,relevantLogs,venueOf,quoteSell,quoteBuy,watchCurve,canonicalPoolPda,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,findProgramAddress,associatedTokenAddress as ata,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
+export {config,setFetch,rpc,relevantLogs,venueOf,venuesOf,quoteSell,quoteBuy,watchCurve,canonicalPoolPda,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,findProgramAddress,associatedTokenAddress as ata,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);

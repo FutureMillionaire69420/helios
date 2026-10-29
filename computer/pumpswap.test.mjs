@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {setFetch, setStream, quoteSell, quoteBuy, watchCurve, canonicalPoolPda, findProgramAddress, b58decode, PROGRAMS} from './copybot.mjs';
+import {setFetch, setStream, quoteSell, quoteBuy, watchCurve, canonicalPoolPda, findProgramAddress, b58decode, b58encode, PROGRAMS} from './copybot.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const WSOL = 'So11111111111111111111111111111111111111112';
@@ -59,4 +59,27 @@ test('pool prices over the websocket: pushed only when both vault balances come 
   assert.equal(got.filter((c) => c.pumpswap).length, 1, 'mismatched blocks are never pushed');
   assert.equal(un.ready(), true);
   un(); assert.equal(subs.size, 0, 'unsubscribes the curve and both vaults');
+});
+
+test('a coin that has just graduated: its new pool is found about a second later, not a minute later', async (t) => {
+  t.after(() => setFetch(null));
+  // the curve completes a few seconds before the migration creates the pool; Jupiter does not know the pool yet
+  const M = b58encode(Buffer.alloc(32, 7)), cpk = findProgramAddress([Buffer.from('bonding-curve'), b58decode(M)], PROGRAMS.PUMP)[0], ppk = canonicalPoolPda(M);
+  const data = () => { const b = Buffer.alloc(301); b.set(b58decode(M), 43); b.set(b58decode(WSOL), 75); b.set(b58decode(baseVault), 139); b.set(b58decode(quoteVault), 171); return b.toString('base64'); };
+  let exists = false; const asked = [];
+  setFetch(async (url, init) => {
+    if (/jup\.ag/.test(url)) return { ok: false, status: 429, text: async () => 'rate limited' };
+    const { method, params } = JSON.parse(init.body);
+    const ok = (result) => ({ ok: true, json: async () => ({ jsonrpc: '2.0', id: 1, result }) });
+    if (method === 'getAccountInfo' && params[0] === cpk) return ok({ value: { owner: PROGRAMS.PUMP, data: [curveData(true), 'base64'] } });
+    if (method === 'getAccountInfo' && params[0] === ppk) { asked.push(Date.now()); return ok({ value: exists ? { owner: PROGRAMS.PUMP_AMM, data: [data(), 'base64'] } : null }); }
+    if (method === 'getMultipleAccounts') return ok({ value: [{ data: [vault(750_000_000_000_000n), 'base64'] }, { data: [vault(7_500_000_000n), 'base64'] }] });
+    return ok({ value: null });
+  });
+  assert.equal(await quoteSell(M, 1e11), null, 'no pool yet, and Jupiter has no price');
+  exists = true;
+  assert.equal(await quoteSell(M, 1e11), null, 'not asked again within the first second');
+  await sleep(1100);
+  assert.ok((await quoteSell(M, 1e11)) > 0, 'priced from the new pool a second later (it used to wait 60 s)');
+  assert.equal(asked.length, 2);
 });

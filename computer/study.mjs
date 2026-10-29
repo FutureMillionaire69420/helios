@@ -315,6 +315,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
   // Replay the journal through the brain (silently) so it remembers everything after a restart.
   for (let i = 0; i < records.length; i++) { enrich(records[i], records.slice(0, i)); brain.observe(records[i], records.slice(0, i + 1), { silent: true }); }
   const active = new Map();
+  let stopped = false;
   const tag = mode === 'live' ? '' : mode === 'paper' ? '[PAPER] ' : '[DEMO] ';
   const timed = (p) => Promise.race([p, new Promise((r) => setTimeout(() => r(null), quoteTimeoutMs))]);
   const send = (a) => { if (notify) Promise.resolve(notify(a)).catch(() => {}); };
@@ -434,6 +435,7 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
     const t = { st, rec, tail, at: st.startedAt / 1000, extra: null };
     tails.set(st.mint, t);
     const step = async () => {
+      if (stopped) return void tails.delete(st.mint);
       if (Date.now() >= endAt || tail.hisSell) {
         tails.delete(st.mint); rec.tail = tail;
         try { fs.appendFileSync(file, JSON.stringify({ patch: 'tail', mint: rec.mint, time: rec.time, tail, ...(t.extra ? { extra: t.extra } : {}) }) + '\n', { mode: 0o600 }); } catch {}
@@ -468,10 +470,12 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
       return new Promise((resolve) => {
         let s = 0;
         const tick = async () => {
+          if (stopped) { active.delete(mint); return resolve(null); }
           const due = st.startedAt + s * stepMs;
           // holder money + market cap every holderEverySec (in parallel; never delays the price samples)
           if (holdersHere && s % holderEverySec === 0) { const at = s; st.holderPending.push(timed(sampleHolders(mint)).then((h) => { if (h) st.holderPath.push({ s: at, holders: h.holders ?? null, mcapUsd: h.mcapUsd ?? null, valueUsd: h.valueUsd ?? null, devPct: h.devPct ?? null, devKnown: h.devKnown ?? null }); }).catch(() => {})); }
           st.values[s] = await timed(quoteSell(mint, st.raw).then((v) => (Number.isFinite(v) ? v : null)).catch(() => null));
+          if (stopped) { active.delete(mint); return resolve(null); }
           s++;
           if (s > windowSec) return resolve(await finish(st)); // hard stop: never studies a coin longer than the window
           setTimeout(tick, Math.max(0, due + stepMs - Date.now()));
@@ -479,6 +483,8 @@ export function createStudy({ file, quoteSell, notify = null, meta = null, mode 
         tick();
       });
     },
+    /** The bot is stopping: studies and tails in progress end now, unrecorded (nothing is written after this). */
+    stop() { stopped = true; },
     leaderSell(mint, { time, sol: received, soldRaw }) {
       const t = tails.get(mint);
       if (t && !t.tail.hisSell && Number(soldRaw) > 1000 && Number(received) > 0) t.tail.hisSell = { atSec: Math.round(((time || Date.now() / 1000) - t.at) * 10) / 10, price: Number(received) / Number(soldRaw) };

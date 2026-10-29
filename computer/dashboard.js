@@ -156,6 +156,7 @@ function renderHeader() {
   $('pulse').className = 'pulse ' + (fresh ? 'on' : 'stale'); $('pulse').title = fresh ? 'Live data' : 'Waiting for the bot';
   if (!fresh) return;
   if (s.power === 'off') banner('The bot is OFF: not watching Decu and not using data credits. Turn it on in Bot → Controls.', 'warn');
+  else if (s.readiness && !s.readiness.ready && s.mode !== 'demo') banner(`Not ready to trade: ${s.readiness.blocking.join(', ')}${s.gate ? ` (${s.gate})` : ''}. Details in Bot → Connections.`, 'warn');
   else if (s.gate) banner(`New buys blocked: ${s.gate}`, 'warn');
   else if (s.mode === 'paper') banner('PAPER: real Decu signals, simulated trades. No SOL is spent; profit here is practice.');
   else if (s.mode === 'demo') banner('DEMO: generated trades, no blockchain connection.');
@@ -654,9 +655,12 @@ function renderBot() {
   kv($('speed'), lv ? [['Fees per side now', `${Number(lv.fees.priorityFeeSol + lv.fees.tipSol).toFixed(4)} SOL (priority ${Number(lv.fees.priorityFeeSol).toFixed(4)} + tip ${Number(lv.fees.tipSol).toFixed(4)})`], ['Fee mode', lv.feeMode === 'max' ? 'live maximum' : 'fixed'], ['Push stream', lv.push ? 'ON' : 'off'], ['Price checks', lv.priceChecks ? `${lv.priceChecks.push} pushed / ${lv.priceChecks.poll} polled` : '—'], ['Late after Decu (median)', fin(L.medianSec) ? `${L.medianSec.toFixed(2)} s · ${L.blocksMedian ?? '—'} blocks` : '—'], ['Bot part (median)', fin(L.botMedianMs) ? `${Math.round(L.botMedianMs)} ms` : '—'], ['Sell desk', lv.sellDesk ? `${lv.sellDesk.holding} armed · ${lv.sellDesk.closes} accounts closed (rent back)` : '—']] : [['Loading', '…']]);
   // connections
   const k = s.connection || {}, conn = $('conn'); conn.replaceChildren(); $('conn-updated').textContent = 'Updated ' + clock(Date.now());
-  const crow = (name, ok, text) => { const r = h('div', 'r' + (ok === false ? ' bad' : ''), null, conn); h('span', 'tag ' + (ok === false ? 'bad' : ok ? 'good' : ''), ok === false ? 'ISSUE' : ok ? 'OK' : '—', r); const w = h('div', 'what', null, r); h('b', null, name, w); h('small', null, text, w); h('span', 'val', '', r); };
+  const crow = (name, ok, text, warn = false) => { const r = h('div', 'r' + (ok === false && !warn ? ' bad' : ''), null, conn); h('span', 'tag ' + (ok === false ? (warn ? 'gold' : 'bad') : ok ? 'good' : ''), ok === false ? (warn ? 'WARN' : 'ISSUE') : ok ? 'OK' : '—', r); const w = h('div', 'what', null, r); h('b', null, name, w); h('small', null, text, w); h('span', 'val', '', r); };
+  const RD = s.readiness;
+  if (RD) { const top = h('div', 'r plain', null, conn); const w = h('div', 'what', null, top); h('b', null, RD.ready ? '✓ Ready to trade' : `✕ Not ready to trade: ${RD.blocking.join(', ')}`, w); h('small', null, `Checked ${clock(Date.parse(RD.at))}${RD.warnings.length ? ` · warnings: ${RD.warnings.join(', ')}` : ''} · outside monitors can watch /ready (200 = ready, 503 = not)`, w); for (const x of RD.checks) crow(x.name, x.ok, x.detail, x.warn); }
   const fs = k.firstSeen || {};
   crow('Helius websocket', k.websocket === 'subscribed', `${k.websocket || '—'} · last poll ${k.lastPoll ? clock(k.lastPoll) : '—'} · errors ${k.errors ?? 0} · first to see his trade: websocket ${fs.ws || 0}, poll ${fs.poll || 0}`);
+  if (k.arb?.seen) crow("Decu's arbitrage swaps", true, `${k.arb.seen} seen, not trades to copy · downloaded 2 at a time so a burst can't flood Helius${k.arb.waiting ? ` · ${k.arb.waiting} waiting` : ''}`);
   const sc = k.solscan; crow('Solscan backup', sc ? sc.ok !== false : null, !sc ? 'off' : `${sc.ok === false ? sc.note || sc.error || 'error' : sc.ok ? `OK ${sc.latencyMs ?? '?'} ms` : sc.note || 'starting'}${s.solscanUsage ? ` · today ${s.solscanUsage.requests}${s.solscanUsage.budget ? ' / ' + s.solscanUsage.budget : ''} requests` : ''} · gaps caught ${k.gaps || 0}`);
   const pp = k.pumpportal; crow('PumpPortal feed', pp ? (pp.on ? pp.connected : null) : null, !pp ? '—' : !pp.on ? pp.note || 'off' : pp.connected ? `connected · first ${fs.pumpportal || 0}` : `connecting${pp.lastError ? ' (' + pp.lastError + ')' : ''}`);
   if (k.rpcHealth) crow('RPC health (last minute)', !(k.rpcHealth.refused || k.rpcHealth.timedOut), `refused ${k.rpcHealth.refused ?? 0} · timed out ${k.rpcHealth.timedOut ?? 0} · errors ${k.rpcHealth.errors ?? 0}`);

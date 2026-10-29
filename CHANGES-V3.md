@@ -275,3 +275,207 @@ Earlier v3.3 tests:
 - Bought trades only. These charts have their own cap (`NTFY_TRADE_CHARTS_PER_DAY` 60) under the same ntfy reserve, and `COIN_CHARTS=false` turns them off.
 - Checked by drawing the chart with the same chart library QuickChart uses (Chart.js 2.9.4).
 - Tests 151/151.
+
+## v3.6: the thinking brain
+
+- **Ranks Bronze → Grandmaster** replace Rookie → Master.
+  - Each rank needs a minimum number of bought trades, proven skill and profit on a $1000 paper bankroll.
+  - Skill means win rate, predictions that beat guessing, and profit factor.
+  - Failing your rank for 10 bought trades in a row drops one rank.
+- **Paper decisions.**
+  - The brain tunes the entry-premium cap (5–25%), the stop-loss (10–30%) and the gain gate (10–30%).
+  - It changes only on walk-forward evidence: chosen on older trades, proven on newer unseen ones.
+  - It moves one step at a time and judges each change after 20 trades. It undoes a change that did worse, and remembers not to try it again.
+  - It can skip a paper buy it clearly expects to lose, but only once its predictions beat guessing.
+  - `BRAIN_AUTOTUNE=false` and `BRAIN_VETO=false` turn these off.
+- **Live:** the brain only suggests changes ("Brain suggests" alert). It never changes a live setting.
+- **Brain note** after every bought trade (ntfy, 🧠, capped at `NTFY_BRAIN_PER_DAY` 60). It shows:
+  - the rank and what the next rank needs
+  - the brain's thinking
+  - the **$10 mirror**: $10 bought at your real entry and sold the moment Decu sold, next to Decu's perfect $10
+  - the **delay cost**, the network fees, and FCAT / PCAT / stop-gate at $10
+  - a chart
+- **Memory** is kept in `brain-memory-<mode>.json` next to the study journal. It holds ranks, decisions, tuning history and the versions the bot ran on.
+- **Optional daily GitHub backup** to a `brain-backup-<mode>` branch (never main), set with `GITHUB_BACKUP_TOKEN`. An empty disk is restored from it at start.
+- **Dashboard:** rank, brain rules, $10 mirror totals and the latest decisions.
+
+## v3.6.1
+
+- Goal: $1000 profit (`BRAIN_GOAL_USD`). Every brain note shows the progress; alerts fire at 25/50/75/100%.
+- Brain notes and the dashboard list the patterns the memory bank trusts.
+
+## v3.7: the paper-test pack
+
+All of these are replayed on the bot's own recorded trades, side by side with what it really does. None of them skips a paper trade. The brain sends "Brain suggests" only when a version chosen on older trades also wins on newer ones it never saw (50+ trades).
+
+- **Buy the dip:** wait for the price to fall 5 / 10 / 15% below Decu's price, giving up after 30 or 60 s or at his sell. Compared with buying now; both sell when he sells.
+  - The study keeps reading the price every 2 s until 60 s after his buy (`DIP_WINDOW_SEC`), at most 8 trades at once.
+  - These readings are saved as a "tail" line in the journal and merged back into the trade at load.
+- **Break-even stop:** once a trade is up +10% / +20%, the stop moves to break-even on your money. It is also in the advisor's exit comparison.
+- **First buy only:** Decu's first buys of a coin vs his later buys.
+- **Market cap ceiling:** skip above $10k / 20k / 30k / 50k / 100k. Uses Decu's market cap at his own buy, taken from his trade's curve numbers; older trades use the coin's market cap.
+- **Quick-flip guard:** a side test only. After he sells within 10 s, it scores what pausing his buys would have done.
+- **Crowd counter / speed test by on-chain order:**
+  - Counts the trades by others that landed on the curve between Decu's buy and yours: your place in line. In live this is exact; in paper it's estimated from the landing block. It takes one `getSignaturesForAddress` call per study, 3 s later (`CROWD_COUNT=false` turns it off).
+  - Paper also records how much SOL others put in.
+  - "crowd before you" is a new pattern. The speed report shows what each trade ahead of you costs and what being 100 ms faster (e.g. LaserStream) is worth a month.
+- **New patterns:** "crowd before you" and "Decu buy #" (first / later).
+- **Obsidian-ready findings:**
+  - `second-brain-<mode>/machine/findings.md` has front matter and a table per test.
+  - It can be downloaded from the dashboard ("Download brain findings") and is served at `/api/brain/findings.md`.
+
+## v3.7.1: price checks that failed after every buy
+
+- **The problem:** right after almost every buy, the price requests failed for about 10 seconds. The bot then sold "blind" (no price) in paper, and the phone filled with "Price checks failing" and "Trade FAILED (sell)" alerts.
+- **Price from the live websocket first:** the study and the price watch now take a held coin's price from the curve the websocket pushes, so most price checks need no data request.
+- **Fallback:** a request that fails now uses a push from the last 5 s (`PUSH_FALLBACK_MS`) instead of counting as "no price". Paper sells use it too.
+- **Shared reads:** reads of the same coin's curve at the same moment share one request.
+- **Fewer alerts:**
+  - "Price checks failing" comes at most once per coin every 5 minutes (`PRICE_FAIL_ALERT_EVERY_SEC`).
+  - Paper sells retried for want of a price are logged, not pushed to the phone; the one "CAN'T SELL" alert covers them.
+  - Live failures still alert every time.
+- **RPC health:** every Helius call is counted. Any minute with refused (HTTP 429), timed-out or failed requests is logged as one line, with the busiest methods. It's also shown in `/api/status`.
+
+## v3.7.2: the real cause of "no price" — coins on PumpSwap
+
+- **Found on the chain:** the coins with failing price checks ($PRESIDENT, $DCY, $carti, $HOOT…) had already finished their bonding curve and moved to PumpSwap. Decu's buy of $PRESIDENT went through PumpSwap (`pAMMBay…`), not the curve.
+  - A finished curve never changes, so it can't give a price, and the websocket has nothing to push for it.
+  - Every price then came from Jupiter's free quote API, about 3 requests a second while studying and holding, and Jupiter kept refusing or coming back empty. Those failures weren't Helius calls, so the RPC health log stayed silent.
+- **The fix: PumpSwap pools are read straight from the chain through Helius.**
+  - The bot finds pump.fun's own pool for the coin (it only accepts the pool if it holds this coin and SOL), then reads both vault balances in one request, so both come from the same block.
+  - A coin known to have graduated isn't read on its curve again: one request per price.
+  - Tested on the live chain: $PRESIDENT, $DCY and $carti priced on every try in about 60 ms; before, they returned nothing.
+- **Websocket prices for PumpSwap coins:** both pool vaults are watched. A price is pushed only when both balances come from the same block and nothing changed for 120 ms (`POOL_PUSH_SETTLE_MS`), so a half-updated pair can never fake a crash and trip the stop-loss.
+- **Pool prices stay out of the curve sell builder.** PumpSwap sells still go through PumpPortal, as before.
+- **Jupiter only as the last resort,** for coins outside pump.fun's pools. Its failures are now counted in the per-minute health line: "prices: curve N, PumpSwap N, Jupiter N (N failed)".
+- **Crowd counter:** for a PumpSwap coin, it counts the trades in its pool.
+- `PUMPSWAP_FEE_PCT` (default: the curve's 1.25%, on the cautious side) sets the fee used in paper PumpSwap prices.
+
+## v3.8: the second brain in Obsidian
+
+- **Notes:** the bot writes its thinking as an Obsidian vault (plain markdown with front matter and [[links]]) on the Render disk, in `second-brain-<mode>/`:
+  - `Home.md`: rank, goal, rules, days and the patterns it trusts.
+  - One note per bought trade, `machine/trades/`: what it predicted and why, what happened, the $10 mirror, place in line and the patterns it matched (linked).
+  - One note per day, `machine/daily/`: its numbers as front matter, so Obsidian can sort and query them, plus its trades and decisions.
+  - One note per trusted pattern, `machine/patterns/`, with the trades that matched it.
+  - `machine/decisions.md` (every decision) and `machine/findings.md` (the paper tests).
+  - `human/` is yours: the bot never writes there, except its README the first time.
+- **Rebuilt from the bot's own records:** at start, the newest 300 bought trades (`VAULT_BACKFILL`). Only notes whose content changed are written.
+- **Download:** the dashboard has a "Download whole brain (Obsidian vault)" button (`/api/brain/vault.zip`).
+- **GitHub sync (optional):** set `GITHUB_VAULT_TOKEN` and `GITHUB_VAULT_REPO` (owner/name of a PRIVATE repository just for the brain).
+  - The changed notes go up as one commit every `VAULT_SYNC_MIN` (5) minutes; an empty repository is started automatically.
+  - Obsidian's Git plugin pulls them.
+  - The token is never logged, and `POST /api/brain/vault/sync` pushes now.
+
+## v3.9: charts and a full analysis in every trade's brain note, and the profit missed on the delays
+
+- **Every new bought trade's Obsidian note** gets five charts, saved as pictures in the vault (`machine/charts/`, so they show offline, in the zip and through the GitHub sync):
+  1. The price path, every second, with 3/5/10CAT, the best second, the exit, Decu's sell, the stop and the gate.
+  2. What the delay cost: $10 bought at Decu's price vs at your entry vs at every later second, all with the same exit.
+  3. The $10 mirror: Decu's perfect $10 → the delay → yours → fees → result.
+  4. Every exit strategy on this trade, best to worst, next to Decu's own price and the best second.
+  5. This trade vs your last 30 trades and the winners among them.
+- **The write-up in each note:**
+  - Verdict, with its rank among all trades and the profit missed on the delay.
+  - The delay step by step: detection, bot timing, place in line, premium, what each later second would have made, fees.
+  - A table of every exit, the comparison with your history, and setups like this one (same premium band, market cap and Decu size).
+  - Risk while held, and a table of every second.
+- **Each day's note:** you vs Decu's price per trade (and what the delay took), plus the running total at $10 (Decu's price, you before fees, you after fees).
+- **New note "Delays and missed profit"** (`machine/analysis/`), linked from Home:
+  - The total profit the delays cost (SOL and $), and a running total with vs without the delay.
+  - Missed per day, and averages by blocks after Decu, execution latency, place in line and entry premium.
+  - Entry premium vs result for every trade.
+  - Its charts redraw at most every `ANALYSIS_CHARTS_EVERY_MIN` (15) minutes.
+- Charts are drawn by QuickChart (POST, only % / SOL / $ numbers are sent). A chart that can't be drawn keeps its last picture or links online. `NOTE_CHARTS=false` turns charts off.
+- Older trades get the written analysis without charts.
+- "Missed on the delay" = Decu's entry price result − yours with the same exit (the $10 mirror on newer trades, PCAT − FCAT on older ones; values beyond ±1000% are data errors and left out).
+
+## v4.0: the new dashboard, the road to the Rolex
+
+- **New look:** black, two-tone steel and gold, white highlights (GMT-Master "Zombie" colours).
+  - On a phone the tabs sit at the bottom; on a computer they are a sidebar.
+  - Three finishes in Bot → This device: Two-tone, Steel, Gold.
+  - Gains are blue and losses red (checked for colour blindness); every chart has a tooltip and a "Numbers" table.
+- **Home: the Rolex meter.** An original drawing of a GMT-style watch (no logo or brand name on it):
+  - The gold ring inside the bezel fills with **live** profit toward `ROLEX_GOAL_USD` ($20,000). The silver ring is paper practice and never counts.
+  - The GMT hand points at your progress and the date window shows the percent. The other hands keep the real time.
+  - Next to it: live profit, milestones ($1K, $5K, $10K, $15K, $20K), still to go, pace a day (last 7 days), arrival date, and the practice meter.
+- **Home: open coins.** Each held coin shows:
+  - its live result and a gauge from the stop-loss to the gain gate;
+  - cost, value now and best result, with pump.fun and Solscan links;
+  - a **Sell now** button that sells all of that coin through the normal exit path, sell retries included. Live asks twice.
+- **Home: the rest.** The trading style switch, the emergency stop, Decu's latest buys and the latest activity.
+- **Trades:** every studied Decu buy, bought or skipped.
+  - Filters: date (today, 7 days, 30 days, all, or a day picked in the calendar), won/lost, bought/skipped, a coin search, market cap, entry premium, delay, Decu's buy size, buyers ahead, the holder rule, his first buy only, and how it sold.
+  - Totals, the running profit, a CSV of the rows in view, and each trade in full (per-second chart, notes and what the brain thought).
+- **What-if tester:** what rules would have made on every studied buy, next to what the bot did. Nothing here changes how the bot trades.
+  - Buy rules: premium cap, market cap min and max, Decu's buy size, delay, buyers ahead, Decu's recent activity, holder SAFE, first buy only, hours of the day.
+  - Exit rules: take profit, stop loss, sell after N seconds.
+  - The verdict compares the older 70% of trades with the newer 30%, and a table shows what each rule takes out.
+  - "Find the best value" picks a value on the older trades and shows how it did on the newer ones.
+- **Calendar:** profit per day for live (real) or paper (practice).
+  - Blue days made money and red days lost; tap a day to see its trades.
+  - Streaks, best and worst day, the running profit, and profit by weekday and by hour.
+  - **What it takes to reach the Rolex:** time to the goal at each trade size, and the size needed for 3, 6 or 12 months.
+- **Brain and Bot tabs:** the same information as before, as cards.
+  - Brain: rank, rules, $10 mirror, tests, patterns, decisions, market caps, place in line, Obsidian downloads.
+  - Bot: controls, wallets, settings, speed and fees, connections, pending trades, activity, downloads, analytics.
+- **Wallets:** Solflare, Phantom, Backpack and any wallet that follows the Wallet Standard.
+  - On a phone, "Open in Solflare" or "Open in Phantom" opens the dashboard inside the wallet app.
+  - Connecting only reads the wallet's public address, to show it, check it against the bot's wallet and read its balance. The dashboard never asks a wallet to sign.
+- **Sign in:** "Remember on this device".
+- **Server:**
+  - **Rolex ledger:** `rolex-goal.json` next to the engine state (Render: `/var/data/rolex-goal.json`). Paper and live share it, and it is filled at start from the closed-trade record. Settings: `ROLEX_GOAL_USD` (20000), `ROLEX_GOAL_NAME`, `GOAL_FILE`.
+  - **New endpoints:**
+    - `GET /api/trades`: compact rows, gzip, `?after=ms` for the newest only.
+    - `GET /api/trade?mint=&time=`: one trade in full.
+    - `GET /api/goal`: add `?entries=1` for the calendar.
+    - `POST /api/sell/<mint>`: sell one coin.
+    - `GET /api/wallet/balance?address=`: one read, cached 30 s.
+  - `/api/status` adds the held coins with their live value, the settings, the leader, the SOL price, the timezone and the signer's public address.
+  - The security policy now allows `data:` images (wallet icons); scripts stay same-origin only.
+  - A missing page file now answers 404 instead of leaving the request open.
+- **Tests:** `dashcalc.test.mjs`, `goal.test.mjs` and `dashboard.test.mjs` (199 tests in all).
+
+## v4.1: ready to trade?, Decu's arbitrage bursts, clean tests
+
+No trade setting changed.
+
+- **Readiness (`/ready`), separate from `/health`.**
+  - `/ready` answers 200 when the bot can trade safely and 503 when it can't, with only the names of the failing checks. It needs no token, so an outside uptime monitor can watch it.
+  - Blocking checks: bot power, Decu's trades feed, every open coin priced within 30 s (`READY_PRICE_STALE_SEC`), new buys allowed (circuit breakers, stale data), disk writable, and the wallet balance (live).
+  - Warnings only: Helius refusals or timeouts in the last minute, phone alerts failing, buying paused.
+  - `/api/ready` (token) gives every check with its detail; `/api/status` carries it too.
+  - Dashboard: "Not ready to trade" on Home, and the full checklist under Bot → Connections.
+  - Phone: "Bot NOT READY to trade" after 2 minutes (`READY_ALERT_SEC`), then "Bot ready to trade again" when it recovers.
+  - `/health` is unchanged and stays Render's health check: a restart can't fix stale data, and it can interrupt a sell.
+- **Decu's arbitrage bursts no longer flood Helius.**
+  - His wallet also runs arbitrage through his router: one transaction swapping across PumpSwap, Raydium CLMM and USDC, ending where it started.
+  - On 2026-10-28 02:53 UTC about 100 came in 43 s. Downloading them all at once drew 243 Helius calls in a minute; 60 were refused, the bot's own fee checks among them.
+  - A transaction that swaps on two or more venues is now downloaded 2 at a time (`ARB_DOWNLOADS`). None is skipped, and his one-venue trades never wait behind them.
+  - Replaying that burst against a limit of 10 calls a second:
+    - before: 424 calls, 101 refused;
+    - now: 285 calls, 0 refused, and the queue still clears in 44 s.
+  - Bot → Connections counts them.
+- **Prices right after a coin graduates.**
+  - A "no pool yet" answer for a coin's new PumpSwap pool used to be kept for 60 s. A coin that had just left its bonding curve could go unpriced for a minute, which caused the blind no-price sell of $Robotaxi.
+  - Now the pool is looked up again after 1 s, then 2, 4… up to 60 s.
+- **Jupiter price failures say why.** The rpc health line names the reason (rate limit, timeout, no route) and up to 3 of the coins.
+- **Phone alert delivery is tracked** (last delivered, failures in a row) and shown in readiness.
+- **Tests.**
+  - `npm test` runs every test file in its own empty temporary folder (`test-guard.mjs`), deleted afterwards. Nothing is written into the project folder any more, and a `.env` there can't change what the tests see.
+  - A test file that finishes but keeps running fails after 5 s, naming what is still open, instead of hanging the run. Each test also has a 2-minute limit (`--test-timeout`).
+  - The guard found one leak: the bot's `stop()` left the 15 s studies, their price follow-ups and the notes writer running.
+    - All three now stop with the bot.
+    - `engine.test.mjs` finishes in about 1 s instead of 18 s, and the whole suite in about 14 s.
+  - 203 tests, including one of Decu's real arbitrage transactions as a fixture (`fixtures/leader-arb-logs.json`).
+- **`package-lock.json`** (no dependencies): a reproducible install.
+- **Docs.**
+  - `GO-LIVE.md` is rewritten for v4. It covers:
+    - the real defaults: a $600 daily cap, the loss limit off, automatic exits;
+    - the gates, and fees by trade size;
+    - how to read paper results;
+    - the canary and restart tests;
+    - emergencies, recovery and monitoring;
+    - a dated sign-off table.
+  - `setup --live` and `START-HERE.md` no longer say "no daily spending cap": `DAILY_CAP_USD` (600) has applied all along.

@@ -17,13 +17,13 @@ const auth = {Authorization: 'Bearer ' + TOKEN};
 async function bot(t, env = {}, extra = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-dash-'));
   Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: TOKEN, STUDY: 'false', PAPER_MAX_PAY_PCT: '0', STALE_DATA_SEC: '0', FULL_PATH_DELAY_MS: '0', NOTE_CHARTS: 'false', VAULT_BACKFILL: '0', ...env});
-  let ws;
+  let ws, watcher = null;
   const k = {config: {...config, dryRun: true, minLeaderBuyUsd: 1, logFile: path.join(dir, 'log'), paperLandMs: 0, tipSol: 0.001, priorityFeeSol: 0.0005, slippagePct: 20}, redact: (x) => x,
     detectBuy, detectSell, leaderPumpBuys, leaderPumpSells, getSolUsd: async () => 100, solUsdNow: () => 100,
-    quoteBuy: async () => ({raw: 1_000_000}), quoteSell: async () => 0.11, getTransaction: async () => null, startWatcher: (cb) => { ws = cb; return () => {}; }, ...extra};
+    quoteBuy: async () => ({raw: 1_000_000}), quoteSell: async () => 0.11, getTransaction: async () => null, startWatcher: (cb, o) => { ws = cb; watcher = o?.status; return () => {}; }, ...extra};
   const r = await startRuntime(k);
   t.after(() => { r.stop(); fs.rmSync(dir, {recursive: true, force: true}); for (const key of Object.keys(process.env)) if (!(key in PRISTINE_ENV)) delete process.env[key]; Object.assign(process.env, PRISTINE_ENV); });
-  return {r, dir, ws: (...a) => ws(...a), base: `http://127.0.0.1:${r.server.address().port}`};
+  return {r, dir, ws: (...a) => ws(...a), watcher: () => watcher, base: `http://127.0.0.1:${r.server.address().port}`};
 }
 
 test('dashboard: coins held with their live value, the Sell button for one coin, the Rolex ledger', async (t) => {
@@ -88,4 +88,30 @@ test('dashboard: the trade list (compact, gzip, newest only) and one trade in fu
   const one = await (await fetch(base + `/api/trade?mint=Coin3Mint&time=${d.rows[3].time}`, {headers: auth})).json();
   assert.equal(one.symbol, 'C3'); assert.deepEqual(one.notes, ['a note']);
   assert.equal((await fetch(base + '/api/trade?mint=nope', {headers: auth})).status, 404);
+});
+
+test('readiness: /ready says yes or no (names only, no token needed), every check behind the token', async (t) => {
+  const {r, ws, watcher, base} = await bot(t, {}, {quoteSell: async () => null});
+  let res = await fetch(base + '/ready');
+  assert.equal(res.status, 503, "Decu's feed has not connected yet");
+  let body = await res.json();
+  assert.deepEqual(body.blocking, ["Decu's trades feed"]); assert.equal(body.checks, undefined, 'no details without the token');
+  watcher().websocket = 'subscribed';
+  res = await fetch(base + '/ready'); body = await res.json();
+  assert.equal(res.status, 200); assert.equal(body.ready, true);
+  // a coin the bot cannot price: its stop-loss is blind, so the bot is NOT ready
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  const full = await (await fetch(base + '/api/ready', {headers: auth})).json();
+  assert.equal(full.ready, false); assert.ok(full.blocking.includes('Open coins priced'));
+  assert.match(full.checks.find((x) => x.name === 'Open coins priced').detail, /stop-loss is blind/);
+  assert.ok(full.checks.some((x) => x.name === 'Disk writable' && x.ok));
+  const s = await (await fetch(base + '/api/status', {headers: auth})).json();
+  assert.equal(s.readiness.ready, false, 'the dashboard shows it too');
+  assert.equal((await fetch(base + '/api/ready')).status, 401, 'details need the token');
+  r.engine.style('off'); // Emergency stop: a warning, not a reason to page
+  const paused = await (await fetch(base + '/api/ready', {headers: auth})).json();
+  assert.ok(paused.warnings.includes('Buying')); assert.ok(!paused.blocking.includes('Buying'));
+  r.setPower(false, {force: true});
+  body = await (await fetch(base + '/ready')).json();
+  assert.ok(body.blocking.includes('Bot power'));
 });

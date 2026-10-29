@@ -145,9 +145,11 @@ test('values saved in .env win over empty inherited ones (setup then check)', as
   fs.writeFileSync(path.join(dir, '.env'), 'HELIUS_API_KEY=saved-key\nNTFY_TOPIC=saved-topic\n');
   const p = spawn(process.execPath, ['--input-type=module', '-e', `const {config}=await import(${JSON.stringify(new URL('./copybot.mjs', import.meta.url).href)}); console.log(config.heliusKey+'|'+config.ntfyTopic); process.exit(0)`], {cwd: dir, env: {...process.env, HELIUS_API_KEY: '', NTFY_TOPIC: ''}});
   t.after(() => p.kill('SIGKILL'));
-  let out = ''; p.stdout.on('data', (b) => { out += b; }); p.stderr.on('data', (b) => { out += b; });
-  await new Promise((r) => p.once('exit', r));
-  assert.equal(out.trim(), 'saved-key|saved-topic');
+  // stdout only: Node may print its own warnings on stderr (e.g. about proxy settings)
+  let out = '', err = ''; p.stdout.on('data', (b) => { out += b; }); p.stderr.on('data', (b) => { err += b; });
+  const code = await new Promise((r) => p.once('exit', r));
+  assert.equal(out.trim(), 'saved-key|saved-topic', err);
+  assert.equal(code, 0, err);
 });
 
 test('state saved before the auto-copy switch existed keeps copying', (t) => {

@@ -168,7 +168,7 @@ his-sell+10s   120 trades   45 wins   -0.0800 SOL
    - check the wallet address it shows matches Phantom, type **yes**
    - it runs the go-live check. **The last line must say READY FOR LIVE.** It tests a real buy but
      does **not** send it.
-6. Double-click **start** again. There is **no daily spending cap**: the robot buys every copy the wallet can pay for, so the SOL you put in the wallet is your limit.
+6. Double-click **start** again. The robot buys at most **$600 a day** (`DAILY_CAP_USD`) and never more than the wallet can pay for, so the SOL you put in the wallet is your hard limit. There is no daily loss limit unless you set `DAILY_LOSS_LIMIT_SOL`.
 7. Pick your trading style in the dashboard (two toggles, only one can be ON):
    - **Auto buy + auto sell**: the robot buys when Decu buys and sells **everything** the moment he
      first sells. **15 seconds after Decu's buy** (not the robot's): if the trade reached **+15%** by
