@@ -885,6 +885,11 @@ export async function startRuntime(k, {demo=false}={}) {
     const envPower=val('BOT_POWER','').toLowerCase();
     if(['on','off'].includes(envPower) && engine.d.powerEnv!==envPower) { engine.d.powerEnv=envPower; engine.d.dataOff=envPower==='off'; engine.save(); }
     if(powerOff()) { stopData(); engine.event('power-off',{by:'saved setting at startup',open:openNow()}); } else startData();
+    // PAPER_BALANCE_SOL on the server wins once when it is changed: the paper wallet is set to it, so paper starts from
+    // the money live would have. After that paper trades move it like a real wallet (with PAPER_UNLIMITED=false they
+    // also limit it: no money, no buy).
+    const pb=val('PAPER_BALANCE_SOL','');
+    if(c.mode==='paper' && Number(pb)>0 && engine.d.paperBalanceEnv!==pb) { const was=engine.d.paperBalance; engine.d.paperBalanceEnv=pb; engine.d.paperBalance=Number(pb); engine.event('paper-balance',{sol:Number(pb),was:Number.isFinite(was)?Math.round(was*1e6)/1e6:null,by:'PAPER_BALANCE_SOL changed'}); engine.save(); }
   }
   const timer=setInterval(()=>engine.recover().catch(e=>engine.event('error',{message:e.message})),5000);
   // WATCHDOG: alert when Helius (websocket) or Solscan stays down, and when it recovers;

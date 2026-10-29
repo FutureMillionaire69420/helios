@@ -1,4 +1,4 @@
-# Going live with real money (v4.1)
+# Going live with real money (v4.2)
 
 **This guide changes nothing.** The bot keeps trading exactly as it is set until you change a setting yourself.
 
@@ -12,6 +12,8 @@ A "READY FOR LIVE" line, a green readiness check, or a finished checklist is not
   - Win rate 46%. Worst drop from a high point: −0.28 SOL.
 - **Paper isn't testing the live rules.** Paper was using the brain's tuned rules (25% premium limit, −25% stop). Live would use your settings (15% and −20%).
 - **Untested live.** No live buy or sell has ever run.
+- **2026-10-29: paper now matches live** (see "Reading paper results"). Count paper trades only from then.
+- **The bot is OFF** (since 2026-10-28 06:43 UTC, from the dashboard). No paper trades are made until you turn it on: Bot → Controls → Power ON.
 
 Update this section at every review, with the date.
 
@@ -20,7 +22,7 @@ Update this section at every review, with the date.
 All must pass, in this order.
 
 1. **Tests.**
-   - `npm test` passes and exits on its own: 204 tests, about 15 s.
+   - `npm test` passes and exits on its own: 206 tests, about 15 s.
    - It leaves no files in the project folder.
    - `npm run smoke` passes.
 2. **Data providers.**
@@ -32,7 +34,10 @@ All must pass, in this order.
    - Positive **after fees**.
    - Judged at the rules live will use (see "Reading paper results").
 4. **Preflight.** `node copybot.mjs check` prints `READY FOR LIVE` with the live settings in place. It builds and simulates a real buy but does not send it.
-5. **Canary.** One smallest-size live trade, bought and sold, checked on Solscan. Then the restart test (see "The canary").
+5. **Canary.**
+   - First, the landing-speed test: real landing times, no coins, fees only (see "The landing-speed test").
+   - Then one smallest-size live trade, bought and sold, checked on Solscan.
+   - Then the restart test (see "The canary").
 6. **Operations.** Rehearse these once:
    - Emergency stop.
    - Sell one coin.
@@ -73,24 +78,57 @@ A trade must gain more than this just to break even. At 0.1 SOL, paper's price m
 
 ## Reading paper results
 
-Paper is not live, in four ways. Account for each before trusting a paper number.
+**Since 2026-10-29, paper is set to match live** (Render → Environment). Live settings are unchanged.
 
-- **Paper's landing time is assumed.**
-  - Every paper buy and sell is filled at the real market price **0.5 s** after the bot acts (`PAPER_LAND_MS`, 500 on your service).
-  - The rest is measured on real data: the bot sees Decu's trade in the same block. Its own work takes about 1 ms on the fast path, and about 0.6 s when it has to download the transaction.
-  - A real trade can take longer to land, and it can fail. A failed one still pays its priority fee.
-  - Only live trades can measure this. Each live buy's `Latency:` line shows the real landing time and block, so the canary tells you how far paper was off.
+| Setting | Paper now | Before | Why |
+|---|---|---|---|
+| `BRAIN_AUTOTUNE` | `false` | on | paper uses your rules (15% premium cap, −20% stop, +15% gate), as live does |
+| `BRAIN_VETO` | `false` | on | the brain no longer skips paper buys; live never does |
+| `PAPER_UNLIMITED` | `false` | `true` | no money, no buy, as in a real wallet |
+| `PAPER_BALANCE_SOL` | `3` (about $300) | — | the money you plan to put in the live wallet: applied once when it changes, then paper trades move it |
+| `PAPER_LAND_MS` | `1000` | 500 | each paper trade fills at the real market price 1.0 s after the bot acts |
 
-- **Paper never runs out of money** (`PAPER_UNLIMITED=true`). It takes trades that a small live wallet couldn't afford. A live wallet needs this for each open coin:
-  - `BUY_SOL` × (1 + `SLIPPAGE_PCT`/100)
-  - plus fees, about 0.007 SOL (up to 0.026 at your caps)
-  - plus token-account rent, about 0.002 SOL (returned when the coin is fully sold)
+Count only paper trades from that day. Older ones used the brain's rules (25% premium cap, −25% stop); dashboard → **What-if** can replay those at your rules.
 
-  Keep `MIN_SOL_RESERVE` (0.02 SOL) on top. At 0.1 SOL and 2 open coins, that is about **0.28 SOL**.
-- **In paper, the brain tunes its own rules** (`BRAIN_AUTOTUNE`). Live never auto-tunes: it uses your settings. To judge paper at the live rules, use dashboard → **What-if**: set the premium cap to 15% and the stop to 20%. It's the closest check, not an exact replay.
-- **Count only current-version trades.** Older results came from older exit rules.
+**What paper measures on real data:**
+- The bot sees Decu's trade in the same block.
+- Its own work takes about 1 ms on the fast path, and about 0.6 s when it has to download the transaction.
+- Prices, fees, the slippage limit and the entry-premium filter are applied as live would apply them.
+
+**What paper still can't copy:**
+- **The real landing time.** Paper assumes 1.0 s. Measure it with the landing-speed test below and set `PAPER_LAND_MS` to the median it reports.
+- **Failed trades.** A real buy can fail: the price moved past the slippage limit, or it never landed. A failed one still pays its priority fee; paper skips those buys at no cost.
+- **PumpPortal's 0.5% fee.** For coins the bot can't build itself (PumpSwap coins), live uses PumpPortal's builder, which takes 0.5%. Paper doesn't charge it.
+
+**What a live wallet needs.** For each open coin:
+- `BUY_SOL` × (1 + `SLIPPAGE_PCT`/100)
+- plus fees, about 0.007 SOL (up to 0.026 at your caps)
+- plus token-account rent, about 0.002 SOL (returned when the coin is fully sold)
+
+Keep `MIN_SOL_RESERVE` (0.02 SOL) on top. At 0.1 SOL and 2 open coins, that is about **0.28 SOL**.
 
 The Rolex meter counts **live** profit only. Paper is the practice meter.
+
+## The landing-speed test
+
+How long a real transaction from your bot takes to land, measured with real transactions but no coins.
+
+In Render → your service → **Shell**:
+
+```
+node copybot.mjs landtest              # shows the cost, sends nothing
+node copybot.mjs landtest --yes        # sends 10
+node copybot.mjs landtest --count 5 --yes
+```
+
+- **What it sends.** Each transaction does nothing except pay the priority fee and tip a buy would pay right now, sent through Helius Sender like a buy. No coin is bought or sold.
+  - The bot refuses to sign anything with any other account in it.
+- **What it reports.** For each one: how many blocks after sending it landed, and how many milliseconds until it was seen and confirmed. Then the median and the worst, against paper's `PAPER_LAND_MS`.
+- **What it costs.** It spends **real SOL** from the wallet in `PHANTOM_PRIVATE_KEY`, even while the bot is in paper mode.
+  - Each one costs a buy's fee and tip: about 0.0035 SOL typical, at most 0.013 at your caps.
+  - 10 cost about 0.035 SOL, at most 0.13.
+  - It shows the cost first and refuses if the wallet can't cover the maximum.
+- **When to run it.** At a busy time (when Decu trades), on a few different days. Then set `PAPER_LAND_MS` to the median "seen after", rounded up to the next 100 ms.
 
 ## Settings and their defaults
 
@@ -138,7 +176,7 @@ Make the changes in Render → Environment. Saving restarts the bot.
 | `ENGINE_STATE_FILE` | `/var/data/engine-live.json` | the bot refuses to start live on the paper state |
 | `STUDY_FILE` | `/var/data/study-live.jsonl` | keeps the live journal and brain apart from paper |
 | `DASHBOARD_TOKEN` | a new value of 24+ characters | the current one was pasted in a chat |
-| `PHANTOM_PRIVATE_KEY` / `PHANTOM_WALLET_ADDRESS` | a **new** wallet holding only what you can lose | the current bot wallet's key was pasted in a chat |
+| `PHANTOM_PRIVATE_KEY` / `PHANTOM_WALLET_ADDRESS` | your pump.fun wallet (see "Using your pump.fun wallet") or a **new** wallet, holding only what you can lose | the current bot wallet's key was pasted in a chat |
 
 **For the canary days, tighten the limits.** For example:
 
@@ -150,6 +188,31 @@ Make the changes in Render → Environment. Saving restarts the bot.
 Keep the trading wallet in Phantom or Solflare on your phone, so you can sell by hand at any time.
 
 Connecting it to the dashboard only reads its address and balance. The dashboard never asks a wallet to sign.
+
+## Using your pump.fun wallet
+
+pump.fun has no login a bot can trade through. A pump.fun account is a Solana wallet, and the bot trades with a wallet's key. To have the bot trade your pump.fun money, it needs that wallet's key.
+
+**You do this yourself, in Render. Never paste a key into a chat.**
+
+1. **Find the address.** On pump.fun, open your profile; the address is under your name.
+2. **Get the private key.**
+   - If you log in with Phantom or Solflare, the key is in that app. In Phantom: Settings → Manage Accounts → the account → Show Private Key.
+   - If you log in with email or Google, pump.fun made the wallet for you. Look in pump.fun's settings for exporting the wallet's private key.
+3. **Set it in Render → Environment.**
+   - `PHANTOM_PRIVATE_KEY`: that key.
+   - `PHANTOM_WALLET_ADDRESS`: that address.
+   - Both must come from the same wallet, or the bot refuses to start and the dashboard goes down. If that happens, put the old values back.
+4. **Save.** The bot restarts. Dashboard → Bot → Wallets shows the address, and its **pump.fun** button opens that profile.
+
+**What it means:**
+- **In paper,** nothing is spent from it, except by the landing-speed test.
+- **In live** (`DRY_RUN=false`), the bot can spend everything above 0.02 SOL in it, at most $600 of buys a day. Set `DAILY_LOSS_LIMIT_SOL` before going live.
+- **Your own coins are safe from its sells.** The bot only sells coins it bought, and never more than it bought. Coins you already hold, even of the same coin, are never sold by it.
+- **Trading by hand in the same wallet is allowed.** The bot may then find less SOL than it expected; that buy just fails.
+- **The key lives on Render.** Anyone who gets into your Render account can take everything in that wallet.
+  - Keep in it only what you're willing to lose.
+  - A second Phantom or Solflare account just for the bot is safer. Connect it to pump.fun, and pump.fun shows its coins the same way.
 
 ## The canary: first live trades
 

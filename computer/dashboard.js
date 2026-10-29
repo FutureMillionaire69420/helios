@@ -644,6 +644,7 @@ function renderBot() {
   const addr = s.wallet?.publicKey || s.wallet?.signerAddress;
   $('bot-addr').textContent = addr || 'No signer key configured';
   $('bot-copy').disabled = !addr; $('bot-solscan').hidden = !addr; if (addr) $('bot-solscan').href = 'https://solscan.io/account/' + encodeURIComponent(addr);
+  $('bot-pumpfun').hidden = !addr; if (addr) $('bot-pumpfun').href = 'https://pump.fun/profile/' + encodeURIComponent(addr); // its coins, as pump.fun shows them
   const bal = s.mode === 'live' ? s.balance : S.botBalance;
   $('bot-wallet-note').textContent = !addr ? 'Add PHANTOM_PRIVATE_KEY in Render to trade live.' : `${s.mode === 'live' ? 'Trading LIVE from this wallet' : 'Ready for LIVE (paper now: no SOL is used)'} · balance on chain ${fin(bal) ? bal.toFixed(4) + ' SOL' + (solUsd() ? ` (${C.money(bal * solUsd())})` : '') : '…'}${fin(bal) && bal < 0.03 && s.mode !== 'live' ? ' · fund it before going live' : ''}`;
   if (addr && s.mode !== 'live' && every('botBalance', 60000)) api('/api/wallet/balance?address=' + encodeURIComponent(addr)).then((b) => { S.botBalance = b.sol; }).catch(() => {});

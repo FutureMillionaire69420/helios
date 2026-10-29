@@ -492,3 +492,25 @@ No trade setting changed.
 - **v4.1.1 still paged** once the bot had been OFF for 30 s.
   - The stopped feed also tripped the stale-data rule, so "New buys allowed" counted as a second problem.
   - Now, while OFF, only "Bot power" counts. The test runs with the stale-data rule on, as on the server.
+
+## v4.2: paper matches live, the landing-speed test, tests on GitHub
+
+- **Paper matches live** (Render, 2026-10-29). Live settings are unchanged.
+  - `BRAIN_AUTOTUNE=false`: paper uses your rules (15% / −20% / +15%), not the brain's (25% / −25%).
+  - `BRAIN_VETO=false`: the brain no longer skips paper buys; live never does.
+  - `PAPER_UNLIMITED=false`: a paper wallet with no money can't buy, like a real one.
+  - `PAPER_BALANCE_SOL=3` (about $300): the money planned for the live wallet.
+  - `PAPER_LAND_MS=1000`: paper trades fill 1.0 s after the bot acts, instead of 0.5 s.
+- **`PAPER_BALANCE_SOL` on the server wins once when it is changed,** like `BOT_POWER`. The paper wallet is set to it; after that, paper trades move it. Before, it applied only to a brand-new state.
+- **`node copybot.mjs landtest`: how long a real transaction from your wallet takes to land.**
+  - It sends transactions that do nothing, each paying the priority fee and tip a buy pays right now, through Helius Sender.
+  - It reports blocks and milliseconds to land, against paper's `PAPER_LAND_MS`.
+  - No coin is bought or sold. It shows the cost first, sends only with `--yes`, at most 20 at a time, and refuses if the wallet can't cover the maximum.
+  - It signs nothing with any account besides the wallet, the compute budget, the system program and a Jito tip account.
+- **Dashboard:** a **pump.fun** button for the bot wallet (Bot → Wallets) opens its pump.fun profile.
+- **Tests run on GitHub at every push:** npm test and the smoke run, Node 22, 10-minute limit.
+- **GO-LIVE.md:**
+  - the new paper settings, and what paper still can't copy;
+  - the landing-speed test;
+  - how to use your pump.fun wallet, and what that means;
+  - gate 1 of the sign-off.

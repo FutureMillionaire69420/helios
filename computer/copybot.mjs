@@ -15,7 +15,7 @@ import {spawn,spawnSync} from 'node:child_process';
 import {startRuntime,normalize} from './runtime.mjs';
 import {createStream} from './stream.mjs';
 import {createPumpPortalFeed} from './pumpportal.mjs';
-import {decodeBondingCurve} from './pumpbuild.mjs';
+import {decodeBondingCurve,compileLegacy} from './pumpbuild.mjs';
 import {solscanClient,startSolscanWatcher,swapsFromActivities,leaderProfile,compareDetection} from './solscan.mjs';
 
 // ===== solana.js =====
@@ -2993,6 +2993,80 @@ async function runWalletCmd(argv = process.argv) {
   if (!kp) console.log('No signer is configured. In live mode the bot will refuse to start.');
 }
 
+// ===== landtest =====
+// LANDING-SPEED TEST: node copybot.mjs landtest [--count 10] [--yes]
+// Paper assumes every trade lands PAPER_LAND_MS after the bot acts; only real transactions show the real time. This
+// sends `count` transactions that do nothing, from the trading wallet, each with the priority fee and tip a buy pays
+// right now, through the same send path (Helius Sender), and measures when each lands. No coin is bought or sold: each
+// one only pays its fee and tip. It prints the cost first and sends only with --yes.
+/** The landing test may only pay its own fee and tip: payer, tip account, compute budget, system. Nothing else. */
+function checkLandTestTx(raw, payer, tipAccount) {
+  const tx = parseTransaction(raw), allowed = new Set([payer, COMPUTE_BUDGET, SYSTEM_PROGRAM, ...(tipAccount ? [tipAccount] : [])]);
+  if (tx.keys[0] !== payer || tx.numRequiredSignatures !== 1) throw new Error('landing test: the wallet must be the only signer and the fee payer');
+  const extra = tx.keys.filter((k) => !allowed.has(k));
+  if (extra.length) throw new Error(`landing test: unexpected account ${extra[0]}: refusing to sign`);
+  if (tipAccount && !TIP_ACCOUNTS.includes(tipAccount)) throw new Error('landing test: the tip must go to a Jito tip account');
+}
+async function landTest({ count = 10, yes = false, log = console.log, pollMs = num('LANDTEST_POLL_MS', 200), timeoutMs = num('LANDTEST_TIMEOUT_MS', 20_000), gapMs = num('LANDTEST_GAP_MS', 1500) } = {}) {
+  if (!Number.isInteger(count) || count < 1 || count > 20) throw new Error('--count must be a whole number from 1 to 20');
+  if (!config.privateKey) throw new Error('no wallet key set (PHANTOM_PRIVATE_KEY): there is nothing to send from');
+  if (config.rpcIsPublic) throw new Error('set HELIUS_API_KEY first: the test uses the same RPC and Sender as live buys');
+  const kp = loadKeypair(config.privateKey), maxMode = env('FEE_MODE', 'max') === 'max';
+  if (maxMode) await refreshFees().catch(() => {});
+  const f = currentFees(), cuLimit = num('CU_LIMIT', 120_000);
+  const priorityLamports = Math.round(f.priorityFeeSol * 1e9), tipLamports = Math.round(f.tipSol * 1e9);
+  const perTxSol = (priorityLamports + tipLamports + 5000) / 1e9;
+  const maxPerTxSol = maxMode ? num('PRIORITY_FEE_MAX_SOL', 0.001) + num('TIP_MAX_SOL', 0.002) + 0.000005 : perTxSol;
+  const balance = await getBalanceSol(kp.publicKey), paperMs = num('PAPER_LAND_MS', 1000);
+  log(`LANDING-SPEED TEST: ${count} real transaction${count > 1 ? 's' : ''} from ${kp.publicKey}. Each one only pays a buy's fee and tip: no coin is bought or sold.`);
+  log(`Fee per transaction now: priority ${f.priorityFeeSol.toFixed(6)} + tip ${f.tipSol.toFixed(6)} SOL (${f.source || 'settings'}). Cost: about ${(count * perTxSol).toFixed(4)} SOL, at most ${(count * maxPerTxSol).toFixed(4)} SOL. Wallet: ${balance.toFixed(4)} SOL.`);
+  if (balance < count * maxPerTxSol + 0.001) throw new Error(`the wallet has ${balance.toFixed(4)} SOL; this test may need up to ${(count * maxPerTxSol).toFixed(4)} SOL`);
+  if (!yes) { log('Nothing sent. Run it again with --yes to send.'); return { sent: 0, planned: count, perTxSol, maxPerTxSol, results: [] }; }
+  const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32LE(n); return b; }, u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); return b; };
+  const micro = Math.floor((priorityLamports * 1e6) / cuLimit), results = [];
+  for (let i = 0; i < count; i++) {
+    const tipAccount = tipLamports > 0 ? TIP_ACCOUNTS[Math.floor(Math.random() * TIP_ACCOUNTS.length)] : null;
+    const ixs = [
+      { program: COMPUTE_BUDGET, accounts: [], data: Buffer.concat([Buffer.from([2]), u32(cuLimit)]) }, // same compute limit and price as a buy
+      { program: COMPUTE_BUDGET, accounts: [], data: Buffer.concat([Buffer.from([3]), u64(micro)]) },
+      // the tip, as a buy pays it; with no tip, 0 SOL to itself (the transaction still needs something to do)
+      { program: SYSTEM_PROGRAM, accounts: [{ k: kp.publicKey, s: true, w: true }, { k: tipAccount || kp.publicKey, w: true }], data: Buffer.concat([u32(2), u64(tipAccount ? tipLamports : 0)]) },
+    ];
+    const [bh, sendSlot] = await Promise.all([rpc('getLatestBlockhash', [{ commitment: 'confirmed' }]).then((r) => r.value.blockhash), rpc('getSlot', [{ commitment: 'processed' }])]);
+    const raw = compileLegacy(kp.publicKey, ixs, bh, b58decode);
+    checkLandTestTx(raw, kp.publicKey, tipAccount);
+    const signed = signTransaction(raw, kp), r = { n: i + 1, signature: signed.signature, sendSlot }, t0 = Date.now();
+    try {
+      await sendRaw(signed.bytes, tipAccount ? [senderUrl()] : []);
+      while (Date.now() - t0 < timeoutMs) {
+        await sleep(pollMs);
+        const st = (await rpc('getSignatureStatuses', [[signed.signature], { searchTransactionHistory: false }]).catch(() => null))?.value?.[0];
+        if (!st) continue;
+        if (r.seenMs == null) Object.assign(r, { seenMs: Date.now() - t0, landSlot: st.slot, blocks: st.slot - sendSlot });
+        if (st.err) { r.failed = JSON.stringify(st.err); break; }
+        if (['confirmed', 'finalized'].includes(st.confirmationStatus)) { r.confirmedMs = Date.now() - t0; break; }
+      }
+    } catch (e) { r.error = 'send failed: ' + redact(e.message); }
+    results.push(r);
+    log(`${String(r.n).padStart(3)}/${count}  ${r.error || (r.seenMs == null ? `not seen within ${timeoutMs / 1000} s (it may still land)` : `landed ${r.blocks} block${r.blocks === 1 ? '' : 's'} after sending · seen after ${r.seenMs} ms${r.confirmedMs != null ? ` · confirmed after ${r.confirmedMs} ms` : ''}${r.failed ? ` · FAILED on-chain ${r.failed}` : ''}`)}  ${signed.signature}`);
+    if (i < count - 1) await sleep(gapMs);
+  }
+  const landed = results.filter((r) => r.seenMs != null), med = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[(s.length - 1) >> 1] : null; };
+  const blocks = landed.map((r) => r.blocks), seen = landed.map((r) => r.seenMs), summary = { sent: results.length, landed: landed.length, medianBlocks: med(blocks), worstBlocks: blocks.length ? Math.max(...blocks) : null, medianSeenMs: med(seen), worstSeenMs: seen.length ? Math.max(...seen) : null, spentSol: Math.round(landed.length * perTxSol * 1e6) / 1e6, paperMs };
+  log(`\nSummary: ${summary.sent} sent, ${summary.landed} landed${results.some((r) => r.failed) ? ` (${results.filter((r) => r.failed).length} failed on-chain)` : ''}, ${summary.sent - summary.landed} not seen.`);
+  if (landed.length) {
+    log(`Landed a median ${summary.medianBlocks} block${summary.medianBlocks === 1 ? '' : 's'} after sending (worst ${summary.worstBlocks}); first seen after a median ${summary.medianSeenMs} ms (worst ${summary.worstSeenMs} ms, checking every ${pollMs} ms).`);
+    log(`Paper assumes every trade lands ${paperMs} ms after the bot acts (PAPER_LAND_MS). ${summary.medianSeenMs <= paperMs ? 'Real landing was as fast or faster: paper is not too optimistic here.' : `Real landing was slower: paper is too optimistic. Set PAPER_LAND_MS to about ${Math.ceil(summary.medianSeenMs / 100) * 100}.`}`);
+  }
+  log(`Spent about ${summary.spentSol} SOL.`);
+  return { ...summary, results, perTxSol, maxPerTxSol };
+}
+async function runLandTestCmd(argv = process.argv) {
+  const i = argv.indexOf('--count'), count = i > 0 ? Number(argv[i + 1]) : 10;
+  try { await landTest({ count, yes: argv.includes('--yes') }); }
+  catch (e) { console.error(`Landing-speed test: ${redact(e.message)}`); process.exitCode = 1; }
+}
+
 // ===== supervisor.js =====
 // node copybot.mjs start [demo]: runs the bot as a child process and restarts it if it crashes.
 // Restarting is safe: every signed transaction is saved before it is sent and re-checked on start.
@@ -3061,6 +3135,7 @@ async function main(argv = process.argv) {
   if (cmd === 'report') return runReportCmd(argv);
   if (cmd === 'diagnose') return runDiagnoseCmd(argv);
   if (cmd === 'wallet') return runWalletCmd(argv);
+  if (cmd === 'landtest') return runLandTestCmd(argv);
   if (cmd === 'study') return runStudyCmd(argv);
   if (['style', 'alerts', 'paper', 'pause', 'resume', 'status'].includes(cmd)) return runControlCmd(argv).catch((e) => { console.error(e.message); process.exitCode = 1; });
   if (cmd === 'run') return runBot();
@@ -3072,6 +3147,6 @@ async function main(argv = process.argv) {
 
 // ===== entry =====
 const setStream = (s) => (stream = s); // tests
-export {refreshFees,currentFees,solUsdNow,confirm,holderStats,setStream,startSenderWarm,senderUrl,checkTradeInstructions,checkPumpPortalBuild,describeInstructions};
+export {refreshFees,currentFees,solUsdNow,confirm,holderStats,setStream,startSenderWarm,senderUrl,checkTradeInstructions,checkPumpPortalBuild,describeInstructions,landTest,checkLandTestTx};
 export {config,setFetch,rpc,relevantLogs,venueOf,venuesOf,quoteSell,quoteBuy,watchCurve,canonicalPoolPda,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,findProgramAddress,associatedTokenAddress as ata,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);

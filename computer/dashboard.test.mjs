@@ -135,3 +135,22 @@ test('readiness alert: a real problem pages once (and again when it clears); the
   for (let i = 0; i < 40 && !titles().some((x) => /ready to trade again/.test(x)); i++) await sleep(50);
   assert.ok(titles().some((x) => /ready to trade again/.test(x)));
 });
+
+test('PAPER_BALANCE_SOL on the server wins once when it is changed; after that paper trades move the paper wallet', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-paperbal-'));
+  t.after(() => { fs.rmSync(dir, {recursive: true, force: true}); for (const key of Object.keys(process.env)) if (!(key in PRISTINE_ENV)) delete process.env[key]; Object.assign(process.env, PRISTINE_ENV); });
+  const start = async (pb) => {
+    Object.assign(process.env, {ENGINE_STATE_FILE: path.join(dir, 'engine.json'), PORT: '0', DASHBOARD_TOKEN: TOKEN, STUDY: 'false', PAPER_UNLIMITED: 'false', PAPER_BALANCE_SOL: pb});
+    return startRuntime({config: {...config, dryRun: true, logFile: path.join(dir, 'log')}, redact: (x) => x, detectBuy, detectSell, getSolUsd: async () => 100, quoteBuy: async () => ({raw: 1}), quoteSell: async () => 0.1, getTransaction: async () => null, startWatcher: () => () => {}});
+  };
+  let r = await start('3');
+  assert.equal(r.engine.d.paperBalance, 3, 'set from the server');
+  assert.ok(r.engine.d.events.some((e) => e.type === 'paper-balance' && e.sol === 3));
+  r.engine.d.paperBalance = 2.75; r.engine.save(); r.stop(); // paper trades moved it
+  r = await start('3');
+  assert.equal(r.engine.d.paperBalance, 2.75, 'a restart with the same setting keeps the paper wallet as trading left it');
+  r.stop();
+  r = await start('5');
+  assert.equal(r.engine.d.paperBalance, 5, 'a new value is applied once');
+  r.stop();
+});

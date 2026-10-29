@@ -6,7 +6,8 @@ import path from 'node:path';
 import {createStream} from './stream.mjs';
 import {holderVerdict, exitSim} from './learn.mjs';
 import {createStudy, research, latencyLine, toCsv} from './study.mjs';
-import {setFetch, setStream, refreshFees, currentFees, solUsdNow, confirm, holderStats, findProgramAddress, b58decode, b58encode, PROGRAMS, startSenderWarm, senderUrl, config} from './copybot.mjs';
+import crypto from 'node:crypto';
+import {setFetch, setStream, refreshFees, currentFees, solUsdNow, confirm, holderStats, findProgramAddress, b58decode, b58encode, PROGRAMS, startSenderWarm, senderUrl, config, landTest, checkLandTestTx, parseTransaction, TIP_ACCOUNTS} from './copybot.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tmp = (t) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-speed-')); t.after(() => fs.rmSync(d, {recursive: true, force: true})); return path.join(d, 'study.jsonl'); };
@@ -208,4 +209,53 @@ test('Helius Sender kept warm with free pings; the API key never goes to a plain
   assert.equal(senderUrl(), 'http://slc-sender.helius-rpc.com/fast', 'no key over http');
   config.senderUrl = 'https://sender.helius-rpc.com/fast';
   assert.match(senderUrl(), /^https:.*api-key=KEY123$/, 'https keeps the key');
+});
+
+test('landing-speed test: shows the cost and sends nothing without --yes; then only a buy\'s fee and the tip; measures blocks and time', async (t) => {
+  // a throwaway wallet made for this test: never funded, never used for anything else
+  const {privateKey, publicKey} = crypto.generateKeyPairSync('ed25519');
+  const seed = privateKey.export({format: 'der', type: 'pkcs8'}).subarray(-32), pub = publicKey.export({format: 'der', type: 'spki'}).subarray(-32), payer = b58encode(pub);
+  const saved = {privateKey: config.privateKey, rpcIsPublic: config.rpcIsPublic, rebroadcast: config.rebroadcast, senderUrl: config.senderUrl}, savedEnv = {...process.env};
+  Object.assign(config, {privateKey: b58encode(Buffer.concat([seed, pub])), rpcIsPublic: false, rebroadcast: false, senderUrl: 'https://sender.test/fast'});
+  Object.assign(process.env, {FEE_MODE: 'max', LANDTEST_POLL_MS: '5', LANDTEST_GAP_MS: '0', LANDTEST_TIMEOUT_MS: '2000'});
+  t.after(() => { setFetch(null); Object.assign(config, saved); for (const k of Object.keys(process.env)) if (!(k in savedEnv)) delete process.env[k]; Object.assign(process.env, savedEnv); });
+  const sent = [], polls = new Map(); let lamports = 1e9;
+  setFetch(async (url, init) => {
+    if (!init?.body) return {ok: true, json: async () => [{landed_tips_99th_percentile: 0.0015}]}; // Jito's tip floor
+    const {method, params} = JSON.parse(init.body);
+    const ok = (result) => ({ok: true, json: async () => ({jsonrpc: '2.0', id: 1, result})});
+    if (method === 'getPriorityFeeEstimate') return ok({priorityFeeEstimate: 10_000_000}); // micro-lamports per CU: 0.0012 SOL at 120k CU, capped to 0.001
+    if (method === 'getBalance') return ok({value: lamports});
+    if (method === 'getLatestBlockhash') return ok({value: {blockhash: b58encode(Buffer.alloc(32, 9))}});
+    if (method === 'getSlot') return ok(1000);
+    if (method === 'sendTransaction') { sent.push({url, bytes: Buffer.from(params[0], 'base64')}); return ok('sent'); }
+    if (method === 'getSignatureStatuses') { const n = (polls.get(params[0][0]) || 0) + 1; polls.set(params[0][0], n); return ok({value: [n === 1 ? null : {slot: 1002, confirmationStatus: n === 2 ? 'processed' : 'confirmed', err: null}]}); }
+    return ok(null);
+  });
+  const lines = [];
+  let r = await landTest({count: 3, yes: false, log: (m) => lines.push(m)});
+  assert.equal(sent.length, 0, 'nothing sent without --yes');
+  assert.match(lines.join('\n'), /no coin is bought or sold/); assert.match(lines.join('\n'), /Cost: about 0\.0075 SOL, at most 0\.0090 SOL/); assert.match(lines.join('\n'), /Nothing sent/);
+  r = await landTest({count: 3, yes: true, log: () => {}});
+  assert.equal(r.sent, 3); assert.equal(r.landed, 3); assert.equal(r.medianBlocks, 2); assert.ok(r.medianSeenMs >= 0);
+  assert.equal(r.spentSol, 0.007515, '3 x (0.001 priority + 0.0015 tip + 0.000005 base fee)');
+  const toSender = sent.filter((x) => /sender\.test/.test(x.url));
+  assert.equal(toSender.length, 3, 'through Helius Sender, like a buy');
+  for (const {bytes} of toSender) {
+    const tx = parseTransaction(bytes), tip = tx.keys.find((k) => TIP_ACCOUNTS.includes(k));
+    assert.equal(tx.keys[0], payer); assert.ok(tip, 'pays a Jito tip account');
+    assert.deepEqual([...tx.keys].sort(), [payer, tip, 'ComputeBudget111111111111111111111111111111', '11111111111111111111111111111111'].sort(), 'no other account at all');
+    for (const k of tx.keys) assert.equal(b58decode(k).length, 32, `${k} is a real 32-byte address`);
+    const tipData = Buffer.alloc(12); tipData.writeUInt32LE(2); tipData.writeBigUInt64LE(1_500_000n, 4);
+    assert.ok(tx.message.includes(tipData), 'the tip is exactly the current tip (0.0015 SOL)');
+    assert.ok(crypto.verify(null, tx.message, publicKey, bytes.subarray(tx.sigStart, tx.sigStart + 64)), 'signed by the wallet');
+  }
+  lamports = 5_000_000; // 0.005 SOL: less than 3 x 0.003005 at the caps
+  await assert.rejects(landTest({count: 3, yes: true, log: () => {}}), /may need up to 0\.0090 SOL/);
+  await assert.rejects(landTest({count: 21, log: () => {}}), /1 to 20/);
+  await assert.rejects(landTest({count: 0, log: () => {}}), /1 to 20/);
+  // the safety check refuses any other account
+  const {compileLegacy} = await import('./pumpbuild.mjs');
+  const bad = compileLegacy(payer, [{program: '11111111111111111111111111111111', accounts: [{k: payer, s: true, w: true}, {k: b58encode(Buffer.alloc(32, 5)), w: true}], data: Buffer.alloc(12)}], b58encode(Buffer.alloc(32, 9)), b58decode);
+  assert.throws(() => checkLandTestTx(bad, payer, null), /unexpected account/);
 });

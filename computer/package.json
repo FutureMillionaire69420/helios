@@ -1,6 +1,6 @@
 {
   "name": "decu-copybot",
-  "version": "4.1.2",
+  "version": "4.2.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -20,6 +20,7 @@
     "paper:off": "node copybot.mjs paper off",
     "status": "node copybot.mjs status",
     "study": "node copybot.mjs study",
+    "landtest": "node copybot.mjs landtest",
     "backtest": "node copybot.mjs backtest",
     "export": "node copybot.mjs export",
     "test": "node --import ./test-guard.mjs --test --test-timeout=120000 engine.test.mjs solscan.test.mjs stability.test.mjs phantom.test.mjs study.test.mjs fastpath.test.mjs pumpbuild.test.mjs speed.test.mjs sell.test.mjs pumpportal.test.mjs analytics.test.mjs brain.test.mjs tests.test.mjs pumpswap.test.mjs vault.test.mjs notecharts.test.mjs dashcalc.test.mjs goal.test.mjs dashboard.test.mjs",
