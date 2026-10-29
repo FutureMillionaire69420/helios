@@ -936,7 +936,8 @@ export async function startRuntime(k, {demo=false}={}) {
     }
     const held=heldNow(), staleMs=number('READY_PRICE_STALE_SEC',30)*1000, blind=held.filter(h=>!h.pricedAt||now-h.pricedAt>staleMs);
     add('Open coins priced',!blind.length,blind.length?`no price for ${blind.map(h=>h.symbol?'$'+h.symbol:h.mint.slice(0,6)+'…').join(', ')} for ${staleMs/1000}+ s: its stop-loss is blind`:held.length?`${held.length} held, all priced`:'no coins held');
-    const gate=c.gate?.(); add('New buys allowed',!gate,gate||'yes');
+    // while OFF the feed is stopped on purpose, so the stale-data gate says nothing new: only "Bot power" counts
+    const gate=off?null:c.gate?.(); if(!off) add('New buys allowed',!gate,gate||'yes');
     if(engine.d.paused) add('Buying',false,'paused: no new buys (Emergency stop or both styles off); coins held keep their exit rules',true);
     const rh=k.rpcHealth?.(); if(rh) add('Helius (last minute)',!(rh.refused>=10||rh.timedOut>=5),`${rh.calls} calls · ${rh.refused} refused (too many requests) · ${rh.timedOut} timed out`,true);
     const nh=k.ntfyHealth?.();

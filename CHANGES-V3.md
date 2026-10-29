@@ -486,3 +486,9 @@ No trade setting changed.
   - Turned OFF with no coin held, the bot already sends "Bot OFF" at every start, so the readiness alert no longer pages for it. `/ready` still answers 503.
   - OFF with a coin held is still paged: that coin's stop-loss is blind.
 - `READY_CHECK_MS` (15000): how often readiness is checked.
+
+## v4.1.2
+
+- **v4.1.1 still paged** once the bot had been OFF for 30 s.
+  - The stopped feed also tripped the stale-data rule, so "New buys allowed" counted as a second problem.
+  - Now, while OFF, only "Bot power" counts. The test runs with the stale-data rule on, as on the server.

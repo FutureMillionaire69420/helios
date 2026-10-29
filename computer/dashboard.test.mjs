@@ -118,11 +118,13 @@ test('readiness: /ready says yes or no (names only, no token needed), every chec
 
 test('readiness alert: a real problem pages once (and again when it clears); the bot turned OFF on purpose does not', async (t) => {
   const alerts = [], titles = () => alerts.map((a) => a.title);
-  const {r, ws, watcher} = await bot(t, {READY_CHECK_MS: '30', READY_ALERT_SEC: '0.1', READY_PRICE_STALE_SEC: '0.2'}, {quoteSell: async () => null, notify: async (a) => { alerts.push(a); }});
+  // STALE_DATA_SEC on, as on the server: OFF stops Decu's feed, which must not count as a second problem
+  const {r, ws, watcher, base} = await bot(t, {READY_CHECK_MS: '30', READY_ALERT_SEC: '0.1', READY_PRICE_STALE_SEC: '0.2', STALE_DATA_SEC: '0.05'}, {quoteSell: async () => null, notify: async (a) => { alerts.push(a); }});
   watcher().websocket = 'subscribed';
   r.setPower(false); // OFF by the owner, nothing held: /ready says 503, nobody is paged
   await sleep(400);
   assert.ok(!titles().some((x) => /NOT READY/.test(x)), 'no page for a deliberate OFF');
+  assert.deepEqual((await (await fetch(base + '/ready')).json()).blocking, ['Bot power']);
   r.setPower(true); watcher().websocket = 'subscribed';
   await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle(); // a coin it cannot price
   for (let i = 0; i < 40 && !titles().some((x) => /NOT READY/.test(x)); i++) await sleep(50);
