@@ -140,3 +140,24 @@ test("the bot's own guides (changes, going live, Obsidian setup) are written int
   await b.pushVault(); assert.ok(pushed.includes('Bot/Changes.md'));
   b.stop();
 });
+
+test('GitHub sync: when another writer moved the branch meanwhile (422), the commit is rebuilt on the newest one', async () => {
+  let head = 'c0', patches = 0, blobs = 0;
+  const fake = async (url, init = {}) => {
+    const j = (status, body) => ({ status, json: async () => body });
+    if (/\/git\/ref\/heads\/main$/.test(url)) return j(200, { object: { sha: head } });
+    if (/\/git\/commits\/c\d$/.test(url)) return j(200, { tree: { sha: 't-' + url.slice(-2) } });
+    if (/\/git\/blobs$/.test(url)) { blobs++; return j(201, { sha: 'b1' }); }
+    if (/\/git\/trees$/.test(url)) return j(201, { sha: 'tree-on-' + JSON.parse(init.body).base_tree });
+    if (/\/git\/commits$/.test(url)) return j(201, { sha: 'new-on-' + JSON.parse(init.body).parents[0] });
+    if (/\/git\/refs\/heads\/main$/.test(url)) {
+      patches++;
+      if (patches === 1) { head = 'c7'; return j(422, { message: 'Update is not a fast forward' }); } // the duel pushed first
+      assert.equal(JSON.parse(init.body).sha, 'new-on-c7', 'rebuilt on the newest commit'); return j(200, {});
+    }
+    return j(500, {});
+  };
+  const g = createGitSync({ token: 'test-token-' + 'x'.repeat(30), repo: 'me/b', fetchImpl: fake });
+  assert.equal(await g.push([{ name: 'Home.md', data: Buffer.from('a') }, { name: 'c.png', data: Buffer.from([1]) }]), 'pushed 2 files');
+  assert.equal(patches, 2); assert.equal(blobs, 1, 'the picture is not uploaded twice');
+});

@@ -218,7 +218,6 @@ export function createGitSync({ token, repo, branch = 'main', fetchImpl = global
           ref = await call(`/git/ref/heads/${branch}`);
         }
         if (ref.status !== 200) throw new Error(`GitHub: cannot read the ${branch} branch (HTTP ${ref.status})`);
-        const parent = ref.body.object.sha, base = await call(`/git/commits/${parent}`);
         const tree = [];
         for (const f of files) {
           // a note is text: it goes inside the one tree request (no upload call per note); a picture needs its own upload
@@ -227,10 +226,17 @@ export function createGitSync({ token, repo, branch = 'main', fetchImpl = global
           if (blob.status !== 201) throw new Error(`GitHub: saving ${f.name} failed (HTTP ${blob.status})`);
           tree.push({ path: f.name, mode: '100644', type: 'blob', sha: blob.body.sha });
         }
-        const t = await call('/git/trees', { method: 'POST', body: JSON.stringify({ base_tree: base.body.tree.sha, tree }) });
-        const c = await call('/git/commits', { method: 'POST', body: JSON.stringify({ message, tree: t.body.sha, parents: [parent] }) });
-        const u = await call(`/git/refs/heads/${branch}`, { method: 'PATCH', body: JSON.stringify({ sha: c.body.sha }) });
-        if (u.status !== 200) throw new Error(`GitHub: updating ${branch} failed (HTTP ${u.status})`);
+        // Another writer (the duel's notes, your phone) may have moved the branch while this was uploading: then
+        // GitHub refuses the update (422, not a fast-forward) and the commit is rebuilt on the newest one.
+        for (let attempt = 0; ; attempt++) {
+          if (attempt) ref = await call(`/git/ref/heads/${branch}`);
+          const parent = ref.body.object.sha, base = await call(`/git/commits/${parent}`);
+          const t = await call('/git/trees', { method: 'POST', body: JSON.stringify({ base_tree: base.body.tree.sha, tree }) });
+          const c = await call('/git/commits', { method: 'POST', body: JSON.stringify({ message, tree: t.body.sha, parents: [parent] }) });
+          const u = await call(`/git/refs/heads/${branch}`, { method: 'PATCH', body: JSON.stringify({ sha: c.body.sha }) });
+          if (u.status === 200) break;
+          if (u.status !== 422 || attempt >= 3) throw new Error(`GitHub: updating ${branch} failed (HTTP ${u.status})`);
+        }
         last = { at: new Date().toISOString(), files: files.length, ok: true };
         return `pushed ${files.length} file${files.length === 1 ? '' : 's'}`;
       } catch (e) { last = { at: new Date().toISOString(), ok: false, error: hide(e.message) }; log('second brain sync: ' + hide(e.message)); return 'failed: ' + hide(e.message); }

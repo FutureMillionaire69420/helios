@@ -549,3 +549,8 @@ No trade setting changed.
   - `Changes (newest at the bottom)`
   - `Going live`
   - `Obsidian setup`
+
+## v4.4.2: Obsidian sync no longer stalls
+
+- The bot's two note writers (the brain and the DIP vs FCAT duel) push to the same GitHub branch. When one moved the branch while the other was uploading, GitHub refused the update (HTTP 422, not a fast-forward), and the big first upload kept losing that race.
+- The commit is now rebuilt on the newest version and retried, up to 3 times, without uploading anything again.
