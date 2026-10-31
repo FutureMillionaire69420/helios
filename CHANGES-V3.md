@@ -514,3 +514,23 @@ No trade setting changed.
   - the landing-speed test;
   - how to use your pump.fun wallet, and what that means;
   - gate 1 of the sign-off.
+
+## v4.3: DIP vs FCAT duel (paper only)
+
+- Two new paper traders run side by side on every Decu buy, on the same prices, each with its own settings, 3 SOL paper balance, ledger, results and brain. The main paper bot is unchanged; live never builds any of it.
+  - **FCAT** buys as soon as Decu buys. **DIP** waits up to 60 s for the price to come back to Decu's own price (or lower), else skips.
+  - Both: pay at most +20% over Decu's price; market cap $1k-$22k at his buy; Decu's buy at least $75; spotted within 5 s or 5 blocks AND at most 2 other buyers already on-chain ahead; the relaxed holder rule.
+  - Both sell the moment profit reaches +18% in the first 15 s after their own buy, +24.5% after that, and the moment Decu sells (his sell decoded straight from the websocket logs). DIP also sells at 20% under Decu's price. No time-based exits; a sell of his the feeds miss is caught by a once-a-minute balance check.
+  - Buyers ahead are counted from the chain ~3 s later, only up to the block the bot decided in (no look-ahead); until then a trade is provisional and is voided if the count fails.
+- **Holder snapshots on every Decu buy** (when spotted and 60 s later): holders, money held by everyone except the dev and the curve, dev share, top-1/top-10 share, holders over $10/$100/$1k, median holding. PumpSwap coins too.
+- **Relaxed holder rule experiment:** your baseline SAFE/RISKY is kept on every coin; the relaxed rule is a separate label (baseline × k, k calibrated on past coins only toward +70% more accepted, never under $500 at $10k). Missing data is counted apart. HOLDER_RELAX=off undoes it.
+- **Brains:** look back (replays), then test a one-setting change forward on Decu buys they have never seen; adopt only when the 90% interval of the extra SOL per buy is above zero after 30+ shared buys; check the old settings after each change and revert if they win. Protected: trade size, paper only, selling at his sell, FCAT's no-stop, DIP's stop, filters only stricter than yours.
+- **Dashboard:** new DIP/FCAT tab (split scoreboard, split calendar, head to head, holdings, latest Decu buys with both decisions, both brains, the holder experiment). What-if: dip triggers (back to his price / 10% off the high / 10% under his price) and holders in depth.
+- **Obsidian:** `machine/DIP vs FCAT/` in the second-brain vault (each brain, days, comparison, holder rule, dip triggers, holders), pushed with the vault's GitHub sync when it is set up.
+- **PUMP_API_KEY:** optional key for the official pump.fun Developer API (read-only, server-side only).
+
+## v4.3.1: Obsidian sync that is really automatic
+
+- **The first sync to a GitHub repository uploads the whole vault once,** and the bot remembers it per repository. Before, only notes that changed were sent, so everything written before GitHub was set up never reached Obsidian.
+- **Notes go up as text inside one request.** Chart pictures go 30 per push, inside GitHub's upload limits, so a big first upload finishes over the next pushes instead of failing.
+- **OBSIDIAN.md:** the setup in three parts: GitHub, Render, Obsidian on your iPhone.

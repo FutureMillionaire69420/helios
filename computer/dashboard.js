@@ -5,6 +5,7 @@ import { createWatch } from './watch.js';
 import { watchWallets, isPhone, openInApp } from './wallet.js';
 import { lineChart, barChart, numbersTable, renderAnalytics } from './charts.js';
 import * as C from './dashcalc.mjs';
+import { renderDuel, renderDuelWhatIf } from './duelview.js';
 
 const $ = (id) => document.getElementById(id);
 const h = (tag, cls, text, parent) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; if (parent) parent.append(n); return n; };
@@ -15,7 +16,9 @@ const S = {
   trades: new Map(), tradesMeta: null, tab: 'home', filters: { ...C.FILTER_DEFAULTS }, shown: 40, wf: structuredClone(C.WHATIF_DEFAULTS), wfRange: 'all', evFilter: 'all',
   lastOk: 0, wallet: null, botBalance: null, at: {},
 };
-const TABS = ['home', 'trades', 'whatif', 'calendar', 'brain', 'bot'];
+const TABS = ['home', 'trades', 'whatif', 'calendar', 'duel', 'brain', 'bot'];
+const DUEL_UI = { y: null, m: null, sel: null, hold: null, rerender: () => { renderDuelTab(); if (S.tab === 'whatif') renderDuelWhatIf($('wf-duel'), S.duel, DUEL_UI); } };
+function renderDuelTab() { if (S.tab === 'duel') renderDuel($('duel-root'), S.duel, DUEL_UI); }
 
 // ---------- server ----------
 class AuthError extends Error {}
@@ -103,6 +106,7 @@ function setTab(tab, { push = true } = {}) {
   if (['trades', 'whatif', 'calendar'].includes(tab) && !S.tradesMeta) poll.trades();
   if (tab === 'calendar') poll.goalEntries();
   if (tab === 'bot') poll.analytics();
+  if (tab === 'duel' || tab === 'whatif') poll.duel();
   if (tab === 'brain' || tab === 'bot') poll.research();
 }
 for (const b of document.querySelectorAll('.tab')) b.onclick = () => setTab(b.dataset.tab);
@@ -119,6 +123,7 @@ function failed(e) {
 }
 const poll = {
   async status() { try { S.status = await api('/api/status'); S.lastOk = Date.now(); renderHeader(); if (S.tab === 'home') renderHome(); if (S.tab === 'bot') renderBot(); } catch (e) { failed(e); renderHeader(); } },
+  async duel() { try { S.duel = await api('/api/duel'); if (S.tab === 'duel') renderDuelTab(); if (S.tab === 'whatif') renderDuelWhatIf($('wf-duel'), S.duel, DUEL_UI); } catch (e) { failed(e); } },
   async goal() { try { S.goal = await api('/api/goal'); if (S.tab === 'home') renderHero(); } catch (e) { failed(e); } },
   async goalEntries() { try { const g = await api('/api/goal?entries=1'); S.goal = g; S.goalEntries = g; if (S.tab === 'calendar') renderCalendar(); } catch (e) { failed(e); } },
   async research() { try { S.research = await api('/api/research'); if (S.tab === 'brain') renderBrain(); if (S.tab === 'bot') renderBot(); if (S.tab === 'home') renderFeed(); } catch (e) { failed(e); } },
@@ -143,6 +148,7 @@ setInterval(() => {
   if (every('trades', 30000)) poll.trades();
   if (S.tab === 'calendar' && every('entries', 60000)) poll.goalEntries();
   if (S.tab === 'bot' && every('analytics', 60000)) poll.analytics();
+  if ((S.tab === 'duel' || S.tab === 'whatif') && every('duel', 10000)) poll.duel();
 }, 1000);
 document.addEventListener('visibilitychange', () => { if (visible()) poll.all(); });
 
@@ -165,7 +171,7 @@ function renderHeader() {
 
 function render() {
   renderHeader();
-  ({ home: renderHome, trades: renderTrades, whatif: renderWhatIf, calendar: renderCalendar, brain: renderBrain, bot: renderBot })[S.tab]?.();
+  ({ home: renderHome, trades: renderTrades, whatif: renderWhatIf, calendar: renderCalendar, duel: renderDuelTab, brain: renderBrain, bot: renderBot })[S.tab]?.();
 }
 
 // ================= HOME =================

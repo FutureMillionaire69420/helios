@@ -68,9 +68,13 @@ test('GitHub sync: an empty private repo is started, then ONE commit per sync; t
     return j(500, { message: `boom ${TOKEN}` });
   };
   const g = createGitSync({ token: TOKEN, repo: 'me/decu-brain', fetchImpl: fake });
+  assert.equal(g.repo, 'me/decu-brain'); assert.equal(g.branch, 'main');
   assert.equal(await g.push([{ name: 'Home.md', data: Buffer.from('a') }, { name: 'machine/daily/2026-10-25.md', data: Buffer.from('b') }]), 'pushed 2 files');
+  assert.equal(calls.filter((c) => /\/git\/blobs$/.test(c.url)).length, 0, 'notes are text: sent inside the tree, no upload call each');
   assert.ok(calls.every((c) => c.auth === `Bearer ${TOKEN}` && !c.url.includes(TOKEN)));
   assert.equal(calls.filter((c) => /\/git\/commits$/.test(c.url)).length, 1, 'one commit');
+  await g.push([{ name: 'Home.md', data: Buffer.from('c') }, { name: 'machine/charts/x.png', data: Buffer.from([137, 80, 78, 71]) }]);
+  assert.equal(calls.filter((c) => /\/git\/blobs$/.test(c.url)).length, 1, 'a picture is uploaded on its own');
   const bad = createGitSync({ token: TOKEN, repo: 'me/x', fetchImpl: async () => ({ status: 500, json: async () => ({}) }) });
   const r = await bad.push([{ name: 'a.md', data: Buffer.from('a') }]);
   assert.match(r, /^failed/); assert.ok(!r.includes(TOKEN)); assert.equal(bad.status().ok, false);
@@ -94,5 +98,33 @@ test('the brain writes its thinking as notes after every bought trade, and the w
   const z = b.vaultZip(); assert.equal(z.readUInt32LE(0), 0x04034b50);
   assert.ok(z.includes(Buffer.from('Decu Brain/Home.md')));
   assert.ok(b.vaultStatus().files >= 5);
+  b.stop();
+});
+
+test('first GitHub sync: the whole vault goes up once per repository, pictures 30 per push; after that only changes', async () => {
+  const dir = tmp(), v = path.join(dir, 'vault'), rules = { maxPayPct: 15, stopLossPct: 20, gainGatePct: 15 };
+  // a vault written before GitHub was set up: notes and 40 chart pictures already on disk
+  fs.mkdirSync(path.join(v, 'machine/charts'), { recursive: true }); fs.mkdirSync(path.join(v, 'machine/trades'), { recursive: true });
+  for (let i = 0; i < 40; i++) fs.writeFileSync(path.join(v, `machine/charts/c${i}.png`), Buffer.from([137, 80, 78, 71, i]));
+  fs.writeFileSync(path.join(v, 'machine/trades/old trade.md'), '# an old trade');
+  const pushes = [];
+  const gitSync = (repo) => ({ repo, branch: 'main', maxBlobs: 30, status: () => null, push: async (files) => { pushes.push(files.map((f) => f.name)); return `pushed ${files.length} files`; } });
+  const brain = (repo) => createThinkingBrain({ file: path.join(dir, 'mem.json'), study: { records: [], brain: createBrain({ buySol: 0.1 }) }, mode: 'paper', rules, defaults: { ...rules }, solUsd: () => 100, vaultDir: v, gitSync: gitSync(repo), vaultSyncMin: 0 });
+  let b = brain('me/decu-brain');
+  await b.pushVault();
+  assert.ok(pushes[0].includes('machine/trades/old trade.md'), 'notes written before the sync existed go up too');
+  assert.equal(pushes[0].filter((p) => p.endsWith('.png')).length, 30, 'at most 30 pictures in one push');
+  await b.pushVault();
+  assert.equal(pushes[1].filter((p) => p.endsWith('.png')).length, 10, 'the rest in the next push');
+  assert.equal(await b.pushVault(), null, 'all up: nothing left');
+  b.stop();
+  b = brain('me/decu-brain'); // a restart: already uploaded to this repository
+  const before = pushes.length; await b.pushVault();
+  const again = pushes.slice(before).flat();
+  assert.ok(!again.includes('machine/trades/old trade.md') && !again.some((p) => p.endsWith('.png')), 'not uploaded again: only notes that changed (Home carries its update time)');
+  b.stop();
+  b = brain('me/another-repo'); // a new repository gets everything once
+  await b.pushVault();
+  assert.ok(pushes.at(-1).includes('machine/trades/old trade.md'));
   b.stop();
 });

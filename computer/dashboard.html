@@ -43,6 +43,7 @@
     <button class="tab" data-tab="trades"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span>Trades</span></button>
     <button class="tab" data-tab="whatif"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>What-if</span></button>
     <button class="tab" data-tab="calendar"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg><span>Calendar</span></button>
+    <button class="tab" data-tab="duel"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="15" rx="2"/><path d="M12 5v15M3 10h18M7 3v4M17 3v4"/></svg><span>DIP/FCAT</span></button>
     <button class="tab" data-tab="brain"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2.2 5.6L20 9.5l-4.4 3.8L17 19l-5-3-5 3 1.4-5.7L4 9.5l5.8-.9z"/></svg><span>Brain</span></button>
     <button class="tab" data-tab="bot"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1L7 17M17 7l2.1-2.1"/></svg><span>Bot</span></button>
   </nav>
@@ -190,6 +191,7 @@
         <article class="card"><div class="card-head"><h2>What each rule removes</h2></div><div id="wf-removed"></div></article>
         <article class="card"><div class="card-head"><h2>Older vs newer trades</h2></div><div id="wf-split"></div></article>
       </div>
+      <div id="wf-duel"></div>
       <div class="wf-bar" id="wf-bar" role="status" aria-live="polite"></div>
       <p class="fine pad">The tester ignores limits it cannot replay (max open coins, daily caps, a buy that would have failed). A rule found on past trades can fit them by luck: trust a rule only when it also wins on the newer trades.</p>
     </section>
@@ -226,6 +228,11 @@
         <div class="card-head"><h2>What it takes to reach the Rolex</h2></div>
         <div id="path-body"></div>
       </article>
+    </section>
+
+    <!-- ================= DIP vs FCAT ================= -->
+    <section class="view" id="view-duel" data-title="DIP vs FCAT" hidden>
+      <div id="duel-root"></div>
     </section>
 
     <!-- ================= BRAIN ================= -->

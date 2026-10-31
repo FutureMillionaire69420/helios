@@ -8,7 +8,9 @@ import {PUMP_TOKEN,QUOTES} from './solscan.mjs';
 import {createStudy,summaryText} from './study.mjs';
 import {buildAnalytics,digestMessages} from './analytics.mjs';
 import {createThinkingBrain,createBackup,restoreIfEmpty} from './brain.mjs';
-import {createGitSync} from './vault.mjs';
+import {createGitSync,createVault} from './vault.mjs';
+import {createDuel} from './duel.mjs';
+import {createPumpApi} from './pumpapi.mjs';
 import {tradeRows} from './dashcalc.mjs';
 import {createGoal} from './goal.mjs';
 import {buyContextFromLogs,tokensOut,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache,createSellDesk,decodeBondingCurve,quotedInSol,PUMP,TOKEN,TOKEN_2022} from './pumpbuild.mjs';
@@ -164,7 +166,7 @@ export async function startRuntime(k, {demo=false}={}) {
   try { if (fs.statSync(k.config.logFile).size > 50e6) fs.renameSync(k.config.logFile, k.config.logFile+'.1'); } catch {}
   const token = val('DASHBOARD_TOKEN','');
   if (!demo && !k.config.dryRun && token.length<24) throw new Error('LIVE requires DASHBOARD_TOKEN of at least 24 characters');
-  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey,k.config.pumpPortalKey,val('GITHUB_VAULT_TOKEN',''),val('GITHUB_BACKUP_TOKEN','')].filter(Boolean);
+  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey,k.config.pumpPortalKey,val('GITHUB_VAULT_TOKEN',''),val('GITHUB_BACKUP_TOKEN',''),val('PUMP_API_KEY','')].filter(Boolean);
   const clean = v => { let s=JSON.stringify(v); for(const secret of secrets) s=s.split(secret).join('[REDACTED]'); return JSON.parse(k.redact(s)); };
   const log = e => {
     // Sell outcomes: was the position closed, and how did the fill compare with the exit trigger?
@@ -309,6 +311,22 @@ export async function startRuntime(k, {demo=false}={}) {
       gitSync:demo?null:createGitSync({token:val('GITHUB_VAULT_TOKEN',''),repo:val('GITHUB_VAULT_REPO',''),branch:val('GITHUB_VAULT_BRANCH','main'),log:m=>console.log(m)}), poolFee:(k.config.pumpFeePct ?? 1.25)/100, brainPerDay:number('NTFY_BRAIN_PER_DAY',60), gateSec:number('MAX_HOLD_SEC',15), log:m=>console.log(m)});
     if(c.mode==='paper' && JSON.stringify(rules)!==JSON.stringify(ruleDefaults)) console.log(`brain: paper rules restored from memory: premium cap ${rules.maxPayPct}% · stop -${rules.stopLossPct}% · gate +${rules.gainGatePct}% (settings: ${ruleDefaults.maxPayPct}% / -${ruleDefaults.stopLossPct}% / +${ruleDefaults.gainGatePct}%)`);
   }
+  // DIP vs FCAT DUEL (duel.mjs): two more PAPER traders, side by side on the same Decu buys, each with its own
+  // settings, paper balance, ledger and brain. PAPER ONLY: never built in live (or demo), never touches the
+  // engine, its rules or the study; it only reads. DUEL=off turns it off. HOLDER_RELAX=off undoes the relaxed
+  // holder-rule experiment (both traders then use your baseline HOLDER_RULES).
+  // the official pump.fun Developer API (READ-ONLY; never trades): on only when PUMP_API_KEY is set on the server
+  const pumpApi = demo ? null : createPumpApi({key:val('PUMP_API_KEY','')});
+  const duel = c.mode!=='paper' || demo || val('DUEL','on')==='off' || !k.readCurve || !k.rpc ? null : (()=>{ try {
+    const vdir=val('SECOND_BRAIN_DIR',path.join(path.dirname(studyFile),`second-brain-${c.mode}`));
+    return createDuel({k, mode:c.mode, dir:path.dirname(studyFile), landMs:k.config.paperLandMs ?? number('PAPER_LAND_MS',1000), sideFee, poolFee, pumpSwapFee:number('PUMPSWAP_FEE_PCT',k.config.pumpFeePct ?? 1.25)/100, solUsd,
+      holderRules:holderRuleCfg, creatorOf:m=>creators.get(m), leader:k.config.leader, timezone:c.timezone||'America/New_York', startBalanceSol:number('DUEL_BALANCE_SOL',3), holderWaitMs:number('DUEL_HOLDER_WAIT_MS',2500),
+      holderSnapSec:String(val('DUEL_HOLDER_SNAP_SEC','0,60')).split(',').map(Number).filter(x=>x>=0), minUsd:number('DUEL_MIN_USD',20), powered:false,
+      relax:{on:val('HOLDER_RELAX','on')!=='off', target:1+number('HOLDER_RELAX_MORE_PCT',70)/100, floorUsd:number('HOLDER_RELAX_FLOOR_USD',500), window:200, minSamples:20, every:5},
+      autoTune:val('DUEL_AUTOTUNE','true')!=='false', brainEveryMin:number('DUEL_BRAIN_EVERY_MIN',10),
+      notes:{vault:createVault(vdir,{log:m=>console.log(m)}), gitSync:createGitSync({token:val('GITHUB_VAULT_TOKEN',''),repo:val('GITHUB_VAULT_REPO',''),branch:val('GITHUB_VAULT_BRANCH','main'),log:m=>console.log(m)}), everyMin:number('DUEL_NOTES_EVERY_MIN',10)},
+      log:m=>console.log(m)});
+  } catch(e) { console.log('duel: not started: '+e.message); return null; } })();
   // A Decu buy the bot did not take (filtered, paused, style off, too late, failed): still priced
   // every second for 15 s from a quote of the same size, so the research data has no survivor bias.
   // Read-only; one quote per skipped buy, never on the trading path.
@@ -751,8 +769,10 @@ export async function startRuntime(k, {demo=false}={}) {
           const s={sig,time:ev.timestamp||Date.now()/1000,side:'buy',mint:ev.mint,sol:ev.solAmount/1e9,raw:String(ev.tokenAmount),pump:true,decimals:6,fast:true,vSol:ev.vSol??null,vTok:ev.vTok??null};
           const tp=stampSig(sig,ev.mint,'seenAt',seenAt); if(seenSlot!=null) stampSig(sig,ev.mint,'seenSlot',seenSlot); stampSig(sig,ev.mint,'hisTime',ev.timestamp); if(Number.isInteger(slot)) stampSig(sig,ev.mint,'hisSlot',slot); stampSig(sig,ev.mint,'decodedAt'); tp.source??='websocket (fast path)';
           s.usd=s.sol*(solUsd() ?? await k.getSolUsd()); recordLeaderBuy(s); remember(mintDecimals,s.mint,6); status.fastSignals=(status.fastSignals||0)+1;
+          duel?.onLeaderBuy({...s},{source:'ws',seenAt,seenSlot,hisSlot:slot,trade:buyCtx.get(s.mint)});
           await engine.ingest(s); afterHisBuy(s.mint);
         }
+        if(duel && k.leaderPumpSells) for(const ev of k.leaderPumpSells(logs,k.config.leader)) duel.onLeaderSell({sig,side:'sell',mint:ev.mint,sol:ev.solAmount/1e9},{source:'ws'});
         // His SELL is only acted on once it is confirmed on-chain (full path below, ~0.4 s later), so an
         // unconfirmed or failed sell of his can never make the bot sell. FAST_PATH_SELLS=true restores the old way.
         if(sellAll && fastSells && k.leaderPumpSells) for(const ev of k.leaderPumpSells(logs,k.config.leader)) {
@@ -765,6 +785,7 @@ export async function startRuntime(k, {demo=false}={}) {
     // its numbers (the full path below still runs and is deduplicated). The local builder gets the coin's
     // details from Helius' trade event if it arrives meanwhile, else from one read of the chain. His SELLS
     // still wait for the confirmed transaction, and a PumpSwap buy for the full path, as before.
+    if(source==='pumpportal' && pp?.side==='sell' && pp.mint) duel?.onLeaderSell({sig,side:'sell',mint:pp.mint,sol:pp.sol},{source:'pumpportal'});
     if(source==='pumpportal' && pp && k.config.fastPath!==false && !fastDone.has(sig)) {
       fastDone.add(sig); if(fastDone.size>5000) fastDone.delete(fastDone.values().next().value);
       if(pp.side==='buy') fastBuyOnly=true;
@@ -772,6 +793,7 @@ export async function startRuntime(k, {demo=false}={}) {
         const s={sig,time:Date.now()/1000,side:'buy',mint:pp.mint,sol:pp.sol,raw:String(pp.raw),pump:true,decimals:6,fast:true,via:'pumpportal',vSol:pp.vSol??null,vTok:pp.vTok??null};
         const tp=stampSig(sig,pp.mint,'seenAt',seenAt); if(seenSlot!=null) stampSig(sig,pp.mint,'seenSlot',seenSlot); stampSig(sig,pp.mint,'decodedAt'); tp.source??='PumpPortal feed (fast path)';
         s.usd=s.sol*(solUsd() ?? await k.getSolUsd()); recordLeaderBuy(s); remember(mintDecimals,s.mint,6); status.fastSignals=(status.fastSignals||0)+1; status.pumpportalFast=(status.pumpportalFast||0)+1;
+        duel?.onLeaderBuy({...s},{source:'pumpportal',seenAt,seenSlot});
         await engine.ingest(s); afterHisBuy(s.mint);
       } catch(e) { engine.event('error',{leaderSignature:sig,message:'PumpPortal fast path: '+e.message}); }
     }
@@ -789,6 +811,7 @@ export async function startRuntime(k, {demo=false}={}) {
       const venue=k.venueOf?k.venueOf(tx.meta?.logMessages||[]):'?', pumpVenue=['pump.fun','PumpSwap'].includes(venue);
       const all=normalize(tx,k.config.leader,k.detectBuy,k.detectSell), signals=all.filter(s=>!(c.pumpOnly && (s.side==='buy'?!s.pump:!pumpVenue && !engine.d.positions[s.mint])));
       if(signals.length<all.length) status.ignoredVenue=(status.ignoredVenue||0)+1;
+      if(duel) for(const x of all) if(x.side==='sell') duel.onLeaderSell({...x},{source});
       if(k.b58encode && tx.meta?.logMessages && signals.some(s=>s.side==='buy')) try { const ctx=buyContextFromLogs(tx.meta.logMessages,k.config.leader,k.b58encode); if(ctx) { if(!buyCtx.has(ctx.mint)) remember(buyCtx,ctx.mint,ctx); if(ctx.creator && !creators.has(ctx.mint)) remember(creators,ctx.mint,ctx.creator); } } catch {}
       if(!all.length) {
         const u=classifyUnsupported(tx,k.config.leader);
@@ -803,7 +826,7 @@ export async function startRuntime(k, {demo=false}={}) {
       }
       for(const s of signals) {
         if(Number.isInteger(s.decimals)) remember(mintDecimals,s.mint,s.decimals);
-        if(s.side==='buy') { s.usd=s.sol*(solUsd() ?? await k.getSolUsd()); recordLeaderBuy(s); const tp=stampSig(sig,s.mint,'seenAt',seenAt); if(seenSlot!=null) stampSig(sig,s.mint,'seenSlot',seenSlot); stampSig(sig,s.mint,'hisTime',tx.blockTime); if(Number.isInteger(tx.slot)) stampSig(sig,s.mint,'hisSlot',tx.slot); stampSig(sig,s.mint,'decodedAt'); tp.source??=source==='ws'?'websocket':source; }
+        if(s.side==='buy') { s.usd=s.sol*(solUsd() ?? await k.getSolUsd()); recordLeaderBuy(s); duel?.onLeaderBuy({...s},{source,seenAt,seenSlot,hisSlot:tx.slot,gross:true,trade:buyCtx.get(s.mint)}); const tp=stampSig(sig,s.mint,'seenAt',seenAt); if(seenSlot!=null) stampSig(sig,s.mint,'seenSlot',seenSlot); stampSig(sig,s.mint,'hisTime',tx.blockTime); if(Number.isInteger(tx.slot)) stampSig(sig,s.mint,'hisSlot',tx.slot); stampSig(sig,s.mint,'decodedAt'); tp.source??=source==='ws'?'websocket':source; }
         else { study?.leaderSell(s.mint,s); if(sellAll) { s.soldRaw='1'; s.beforeRaw='1'; } }
         await engine.ingest(s);
       }
@@ -833,7 +856,7 @@ export async function startRuntime(k, {demo=false}={}) {
   const pumpPortalStatus=()=>ppFeed ? {on:true,...ppFeed.status()} : {on:false,note:!k.startPumpPortalWatcher?'not set up (no PUMPPORTAL_API_KEY, or PUMPPORTAL_FEED=false): Helius only':powerOff()?'off (power off)':'off'};
   const startData=()=>{
     if(demo || dataRunning) return; dataRunning=true;
-    k.power?.on();
+    k.power?.on(); duel?.power(true);
     stopWatcher=k.startWatcher(onSignature,{log:message=>engine.event('connection',{message}),status});
     stopSolscan=!k.startSolscanWatcher?()=>{}:k.startSolscanWatcher(onSignature,{log:message=>engine.event('connection',{message}),status,schedule:solscanSchedule});
     status.solscan = k.startSolscanWatcher ? {ok:null,note:'starting'} : {ok:false,note:'SOLSCAN_API_KEY not set: Helius only'};
@@ -844,7 +867,7 @@ export async function startRuntime(k, {demo=false}={}) {
   const stopData=()=>{
     if(demo) return; dataRunning=false;
     stopWatcher(); stopSolscan(); stopWatcher=stopSolscan=()=>{}; ppFeed?.stop(); ppFeed=null;
-    k.power?.off();
+    k.power?.off(); duel?.power(false);
     local?.blockhash?.stop(); if(local) local.blockhash=null;
     for(const m of monitors.values()) { try{ m.unwatch?.(); }catch{} } monitors.clear(); // no price checks while off
     status.websocket='off (power off)'; status.solscan={ok:null,note:'off (power off)'};
@@ -1019,6 +1042,7 @@ export async function startRuntime(k, {demo=false}={}) {
       // DASHBOARD DATA (v4): the trade list (one compact row per studied Decu buy, gzip; ?after=ms for the newest only),
       // one trade in full, the Rolex goal, a coin sold from its card, the balance of a wallet connected in the browser.
       if(url.pathname==='/api/ready' && req.method==='GET') return sendJson(req,res,clean(readiness()));
+      if(url.pathname==='/api/duel' && req.method==='GET') return sendJson(req,res,clean(duel ? {...duel.api(), pumpApi:pumpApi?.status() ?? {on:false}} : {on:false, note:c.mode!=='paper'?'The DIP vs FCAT duel runs in PAPER mode only.':'The DIP vs FCAT duel is off (DUEL=off).'}));
       if(url.pathname==='/api/trades' && req.method==='GET') {
         const after=Number(url.searchParams.get('after'))||0, recs=(study?.records||[]).filter(r=>!after||Date.parse(r.time)>after);
         return sendJson(req,res,clean({mode:c.mode,timezone:c.timezone,buySol:c.buySol,solUsd:solUsd(),total:study?.records?.length||0,generatedAt:Date.now(),rows:tradeRows(recs,{closed:engine.d.closedTrades||[],buySol:c.buySol})}));
@@ -1060,7 +1084,7 @@ export async function startRuntime(k, {demo=false}={}) {
       }
       res.writeHead(404);return res.end('Not found');
     }
-    const files={'/':'dashboard.html','/dashboard.js':'dashboard.js','/charts.js':'charts.js','/dashcalc.mjs':'dashcalc.mjs','/watch.js':'watch.js','/wallet.js':'wallet.js','/dashboard.css':'dashboard.css','/manifest.webmanifest':'manifest.webmanifest','/icon.svg':'icon.svg','/rolex.jpg':'rolex.jpg'};
+    const files={'/':'dashboard.html','/dashboard.js':'dashboard.js','/charts.js':'charts.js','/dashcalc.mjs':'dashcalc.mjs','/duelview.js':'duelview.js','/watch.js':'watch.js','/wallet.js':'wallet.js','/dashboard.css':'dashboard.css','/manifest.webmanifest':'manifest.webmanifest','/icon.svg':'icon.svg','/rolex.jpg':'rolex.jpg'};
     if(!files[url.pathname]) {res.writeHead(404);return res.end('Not found');}
     const types={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.webmanifest':'application/manifest+json','.jpg':'image/jpeg'};
     let body; try { body=fs.readFileSync(new URL(files[url.pathname],import.meta.url)); } catch { res.writeHead(404); return res.end('Not found'); }
@@ -1088,5 +1112,5 @@ export async function startRuntime(k, {demo=false}={}) {
     if(Date.now()-(engine.d.analyticsDigestAt||0)>=number('ANALYTICS_DIGEST_HOURS',24)*3600e3 && n>(engine.d.analyticsDigestN||0)) sendDigest().then(m=>engine.event('analytics-digest',{message:m})).catch(()=>{});
   },number('ANALYTICS_CHECK_MS',600_000)); digestTimer?.unref?.();
   const boughtCount=()=>(study?.records||[]).filter(r=>r.taken!==false && !r.skipReason).length;
-  return {engine,server,study,thinking,rules,goal,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;clearInterval(readyTimer);study?.stop?.();goal?.flush?.();clearInterval(digestTimer);thinking?.stop?.();desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,thinking,rules,goal,duel,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;duel?.stop();clearInterval(readyTimer);study?.stop?.();goal?.flush?.();clearInterval(digestTimer);thinking?.stop?.();desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }

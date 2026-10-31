@@ -390,14 +390,22 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
   const vaultZip = () => (vault ? zipFiles(vault.list().map((name) => ({ name: `Decu Brain/${name}`, data: vault.read(name) }))) : null);
   // GITHUB SYNC (optional): the changed notes as one commit every vaultSyncMin minutes, to a private repository
   let syncing = false;
+  // FIRST SYNC to a repository: every note and chart already in the vault goes up once (later only what changes),
+  // remembered per repository. Each push takes every note (text, one request) and at most gitSync.maxBlobs (30)
+  // pictures, so a big first upload stays inside GitHub's limits and finishes over the next pushes.
+  const repoKey = gitSync && vault ? `${gitSync.repo || 'repo'}#${gitSync.branch || 'main'}` : null;
+  let fullSync = false;
+  if (repoKey && mem.vaultSyncedTo !== repoKey) { for (const p of vault.list()) unsynced.add(p); fullSync = true; }
   async function pushVault() {
     if (!gitSync || !vault || syncing || !unsynced.size) return null;
     syncing = true;
-    const paths = [...unsynced]; unsynced.clear();
+    const all = [...unsynced], text = all.filter((p) => !/\.png$/i.test(p)), pics = all.filter((p) => /\.png$/i.test(p)).slice(0, gitSync.maxBlobs ?? 30);
+    const paths = [...text, ...pics]; for (const p of paths) unsynced.delete(p);
     try {
       const files = paths.map((p) => { try { return { name: p, data: vault.read(p) }; } catch { return null; } }).filter(Boolean);
-      const r = await gitSync.push(files, `brain: ${files.length} note${files.length === 1 ? '' : 's'} updated`);
+      const r = await gitSync.push(files, `brain: ${files.length} note${files.length === 1 ? '' : 's'} updated${unsynced.size ? ` (${unsynced.size} more to come)` : ''}`);
       if (/^failed/.test(r)) for (const p of paths) unsynced.add(p); // tried again next time
+      else if (fullSync && !unsynced.size) { fullSync = false; mem.vaultSyncedTo = repoKey; save(); }
       return r;
     } finally { syncing = false; }
   }

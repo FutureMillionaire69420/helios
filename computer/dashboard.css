@@ -108,7 +108,7 @@ input::placeholder { color: var(--ink-3); }
 .banner.warn::before { content: "⚠ "; color: var(--warn); }
 
 /* navigation: bottom bar on phones, sidebar on wide screens */
-.nav { position: fixed; z-index: 20; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(6, 1fr); padding: 6px 4px calc(6px + env(safe-area-inset-bottom)); background: rgba(10,10,9,.92); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-top: 1px solid var(--line); }
+.nav { position: fixed; z-index: 20; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(7, 1fr); padding: 6px 4px calc(6px + env(safe-area-inset-bottom)); background: rgba(10,10,9,.92); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-top: 1px solid var(--line); }
 .nav-brand { display: none; }
 .tab { display: grid; justify-items: center; gap: 3px; padding: 6px 0; border: 0; background: none; color: var(--ink-3); font-size: 10px; font-weight: 600; letter-spacing: .02em; cursor: pointer; border-radius: 12px; }
 .tab svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
@@ -421,3 +421,27 @@ dialog.sheet::backdrop { background: rgba(0,0,0,.62); backdrop-filter: blur(3px)
 @media (min-width: 960px) { .toast { bottom: 24px; left: calc(50% + 114px); } }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* ---------- DIP vs FCAT (duelview.js): split down the middle ---------- */
+.duel-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.duel-split > .side { padding: 4px 12px 4px 0; min-width: 0; }
+.duel-split > .side + .side { padding: 4px 0 4px 12px; border-left: 1px solid var(--line-2); }
+.duel-split .big { font-size: 22px; font-weight: 700; margin-top: 6px; }
+.duel-split .kv { margin-top: 8px; font-size: 12px; }
+.duel-split .side.lead .big { color: var(--gold-hi); }
+.duel-name { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.duel-name b { font-size: 18px; letter-spacing: .04em; }
+.duel-cal .day { padding: 0; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; overflow: hidden; align-content: stretch; }
+.duel-cal .day .dnum { position: absolute; top: 3px; left: 5px; font-size: 10px; z-index: 1; }
+.duel-cal .day .half { display: flex; align-items: flex-end; justify-content: center; padding: 0 1px 4px; min-width: 0; }
+.duel-cal .day .half + .half { border-left: 1px solid rgba(0, 0, 0, .35); }
+.duel-cal .day .half small { font-size: 9px; white-space: nowrap; overflow: hidden; }
+.day-detail { margin-top: 14px; }
+.mini { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.mini span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.duel-cand .duel-split { margin-top: 6px; }
+.duel-cand .tag { white-space: normal; }
+.brains .brain-h { font-size: 12px; margin: 12px 0 4px; color: var(--ink-2); }
+.brains .brain-l { font-size: 12px; margin: 2px 0; overflow-wrap: anywhere; }
+table.t caption { text-align: left; padding: 12px 0 4px; }
+@media (max-width: 560px) { .duel-split > .side { padding-right: 8px; } .duel-split > .side + .side { padding-left: 8px; } .duel-split .big { font-size: 17px; } .brains .brain-l { font-size: 11px; } }

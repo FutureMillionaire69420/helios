@@ -257,7 +257,7 @@ test("PumpPortal builder check: what its sample buy contains, and whether the sa
   const FEE = b58encode(Buffer.alloc(32, 77));
   const withFee = addTransferInstruction(clean, FEE, 50_000); // what a 0.5% builder fee as its own SOL transfer looks like
   let reply = clean, asked = null;
-  setFetch(async (url, init) => { asked = {url, body: JSON.parse(init.body)}; return {ok: true, status: 200, arrayBuffer: async () => Buffer.from(reply).buffer.slice(Buffer.from(reply).byteOffset, Buffer.from(reply).byteOffset + Buffer.from(reply).length)}; });
+  setFetch(async (url, init) => { asked = {url, body: JSON.parse(init.body)}; const b = Buffer.from(reply); return {ok: true, status: 200, arrayBuffer: async () => b.buffer.slice(b.byteOffset, b.byteOffset + b.length)}; }) // one copy: four Buffer.from calls could land in different pool slabs;
   const ok = await checkPumpPortalBuild(MINT, kp.publicKey);
   assert.match(asked.url, /pumpportal\.fun\/api\/trade-local$/); assert.deepEqual([asked.body.action, asked.body.mint, asked.body.amount, asked.body.publicKey], ['buy', MINT, 0.01, kp.publicKey]);
   assert.equal(ok.ok, true); assert.ok(ok.instructions.some((x) => x.program === P.PUMP));

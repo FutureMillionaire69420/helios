@@ -197,7 +197,7 @@ export function zipFiles(entries) {
 
 // ---------- GitHub sync (a private repository just for the brain) ----------
 /** Pushes the changed files as ONE commit (Git data API). An empty repository gets its first commit first. */
-export function createGitSync({ token, repo, branch = 'main', fetchImpl = globalThis.fetch, log = () => {} } = {}) {
+export function createGitSync({ token, repo, branch = 'main', fetchImpl = globalThis.fetch, log = () => {}, maxBlobs = 30 } = {}) {
   if (!token || !repo) return null;
   const api = `https://api.github.com/repos/${repo}`, hide = (t) => String(t).split(token).join('***');
   const call = async (p, init = {}) => {
@@ -206,6 +206,7 @@ export function createGitSync({ token, repo, branch = 'main', fetchImpl = global
   };
   let last = null;
   return {
+    repo, branch, maxBlobs, // maxBlobs: pictures uploaded per push (GitHub limits uploads to ~80 a minute and ~500 an hour)
     status: () => last,
     async push(files, message = 'brain update') {
       try {
@@ -220,6 +221,8 @@ export function createGitSync({ token, repo, branch = 'main', fetchImpl = global
         const parent = ref.body.object.sha, base = await call(`/git/commits/${parent}`);
         const tree = [];
         for (const f of files) {
+          // a note is text: it goes inside the one tree request (no upload call per note); a picture needs its own upload
+          if (/\.(md|txt|json)$/i.test(f.name)) { tree.push({ path: f.name, mode: '100644', type: 'blob', content: Buffer.from(f.data).toString('utf8') }); continue; }
           const blob = await call('/git/blobs', { method: 'POST', body: JSON.stringify({ content: f.data.toString('base64'), encoding: 'base64' }) });
           if (blob.status !== 201) throw new Error(`GitHub: saving ${f.name} failed (HTTP ${blob.status})`);
           tree.push({ path: f.name, mode: '100644', type: 'blob', sha: blob.body.sha });
