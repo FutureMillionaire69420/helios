@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en" data-theme="two-tone">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#070707">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="description" content="Decu copier: the Rolex goal, open coins, every trade, what-if tests and the profit calendar">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/dashboard.css">
+<title>Decu Copier</title>
+</head>
+<body>
+
+<!-- SIGN IN: the dashboard token (never a wallet key) -->
+<section id="login" class="login" hidden>
+  <div class="login-card">
+    <img src="/rolex.jpg" class="login-photo" alt="The goal: Rolex GMT-Master II, two-tone">
+    <p class="eyebrow">Decu copier</p>
+    <h1>The road to the Rolex</h1>
+    <p class="muted">Enter your dashboard token to open the bot.</p>
+    <form id="login-form" class="login-form" autocomplete="off">
+      <label for="token" class="sr">Dashboard token</label>
+      <input id="token" type="password" autocomplete="off" placeholder="Dashboard token" required>
+      <label class="check"><input id="remember" type="checkbox" checked> Remember on this device</label>
+      <button type="submit" class="btn gold wide">Open dashboard</button>
+    </form>
+    <p id="login-error" class="login-error" role="alert"></p>
+    <p class="fine">This field takes only the dashboard token. Your wallet keys stay on the server and are never typed here.</p>
+  </div>
+</section>
+
+<div id="app" class="app" hidden>
+  <!-- SIDE / BOTTOM NAVIGATION -->
+  <nav class="nav" aria-label="Sections">
+    <div class="nav-brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span><b>Decu</b> copier</span>
+    </div>
+    <button class="tab" data-tab="home" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2M9 2h6M9 22h6"/></svg><span>Home</span></button>
+    <button class="tab" data-tab="trades"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span>Trades</span></button>
+    <button class="tab" data-tab="whatif"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>What-if</span></button>
+    <button class="tab" data-tab="calendar"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg><span>Calendar</span></button>
+    <button class="tab" data-tab="duel"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="15" rx="2"/><path d="M12 5v15M3 10h18M7 3v4M17 3v4"/></svg><span>DIP/FCAT</span></button>
+    <button class="tab" data-tab="brain"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2.2 5.6L20 9.5l-4.4 3.8L17 19l-5-3-5 3 1.4-5.7L4 9.5l5.8-.9z"/></svg><span>Brain</span></button>
+    <button class="tab" data-tab="bot"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1L7 17M17 7l2.1-2.1"/></svg><span>Bot</span></button>
+  </nav>
+
+  <div class="main">
+    <header class="top">
+      <div class="top-title">
+        <p class="eyebrow" id="top-eyebrow">Decu copier</p>
+        <h1 id="top-title">Home</h1>
+      </div>
+      <div class="top-status">
+        <span id="pulse" class="pulse" title="Live data"></span>
+        <span id="mode" class="pill">Connecting</span>
+      </div>
+    </header>
+    <p id="banner" class="banner" role="status" hidden></p>
+
+    <!-- ================= HOME ================= -->
+    <section class="view" id="view-home" data-title="Home">
+      <article class="card hero" id="rolex">
+        <div class="hero-watch"><div id="watch" class="watch"></div></div>
+        <div class="hero-body">
+          <p class="eyebrow gold" id="goal-name">The goal · Rolex GMT-Master II</p>
+          <p class="hero-figure" id="goal-live">$0.00</p>
+          <p class="hero-sub" id="goal-sub">of $20,000 · live profit only</p>
+          <div class="meter" id="goal-meter" role="meter" aria-valuemin="0" aria-valuemax="100" aria-label="Live profit toward the Rolex">
+            <div class="meter-fill" id="goal-fill"></div>
+            <div class="meter-ticks" id="goal-ticks"></div>
+          </div>
+          <div class="meter-labels" id="goal-marks"></div>
+          <div class="hero-stats">
+            <div><span>Still to go</span><b id="goal-left">$20,000</b><small id="goal-left-sub"></small></div>
+            <div><span>Pace a day</span><b id="goal-pace">—</b><small>last 7 days</small></div>
+            <div><span>Arrives</span><b id="goal-eta">—</b><small id="goal-eta-sub"></small></div>
+          </div>
+          <div class="practice">
+            <div class="practice-head"><span class="key steel"></span><span>Practice (paper)</span><b id="practice-usd">—</b></div>
+            <div class="meter thin steel"><div class="meter-fill" id="practice-fill"></div></div>
+            <p class="fine" id="practice-note">—</p>
+          </div>
+          <p class="fine" id="goal-open"></p>
+          <p class="legend-line"><span class="key gold"></span>Gold ring: real (live) profit <span class="key steel"></span>Silver ring: practice <span class="key gmt"></span>GMT hand points at your progress</p>
+        </div>
+      </article>
+
+      <div class="tiles" id="home-tiles"></div>
+
+      <article class="card">
+        <div class="card-head"><h2>Open coins</h2><span class="count" id="held-count">—</span></div>
+        <div id="held" class="held"></div>
+      </article>
+
+      <article class="card">
+        <div class="card-head"><h2>Trading</h2><span class="fine" id="quick-state">—</span></div>
+        <div class="quick">
+          <div class="seg" id="quick-style" role="group" aria-label="Trading style">
+            <button data-style="auto">Auto buy + sell</button>
+            <button data-style="manual">Auto buy, I sell</button>
+            <button data-style="off">Off</button>
+          </div>
+          <button class="btn danger" id="quick-emergency">Emergency stop</button>
+        </div>
+      </article>
+
+      <div class="grid2">
+        <article class="card">
+          <div class="card-head"><h2 id="feed-title">Decu's latest buys</h2><button class="link" data-goto="trades">All trades</button></div>
+          <div id="feed" class="rows"></div>
+        </article>
+        <article class="card">
+          <div class="card-head"><h2>Activity</h2><button class="link" data-goto="bot">Everything</button></div>
+          <div id="home-events" class="rows"></div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ================= TRADES ================= -->
+    <section class="view" id="view-trades" data-title="Trades" hidden>
+      <div class="filters" id="trade-filters">
+        <div class="seg" id="tf-range" role="group" aria-label="Date range"></div>
+        <div class="seg" id="tf-result" role="group" aria-label="Result">
+          <button data-v="all">All</button><button data-v="won">Won</button><button data-v="lost">Lost</button>
+        </div>
+        <select id="tf-status" aria-label="Bought or skipped">
+          <option value="all">Bought + skipped</option><option value="bought">Bought only</option><option value="skipped">Skipped only</option>
+        </select>
+        <input id="tf-q" type="search" placeholder="Search coin or mint" aria-label="Search coin or mint">
+        <button class="btn ghost" id="tf-more" aria-expanded="false">More filters <span class="badge" id="tf-count" hidden></span></button>
+        <span class="chip" id="tf-day" hidden></span>
+      </div>
+      <div class="more-filters card" id="tf-panel" hidden>
+        <div class="fgrid">
+          <label>Market cap from ($)<input type="number" min="0" step="1000" data-f="mcapMin" placeholder="any"></label>
+          <label>Market cap to ($)<input type="number" min="0" step="1000" data-f="mcapMax" placeholder="any"></label>
+          <label>Paid above Decu from (%)<input type="number" step="1" data-f="premMin" data-pct placeholder="any"></label>
+          <label>Paid above Decu to (%)<input type="number" step="1" data-f="premMax" data-pct placeholder="any"></label>
+          <label>Bought within (s of Decu)<input type="number" min="0" step="0.5" data-f="delayMax" placeholder="any"></label>
+          <label>Decu's buy at least ($)<input type="number" min="0" step="50" data-f="hisUsdMin" placeholder="any"></label>
+          <label>Buyers ahead of you at most<input type="number" min="0" step="1" data-f="crowdMax" placeholder="any"></label>
+          <label>Holder money rule<select data-f="holder"><option value="any">Any</option><option value="safe">SAFE only</option><option value="risky">RISKY only</option></select></label>
+          <label>How it was sold<select data-f="exit"><option value="any">Any</option><option value="his">At Decu's sell</option><option value="limit">At the time limit</option></select></label>
+          <label class="check"><input type="checkbox" data-f="firstOnly"> Only Decu's first buy of a coin</label>
+        </div>
+        <div class="row-end"><button class="btn ghost" id="tf-reset">Reset filters</button></div>
+      </div>
+      <div class="tiles" id="trade-tiles"></div>
+      <article class="card">
+        <div class="card-head"><h2>Running profit of these trades</h2><span class="fine" id="trade-basis">FCAT estimate</span></div>
+        <div id="trade-chart" class="chart-box"></div>
+      </article>
+      <article class="card flush">
+        <div class="card-head pad"><h2 id="trade-list-title">Trades</h2><button class="btn ghost small" id="tf-csv">Download these (CSV)</button></div>
+        <div id="trade-list" class="tlist"></div>
+        <div class="row-center"><button class="btn ghost" id="tf-showmore" hidden>Show more</button></div>
+      </article>
+    </section>
+
+    <!-- ================= WHAT-IF ================= -->
+    <section class="view" id="view-whatif" data-title="What-if" hidden>
+      <article class="card intro">
+        <h2>Test a rule before you trust it</h2>
+        <p class="muted">Switch rules on and see what they would have made on every Decu buy the bot studied, side by side with what the bot actually did. Buys the bot skipped (too pricey, max coins, paused) can come back in when they pass your rules. Results are the FCAT estimate: selling when Decu sold, fees included. Nothing here changes how the bot trades.</p>
+        <div class="filters">
+          <div class="seg" id="wf-range" role="group" aria-label="Date range"></div>
+          <label class="check"><input type="checkbox" id="wf-skipped" checked> Include buys the bot skipped</label>
+        </div>
+      </article>
+      <div class="grid2 wide-left">
+        <article class="card">
+          <div class="card-head"><h2>Buy only when…</h2><button class="link" id="wf-clear">Clear all</button></div>
+          <div id="wf-rules" class="rules"></div>
+          <div class="card-head sub"><h3>Sell…</h3></div>
+          <div id="wf-exit" class="rules"></div>
+        </article>
+        <div class="stack">
+          <article class="card verdict" id="wf-verdict"></article>
+          <div class="compare" id="wf-compare"></div>
+        </div>
+      </div>
+      <article class="card">
+        <div class="card-head"><h2>Running profit: the bot vs your rules</h2><span class="fine">same Decu buys, in time order</span></div>
+        <div id="wf-chart" class="chart-box"></div>
+      </article>
+      <div class="grid2">
+        <article class="card"><div class="card-head"><h2>What each rule removes</h2></div><div id="wf-removed"></div></article>
+        <article class="card"><div class="card-head"><h2>Older vs newer trades</h2></div><div id="wf-split"></div></article>
+      </div>
+      <div id="wf-duel"></div>
+      <div class="wf-bar" id="wf-bar" role="status" aria-live="polite"></div>
+      <p class="fine pad">The tester ignores limits it cannot replay (max open coins, daily caps, a buy that would have failed). A rule found on past trades can fit them by luck: trust a rule only when it also wins on the newer trades.</p>
+    </section>
+
+    <!-- ================= CALENDAR ================= -->
+    <section class="view" id="view-calendar" data-title="Calendar" hidden>
+      <div class="filters">
+        <div class="seg" id="cal-mode" role="group" aria-label="Live or paper">
+          <button data-v="live">Live (real)</button><button data-v="paper">Paper (practice)</button>
+        </div>
+        <span class="fine" id="cal-basis">Realized profit of closed positions, by day</span>
+      </div>
+      <article class="card cal-card">
+        <div class="cal-head">
+          <button class="btn ghost icon" id="cal-prev" aria-label="Previous month">‹</button>
+          <div><h2 id="cal-month">—</h2><p class="fine" id="cal-month-total">—</p></div>
+          <button class="btn ghost icon" id="cal-next" aria-label="Next month">›</button>
+        </div>
+        <div class="cal" id="cal-grid" role="grid" aria-label="Profit per day"></div>
+        <div class="scale" id="cal-scale"></div>
+        <details class="nums"><summary>Numbers</summary><div id="cal-table"></div></details>
+      </article>
+      <article class="card" id="cal-day" hidden></article>
+      <div class="tiles" id="cal-tiles"></div>
+      <article class="card">
+        <div class="card-head"><h2>Running profit</h2><span class="fine" id="cal-run-sub">by day</span></div>
+        <div id="cal-run" class="chart-box"></div>
+      </article>
+      <div class="grid2">
+        <article class="card"><div class="card-head"><h2>By day of the week</h2></div><div id="cal-wd" class="chart-box"></div></article>
+        <article class="card"><div class="card-head"><h2>By hour of the day</h2></div><div id="cal-hr" class="chart-box"></div></article>
+      </div>
+      <article class="card" id="path">
+        <div class="card-head"><h2>What it takes to reach the Rolex</h2></div>
+        <div id="path-body"></div>
+      </article>
+    </section>
+
+    <!-- ================= DIP vs FCAT ================= -->
+    <section class="view" id="view-duel" data-title="DIP vs FCAT" hidden>
+      <div id="duel-root"></div>
+    </section>
+
+    <!-- ================= BRAIN ================= -->
+    <section class="view" id="view-brain" data-title="Brain" hidden>
+      <div class="grid2">
+        <article class="card rank" id="brain-rank"></article>
+        <article class="card" id="brain-goal"></article>
+      </div>
+      <div class="grid2">
+        <article class="card" id="brain-rules"></article>
+        <article class="card" id="brain-mirror"></article>
+      </div>
+      <article class="card"><div class="card-head"><h2>Paper tests</h2><span class="fine">older trades find the best version, newer ones check it</span></div><div id="brain-tests" class="tests"></div></article>
+      <div class="grid2">
+        <article class="card"><div class="card-head"><h2>Patterns</h2></div><div id="brain-patterns" class="rows"></div></article>
+        <article class="card"><div class="card-head"><h2>Decisions</h2></div><div id="brain-decisions" class="rows"></div></article>
+      </div>
+      <div class="grid2">
+        <article class="card"><div class="card-head"><h2>Market cap at Decu's buy</h2></div><div id="brain-mcap"></div></article>
+        <article class="card"><div class="card-head"><h2>Place in line after Decu</h2></div><div id="brain-line"></div></article>
+      </div>
+      <article class="card">
+        <div class="card-head"><h2>Second brain (Obsidian)</h2></div>
+        <p id="brain-vault" class="muted">—</p>
+        <div class="btn-row">
+          <button class="btn ghost" data-download="/api/brain/vault.zip">Download whole brain (vault)</button>
+          <button class="btn ghost" data-download="/api/brain/findings.md">Download brain findings (note)</button>
+        </div>
+      </article>
+      <article class="card"><div class="card-head"><h2>Research</h2></div><div id="research" class="rows"></div></article>
+    </section>
+
+    <!-- ================= BOT ================= -->
+    <section class="view" id="view-bot" data-title="Bot" hidden>
+      <article class="card">
+        <div class="card-head"><h2>Controls</h2><span class="fine" id="ctl-state">—</span></div>
+        <div class="controls">
+          <div class="control"><div><b>Bot power</b><p class="fine" id="power-state">—</p></div><div class="seg"><button id="power-on">On</button><button id="power-off">Off</button></div></div>
+          <div class="control"><div><b>Trading style</b><p class="fine" id="style-state">—</p></div>
+            <div class="seg" id="style-seg"><button data-style="auto">Auto</button><button data-style="manual">I sell</button><button data-style="off">Off</button></div></div>
+          <div class="control"><div><b>New buys</b><p class="fine" id="buy-state">—</p></div><div class="seg"><button id="resume">Allow</button><button id="pause">Pause</button></div></div>
+          <div class="control"><div><b>Phone alerts</b><p class="fine" id="alerts-state">—</p></div><div class="seg"><button id="alerts-on">On</button><button id="alerts-off">Off</button></div></div>
+          <div class="control danger-zone"><div><b>Emergency</b><p class="fine">Stop all new buys at once, or sell every coin now (LIVE: real sells).</p></div><div class="btn-row"><button class="btn danger" id="emergency">Emergency stop</button><button class="btn danger ghost" id="sellall">Sell everything</button></div></div>
+        </div>
+      </article>
+
+      <article class="card" id="wallets">
+        <div class="card-head"><h2>Wallets</h2></div>
+        <div class="wallet-grid">
+          <div class="wallet-box">
+            <p class="eyebrow">The bot trades from</p>
+            <p class="mono big" id="bot-addr">—</p>
+            <p class="fine" id="bot-wallet-note">—</p>
+            <div class="btn-row"><button class="btn ghost small" id="bot-copy">Copy address</button><a class="btn ghost small" id="bot-solscan" target="_blank" rel="noopener noreferrer">Solscan</a><a class="btn ghost small" id="bot-pumpfun" target="_blank" rel="noopener noreferrer">pump.fun</a></div>
+          </div>
+          <div class="wallet-box" id="my-wallet">
+            <p class="eyebrow">Your wallet</p>
+            <div id="wallet-pick" class="wallet-pick"></div>
+            <div id="wallet-connected" hidden>
+              <p class="mono big" id="my-addr">—</p>
+              <p class="fine" id="my-note">—</p>
+              <div class="btn-row"><button class="btn ghost small" id="my-copy">Copy address</button><button class="btn ghost small" id="my-disconnect">Disconnect</button></div>
+            </div>
+            <p class="fine">Connecting only reads your wallet's public address to check it. The dashboard never asks your wallet to sign anything.</p>
+          </div>
+        </div>
+      </article>
+
+      <div class="grid2">
+        <article class="card"><div class="card-head"><h2>How the bot trades now</h2></div><div id="settings" class="kv"></div></article>
+        <article class="card"><div class="card-head"><h2>Speed &amp; fees</h2></div><div id="speed" class="kv"></div></article>
+      </div>
+      <article class="card"><div class="card-head"><h2>Connections</h2><span class="fine" id="conn-updated">—</span></div><div id="conn" class="rows"></div></article>
+      <article class="card"><div class="card-head"><h2>Pending transactions</h2></div><div id="jobs" class="rows"></div></article>
+      <article class="card">
+        <div class="card-head"><h2>Activity &amp; errors</h2>
+          <div class="seg small" id="ev-filter"><button data-v="all">All</button><button data-v="trades">Trades</button><button data-v="errors">Errors</button></div></div>
+        <div id="events" class="rows scroll"></div>
+      </article>
+      <article class="card">
+        <div class="card-head"><h2>Downloads</h2></div>
+        <div class="btn-row">
+          <button class="btn ghost" data-download="/api/export.csv">All trades (spreadsheet)</button>
+          <button class="btn ghost" data-download="/api/brain/vault.zip">Whole brain (Obsidian vault)</button>
+          <button class="btn ghost" data-download="/api/brain/findings.md">Brain findings (note)</button>
+        </div>
+      </article>
+      <article class="card">
+        <div class="card-head"><h2>This device</h2></div>
+        <div class="control"><div><b>Watch finish</b><p class="fine">The look of the dashboard and the watch.</p></div>
+          <div class="seg" id="theme-seg"><button data-theme="two-tone">Two-tone</button><button data-theme="steel">Steel</button><button data-theme="gold">Gold</button></div></div>
+        <div class="control"><div><b>Signed in</b><p class="fine" id="device-note">—</p></div><button class="btn ghost" id="signout">Sign out</button></div>
+      </article>
+      <article class="card">
+        <div class="card-head"><h2>Analytics</h2><span class="fine" id="analytics-updated">—</span></div>
+        <div id="analytics"></div>
+        <button class="btn ghost" id="analytics-send">Send these charts to my phone</button>
+      </article>
+      <p class="fine pad center" id="footer-note">Paper results are estimates. The server keeps running when you close this page.</p>
+    </section>
+  </div>
+</div>
+
+<!-- one trade in full -->
+<dialog id="trade-dialog" class="sheet" aria-labelledby="td-title">
+  <div class="sheet-head"><div><p class="eyebrow" id="td-eyebrow">Trade</p><h2 id="td-title">—</h2></div><button class="btn ghost icon" id="td-close" aria-label="Close">✕</button></div>
+  <div id="td-body"></div>
+</dialog>
+
+<div id="toast" class="toast" role="status" hidden></div>
+<script type="module" src="/dashboard.js"></script>
+</body>
+</html>
