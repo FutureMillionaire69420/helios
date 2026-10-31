@@ -28,8 +28,10 @@ test('duelmath: fills, dip triggers, exits and the protected limits', () => {
   assert.equal(exitCheck(DEFAULTS.fcat, pos, { now: 16_000, pnl: -0.6, sellPx: P * 0.5 }), null, 'FCAT has no stop');
   assert.equal(exitCheck(DEFAULTS.dip, pos, { now: 16_000, pnl: -0.25, sellPx: P * 0.79 }).rule, 'stop', "DIP stops 20% under Decu's price");
   assert.equal(allowedChange('fcat', 'stopFromHisPct', 20), false, 'a brain can never give FCAT a stop');
-  assert.equal(allowedChange('dip', 'maxPayPct', 25), false, 'never pay more than +20%');
-  assert.equal(allowedChange('dip', 'maxBuysAhead', 3), false);
+  assert.equal(allowedChange('fcat', 'maxPayPct', 60), true, 'a brain may loosen a filter (after a forward test)');
+  assert.equal(allowedChange('fcat', 'maxPayPct', 90), false, 'never pay more than +80%');
+  assert.equal(allowedChange('dip', 'maxBuysAhead', 7), false);
+  assert.equal(DEFAULTS.fcat.maxPayPct, 50, 'FCAT may pay up to +50% (at +20% it never bought)');
   assert.equal(allowedChange('dip', 'tpEarlyPct', 21), true);
   const chk = entryChecks({ hisUsd: 50, hisMcapUsd: 30000, secAtSeen: 9, blocksAtSeen: 30, crowd: { status: 'pending' }, holder0: { status: 'failed' } }, DEFAULTS.fcat);
   assert.deepEqual(chk.fails, ['hisUsd', 'mcap', 'timing', 'data:holder']);
@@ -148,11 +150,11 @@ test('trade events: every pump.fun trade in the logs, any user', () => {
   assert.deepEqual(ev.map((e) => [e.mint, e.user, e.isBuy]), [['MintA', 'bob', true]]);
 });
 
-test('the brain looks back only at buys its filters let through and proposes one change at a time', () => {
+test('the brain looks back at every recorded Decu buy and proposes single changes (plus at most one pair)', () => {
   const recs = [...Array(25)].map((_, i) => ({ id: `c${i}`, hisTime: 1000 + i, seenAt: (1000 + i) * 1000 + 500, P, path: [[0, post.vSol, post.vTok], [3000, ...Object.values(withSol(i % 2 ? 36e9 : 33e9))], [20000, ...Object.values(withSol(30e9))]], hisSell: { sec: 25 }, hisUsd: 148, hisMcapUsd: 4500, secAtSeen: 0.5, blocksAtSeen: 1, crowd: { status: 'done', buysAhead: 0 }, holder0: { status: 'done', verdict: { relaxedPass: true, safe: true } }, decisions: { fcat: { status: 'bought' } } }));
   const lb = lookBack('fcat', DEFAULTS.fcat, recs, { fee: () => FEE, sideFee: () => 0.001, landMs: 500 });
   assert.equal(lb.n, 25); assert.ok(lb.ideas.length > 5);
-  assert.ok(lb.ideas.every((x) => Object.keys(x.diff).length === 1));
+  assert.ok(lb.ideas.filter((x) => Object.keys(x.diff).length > 1).length <= 1);
   assert.ok(!lb.ideas.some((x) => 'stopFromHisPct' in x.diff), 'never proposes a stop for FCAT');
 });
 
@@ -200,4 +202,28 @@ test('pump.fun developer API: off without PUMP_API_KEY; the key only goes in the
   assert.deepEqual(await api.get('/positions', { wallet: 'DECU' }), { ok: 1 });
   assert.equal(seen[0].auth, 'Bearer pf_live_secret'); assert.ok(!seen[0].url.includes('secret'));
   assert.equal(api.status().remaining, '119');
+});
+
+test('the FCAT brain can find a LOOSER price cap when the buys it skipped would have won', () => {
+  // the price is ~+35-40% over Decu's when a copy lands, then runs to +60%: at +20% FCAT never buys, at +50% it wins
+  const fill = withSol(36e9), prem = buyPriceNow(fill, 0.0995, FEE) / P - 1;
+  assert.ok(prem > 0.2 && prem < 0.5, `fill premium ${prem}`);
+  const recs = [...Array(25)].map((_, i) => ({ id: `c${i}`, hisTime: 1000 + i, seenAt: (1000 + i) * 1000 + 500, P, path: [[0, post.vSol, post.vTok], [400, fill.vSol, fill.vTok], [5000, ...Object.values(withSol(46e9))], [20000, ...Object.values(withSol(46e9))]], hisSell: { sec: 25 }, hisUsd: 148, hisMcapUsd: 4500, secAtSeen: 0.5, blocksAtSeen: 1, crowd: { status: 'done', buysAhead: 0 }, holder0: { status: 'done', verdict: { relaxedPass: true, safe: true } }, decisions: { fcat: { status: 'skipped', fails: ['pay'] } } }));
+  const lb = lookBack('fcat', { ...DEFAULTS.fcat, maxPayPct: 20 }, recs, { fee: () => FEE, sideFee: () => 0.001, landMs: 500 });
+  const best = lb.ideas.find((x) => 'maxPayPct' in x.diff);
+  assert.ok(best.diff.maxPayPct > 20 && best.meanDiff > 0.1, JSON.stringify(best));
+});
+
+test('saved paper state from before rev 2: FCAT\'s old +20% cap gives way to +50% once, logged as a new version', async (t) => {
+  const dir = fs.mkdtempSync('duel-'), { k } = fakeChain();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(`${dir}/duel-paper.json`, JSON.stringify({ v: 1, variants: [{ id: 'fcat', role: 'main', p: { ...DEFAULTS.fcat, maxPayPct: 20 }, version: 1, balance: 3, open: [] }] }));
+  let duel = createDuel(opts(k, dir));
+  assert.equal(duel.variants.get('fcat').p.maxPayPct, 50); assert.equal(duel.variants.get('fcat').version, 2);
+  duel.stop();
+  duel = createDuel(opts(k, dir)); // saved again as rev 2: a cap the brain chose later is kept
+  duel.variants.get('fcat').p.maxPayPct = 20; duel.stop();
+  duel = createDuel(opts(k, dir));
+  assert.equal(duel.variants.get('fcat').p.maxPayPct, 20, 'only once');
+  duel.stop();
 });

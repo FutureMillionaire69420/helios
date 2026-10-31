@@ -12,47 +12,48 @@
 //     clear difference". After an adoption the old settings keep running for a while: if they win, it reverts.
 import { DEFAULTS, LIMITS, allowedChange, replay, bootstrapMean, evidence, summarize, fin, CHECK_NAMES, isMissing, entryChecks } from './duelmath.mjs';
 
+// The values a brain tries, in BOTH directions around your numbers (each one must still win a forward test).
 const GRID = {
-  common: { tpEarlyPct: [12, 15, 21, 25], tpLatePct: [20, 30, 40], tpEarlySec: [10, 20], maxBuysAhead: [0, 1], hisUsdMin: [150, 300], mcapMax: [12000, 15000], mcapMin: [3000, 5000] },
+  common: { tpEarlyPct: [10, 12, 15, 21, 25, 30], tpLatePct: [18, 20, 30, 40, 60], tpEarlySec: [10, 20, 30], maxBuysAhead: [0, 1, 3, 4], hisUsdMin: [40, 150, 300], mcapMax: [12000, 15000, 30000, 45000], mcapMin: [500, 3000, 5000] },
   dip: { dipPct: [5, 10], dipWindowSec: [30, 45], stopFromHisPct: [15, 25] },
-  fcat: { maxPayPct: [10, 15] },
+  fcat: { maxPayPct: [20, 30, 40, 60, 70] },
 };
-const FILTER_KEYS = ['maxBuysAhead', 'hisUsdMin', 'mcapMax', 'mcapMin', 'maxPayPct'];
 const pct = (x, d = 1) => (fin(x) ? `${x < 0 ? '−' : '+'}${Math.abs(x * 100).toFixed(d)}%` : '—');
 const sol = (x, d = 3) => (fin(x) ? `${x < 0 ? '−' : '+'}${Math.abs(x).toFixed(d)} SOL` : '—');
 const PARAM_NAMES = { tpEarlyPct: 'early take-profit %', tpEarlySec: 'early window (s)', tpLatePct: 'later take-profit %', maxBuysAhead: 'max buyers ahead', hisUsdMin: "Decu's buy at least ($)", mcapMax: 'market cap at most ($)', mcapMin: 'market cap at least ($)', dipPct: 'dip depth under his price %', dipWindowSec: 'dip window (s)', stopFromHisPct: 'stop under his price %', maxPayPct: 'pay at most %' };
 export const paramText = (diff) => Object.entries(diff || {}).map(([k, v]) => `${PARAM_NAMES[k] || k} ${v}`).join(', ');
 
 /** The Decu buys a trader's FILTERS let through (its buy trigger and exits decide the rest). */
-const passedFilters = (rec, vid) => { const d = rec.decisions?.[vid]; if (!d) return false; if (d.status === 'bought') return true; return d.status === 'skipped' && (d.fails || []).every((f) => ['no-dip', 'pay', 'his-sold', 'holding', 'balance'].includes(f)); };
 const replayInput = (rec, api) => ({ path: rec.path, P: rec.P, hisSellMs: rec.hisSell?.sec != null ? rec.hisSell.sec * 1000 : null, fee: api.fee(), sideFee: api.sideFee(), seenMs: Math.max(0, (rec.seenAt || rec.hisTime * 1000) - rec.hisTime * 1000), landMs: api.landMs });
 const passesNew = (rec, p) => entryChecks({ ...rec, crowd: rec.crowd, holder0: rec.holder0 }, p, { filters: true }).fails.length === 0;
 
 /** Look back: one-setting changes replayed on recent buys. -> [{diff, n, meanDiff}] best first. */
 export function lookBack(strategy, p, recs, api, { minN = 20 } = {}) {
-  const pop = recs.filter((r) => Array.isArray(r.path) && r.path.length > 2 && fin(r.P) && passedFilters(r, strategy)).slice(-300);
+  // EVERY recorded Decu buy with a price path, not only those today's filters let through: that is how a brain
+  // can see what a LOOSER filter would have bought, as well as what a stricter one would have avoided.
+  const pop = recs.filter((r) => Array.isArray(r.path) && r.path.length > 2 && fin(r.P)).slice(-300);
   if (pop.length < minN) return { n: pop.length, ideas: [] };
-  const base = pop.map((r) => replay(p, replayInput(r, api)));
+  const retOf = (q, r) => { if (!passesNew(r, q)) return 0; const t = replay(q, replayInput(r, api)); return t?.taken && !t.open ? t.ret : 0; };
+  const base = pop.map((r) => retOf(p, r));
+  const score = (diff) => {
+    const trial = { ...p, ...diff }, diffs = pop.map((r, i) => retOf(trial, r) - base[i]);
+    return { diff, n: pop.length, meanDiff: diffs.reduce((x, y) => x + y, 0) / diffs.length, changed: diffs.filter((x) => Math.abs(x) > 1e-9).length };
+  };
   const ideas = [];
   const grid = { ...GRID.common, ...(GRID[strategy] || {}) };
   for (const [key, values] of Object.entries(grid)) for (const value of values) {
     if (value === p[key] || !allowedChange(strategy, key, value)) continue;
-    if (FILTER_KEYS.includes(key) && !stricter(key, value, p)) continue; // filters may only get stricter
-    const trial = { ...p, [key]: value };
-    const diffs = pop.map((r, i) => {
-      const b = base[i], a = b?.taken && !b.open ? b.ret : 0;
-      if (FILTER_KEYS.includes(key) && !passesNew(r, trial)) return 0 - a;
-      const t = replay(trial, replayInput(r, api)); return (t?.taken && !t.open ? t.ret : 0) - a;
-    });
-    const m = diffs.reduce((x, y) => x + y, 0) / diffs.length;
-    ideas.push({ diff: { [key]: value }, n: pop.length, meanDiff: m, changed: diffs.filter((x) => Math.abs(x) > 1e-9).length });
+    ideas.push(score({ [key]: value }));
   }
   ideas.sort((a, b) => b.meanDiff - a.meanDiff);
+  // the two best single changes on different settings, together: changes that help apart may help more together
+  const good = ideas.filter((i) => i.meanDiff > 0.005 && i.changed >= 5);
+  const second = good.find((i) => Object.keys(i.diff)[0] !== Object.keys(good[0]?.diff || {})[0]);
+  if (good[0] && second) { const pair = score({ ...good[0].diff, ...second.diff }); if (pair.meanDiff > good[0].meanDiff) ideas.unshift(pair); }
   return { n: pop.length, ideas };
 }
-const stricter = (key, value, p) => (key === 'maxBuysAhead' || key === 'mcapMax' || key === 'maxPayPct' ? value < p[key] : value > p[key]);
 
-export function createDuelBrain({ strategy, api, log = () => {}, minForward = 30, maxForward = 80, maxActive = 2 }) {
+export function createDuelBrain({ strategy, api, log = () => {}, minForward = 30, maxForward = 80, maxActive = 4 }) {
   const label = strategy.toUpperCase();
   let mem = { experiments: [], decisions: [], nextId: 1, lookBack: null };
   let cached = null, dirty = true, tradesSince = 0;
@@ -171,7 +172,7 @@ export function createDuelBrain({ strategy, api, log = () => {}, minForward = 30
     const newestX = [...mem.experiments].reverse().find((e) => e.result || e.status === 'testing');
     const newest = newestX ? { id: newestX.id, diff: newestX.diff, kind: newestX.kind, status: newestX.status, result: newestX.result || forward(newestX), since: newestX.startedAt } : null;
     const optimizing = Object.keys({ ...GRID.common, ...(GRID[strategy] || {}) }).filter((k) => LIMITS[k]).map((k) => ({ key: k, name: PARAM_NAMES[k] || k, now: m.p[k], range: LIMITS[k] }));
-    const protectedList = ['trade size 0.1 SOL', 'paper only', 'sells when Decu sells', strategy === 'fcat' ? 'no stop-loss' : 'keeps a stop under his price', 'filters only get stricter than yours', 'holder rule never under $500 at $10k'];
+    const protectedList = ['trade size 0.1 SOL', 'paper only', 'sells when Decu sells', strategy === 'fcat' ? 'no stop-loss' : 'keeps a stop under his price', 'filters move only after winning a forward test', 'holder rule never under $500 at $10k'];
     return {
       strategy, label, version: m.version, params: m.p, defaults: DEFAULTS[strategy], autoTune: api.autoTune, updated: new Date(now()).toISOString(),
       summary: s, evidence: evidence(trades.map((t) => t.ret)), optimizing, protected: protectedList,

@@ -44,16 +44,19 @@ const COMMON = {
 };
 export const DEFAULTS = {
   dip: { ...COMMON, kind: 'dip', dipTrigger: 'his-price', dipPct: 0, offHighPct: 10, dipWindowSec: 60, stopFromHisPct: 20 },
-  fcat: { ...COMMON, kind: 'fcat', stopFromHisPct: null },
+  // FCAT pays up to +50%: by the time any copy lands (~1 s) the price is a median 32% above Decu's (2026-10-30/31,
+  // 50 buys), so at +20% FCAT never bought. Its brain moves this either way once a forward test proves it.
+  fcat: { ...COMMON, kind: 'fcat', stopFromHisPct: null, maxPayPct: 50 },
 };
-/** What a brain may change, and within which bounds. Everything else is PROTECTED: the trade size, paper
- *  mode, selling at his sell, FCAT having no stop, DIP keeping one, and the filters only ever getting STRICTER
- *  than your numbers (never pay more than +20%, never below $75, never outside $1k-$22k, never later than 5 s /
- *  5 blocks, never more than 2 buyers ahead, never a holder rule looser than the $500 floor). */
+/** Bumped when a default changes in a way saved paper state must pick up (duel.mjs migrates on load). */
+export const SETTINGS_REV = 2;
+/** What a brain may change, and within which bounds (paper only). Filters may move EITHER way inside these
+ *  bounds, but only after the change won on Decu buys it had never seen. Still PROTECTED: the trade size, paper
+ *  mode, selling at his sell, FCAT having no stop, DIP keeping one, the holder rule's $500 floor. */
 export const LIMITS = {
-  tpEarlyPct: [10, 35], tpEarlySec: [5, 30], tpLatePct: [15, 60],
-  maxPayPct: [0, 20], mcapMin: [1000, 22000], mcapMax: [1000, 22000], hisUsdMin: [75, 5000],
-  maxBuysAhead: [0, 2], maxSec: [1, 5], maxBlocks: [1, 5],
+  tpEarlyPct: [8, 50], tpEarlySec: [5, 30], tpLatePct: [12, 100],
+  maxPayPct: [0, 80], mcapMin: [500, 50000], mcapMax: [1000, 100000], hisUsdMin: [20, 5000],
+  maxBuysAhead: [0, 6], maxSec: [1, 10], maxBlocks: [1, 10],
   dipPct: [0, 25], dipWindowSec: [15, 60], offHighPct: [5, 30],
   stopFromHisPct: [10, 30], // DIP only (FCAT's stop is protected: none)
 };

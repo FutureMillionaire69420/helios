@@ -534,3 +534,11 @@ No trade setting changed.
 - **The first sync to a GitHub repository uploads the whole vault once,** and the bot remembers it per repository. Before, only notes that changed were sent, so everything written before GitHub was set up never reached Obsidian.
 - **Notes go up as text inside one request.** Chart pictures go 30 per push, inside GitHub's upload limits, so a big first upload finishes over the next pushes instead of failing.
 - **OBSIDIAN.md:** the setup in three parts: GitHub, Render, Obsidian on your iPhone.
+
+## v4.4: FCAT trades, and the duel brains learn in both directions
+
+- **FCAT pays up to +50% over Decu's price** (was +20%). By the time any copy lands, about 1 s after his buy, the price is a median 32% above his (50 buys, 2026-10-30/31), so at +20% FCAT never bought. Saved paper state picks this up once on start (settings rev 2), logged as a new FCAT version.
+- **The duel brains look back at every recorded Decu buy,** not only those today's filters let through, so they can see what a looser filter would have bought as well as what a stricter one avoids.
+- **Filters may move either way** within wider bounds: pay up to +80%, market cap $500 to $100k, Decu's buy ≥ $20, up to 6 buyers ahead, up to 10 s or 10 blocks, take-profits 8–100%. Each change is still adopted only after it wins on 30+ Decu buys it had never seen, with a revert check after.
+- **Wider search:** more values per setting, the best two single changes tried together, and up to 4 tests running at once (was 2).
+- **Still protected:** paper only, the trade size, selling at Decu's sell, FCAT with no stop, DIP with one, and the holder rule's $500 floor. The main bot and every live setting are untouched.

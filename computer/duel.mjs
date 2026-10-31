@@ -19,7 +19,7 @@
 //     PAPER_LAND_MS after the decision, at the curve's price then.
 import fs from 'node:fs';
 import path from 'node:path';
-import { DEFAULTS, entryChecks, isMissing, dipTriggered, exitCheck, markPnl, buyRaw, sellSol, netPrice, buyPriceNow, sellPriceNow, mcapUsd, holderCheck, calibrateK, kFloor, summarize, headToHead, fin, CHECK_NAMES, evidence } from './duelmath.mjs';
+import { DEFAULTS, SETTINGS_REV, entryChecks, isMissing, dipTriggered, exitCheck, markPnl, buyRaw, sellSol, netPrice, buyPriceNow, sellPriceNow, mcapUsd, holderCheck, calibrateK, kFloor, summarize, headToHead, fin, CHECK_NAMES, evidence } from './duelmath.mjs';
 import { dayKey } from './dashcalc.mjs';
 import { createDuelBrain, notePaths, homeNote, brainNote, dayNote, holderNote, dipsNote, holdersNote } from './duelbrain.mjs';
 
@@ -88,7 +88,7 @@ export function createDuel({
   let queue = Promise.resolve();
   const append = (obj) => { const line = JSON.stringify(obj) + '\n'; queue = queue.then(() => fs.promises.appendFile(journalFile, line, { mode: 0o600 })).catch((e) => fault('journal', e)); };
   const snapshotState = () => ({
-    v: 1, savedAt: new Date(now()).toISOString(),
+    v: 1, rev: SETTINGS_REV, savedAt: new Date(now()).toISOString(),
     variants: [...variants.values()].map((v) => ({ id: v.id, label: v.label, strategy: v.strategy, role: v.role, filters: v.filters, p: v.p, version: v.version, createdAt: v.createdAt, parent: v.parent, diff: v.diff, balance: v.balance, open: [...v.open.values()] })),
     holderCal, brains: Object.fromEntries(Object.entries(brains).map(([s, b]) => [s, b.save()])),
   });
@@ -532,7 +532,9 @@ export function createDuel({
     if (saved?.variants) for (const sv of saved.variants) {
       const v = variants.get(sv.id) || (sv.role === 'challenger' ? newVariant(sv) : null);
       if (!v) continue;
-      v.p = { ...v.p, ...sv.p }; v.version = sv.version || v.version; v.createdAt = sv.createdAt || v.createdAt; v.diff = sv.diff || v.diff; v.parent = sv.parent || v.parent;
+      v.p = { ...v.p, ...sv.p }; v.version = sv.version || v.version;
+      // rev 2: FCAT's +20% price cap let nothing through; the old saved cap gives way to the new default once
+      if ((saved.rev || 1) < 2 && v.id === 'fcat' && v.p.maxPayPct === 20) { v.p.maxPayPct = DEFAULTS.fcat.maxPayPct; v.version++; append({ t: 'adopt', strategy: 'fcat', version: v.version, from: { maxPayPct: 20 }, to: v.p, why: 'settings rev 2: FCAT may pay up to +50% (at +20% it never bought)', at: new Date(now()).toISOString() }); } v.createdAt = sv.createdAt || v.createdAt; v.diff = sv.diff || v.diff; v.parent = sv.parent || v.parent;
       if (v.balance != null && fin(sv.balance)) v.balance = sv.balance;
       for (const p of sv.open || []) { if (p.provisional) { if (v.balance != null) v.balance += p.cost; continue; } delete p.exiting; v.open.set(p.mint, p); v.held.add(p.mint); }
       variants.set(v.id, v);
