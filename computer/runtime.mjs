@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import http from 'node:http';
 import zlib from 'node:zlib';
+import {fileURLToPath} from 'node:url';
 import {Engine} from './engine.mjs';
 import {PUMP_TOKEN,QUOTES} from './solscan.mjs';
 import {createStudy,summaryText} from './study.mjs';
@@ -304,7 +305,7 @@ export async function startRuntime(k, {demo=false}={}) {
     skippedAlerts:val('SKIPPED_ALERTS','false'), coinCharts:val('COIN_CHARTS','true')!=='false', meta:k.tokenMeta||null, notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, log:m=>engine?.event('connection',{message:m})});
   if(study) {
     let version='0'; try { version=JSON.parse(fs.readFileSync(new URL('./package.json',import.meta.url),'utf8')).version; } catch {}
-    thinking=createThinkingBrain({file:brainFile,study,mode:c.mode,buySol:c.buySol,rules,defaults:ruleDefaults,version,solUsd,backup:brainBackup,journalFile:studyFile,
+    thinking=createThinkingBrain({docs:[['Bot/Changes (newest at the bottom).md','CHANGES-V3.md'],['Bot/Going live.md','GO-LIVE.md'],['Bot/Obsidian setup.md','OBSIDIAN.md']].map(([p,f])=>({path:p,file:fileURLToPath(new URL('./'+f,import.meta.url))})),file:brainFile,study,mode:c.mode,buySol:c.buySol,rules,defaults:ruleDefaults,version,solUsd,backup:brainBackup,journalFile:studyFile,
       notify:k.notify?(a=>engine?.d.alertsOff?null:k.notify(a)):null, autoTune:c.mode==='paper'&&val('BRAIN_AUTOTUNE','true')!=='false', veto:c.mode==='paper'&&val('BRAIN_VETO','true')!=='false',
       bankrollUsd:number('BRAIN_BANKROLL_USD',1000), goalUsd:number('BRAIN_GOAL_USD',1000), vaultDir:val('SECOND_BRAIN_DIR',path.join(path.dirname(studyFile),`second-brain-${c.mode}`)), vaultSyncMin:number('VAULT_SYNC_MIN',5), noteCharts:val('NOTE_CHARTS','true')!=='false', analysisEveryMin:number('ANALYSIS_CHARTS_EVERY_MIN',15), vaultBackfill:number('VAULT_BACKFILL',300),
       // GITHUB_VAULT_TOKEN + GITHUB_VAULT_REPO (owner/name): a PRIVATE repository just for the brain's notes, pulled by Obsidian's Git plugin

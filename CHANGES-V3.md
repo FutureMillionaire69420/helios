@@ -542,3 +542,10 @@ No trade setting changed.
 - **Filters may move either way** within wider bounds: pay up to +80%, market cap $500 to $100k, Decu's buy ≥ $20, up to 6 buyers ahead, up to 10 s or 10 blocks, take-profits 8–100%. Each change is still adopted only after it wins on 30+ Decu buys it had never seen, with a revert check after.
 - **Wider search:** more values per setting, the best two single changes tried together, and up to 4 tests running at once (was 2).
 - **Still protected:** paper only, the trade size, selling at Decu's sell, FCAT with no stop, DIP with one, and the holder rule's $500 floor. The main bot and every live setting are untouched.
+
+## v4.4.1: the bot's guides in Obsidian
+
+- The vault now has a **Bot** folder, rewritten on every start from the running version and synced like every note:
+  - `Changes (newest at the bottom)`
+  - `Going live`
+  - `Obsidian setup`

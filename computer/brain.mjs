@@ -220,7 +220,7 @@ export async function restoreIfEmpty({ backup, memoryFile, journalFile, log = ()
  */
 export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1, rules, defaults, notify = null, version = '0', solUsd = () => null,
   autoTune = mode === 'paper', veto = mode === 'paper', bankrollUsd = 1000, goalUsd = 1000, tuneEvery = 10, minEvidence = 50, demoteAfter = 10, revertAfter = 20,
-  limits = { maxPayPct: [5, 25], stopLossPct: [10, 30], gainGatePct: [10, 30] }, gateSec = 15, backup = null, backupHours = 24, journalFile = null, brainPerDay = 60, vaultDir = null, gitSync = null, vaultSyncMin = 5, vaultBackfill = 300, noteCharts = true, chartFetch = globalThis.fetch, analysisEveryMin = 15, poolFee = 0.0125, log = () => {}, now = () => Date.now() }) {
+  limits = { maxPayPct: [5, 25], stopLossPct: [10, 30], gainGatePct: [10, 30] }, gateSec = 15, backup = null, backupHours = 24, journalFile = null, brainPerDay = 60, vaultDir = null, gitSync = null, vaultSyncMin = 5, vaultBackfill = 300, docs = [], noteCharts = true, chartFetch = globalThis.fetch, analysisEveryMin = 15, poolFee = 0.0125, log = () => {}, now = () => Date.now() }) {
   const tag = mode === 'live' ? '' : mode === 'paper' ? '[PAPER] ' : '[DEMO] ';
   let mem = null;
   try { mem = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* first run */ }
@@ -383,6 +383,8 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
       files['machine/decisions.md'] = decisionsNote(mem.decisions);
       files['Home.md'] = homeNote({ mode, status: st, records, updated: new Date(now()).toISOString() });
       files['AGENTS.md'] = AGENTS_MD;
+      // the bot's own guides (what changed, going live, this setup), as they are in the running version
+      for (const d of docs) { try { files[d.path] = fs.readFileSync(d.file, 'utf8'); } catch { /* not shipped */ } }
       vaultChanged(vault.sync(files));
     } catch (e) { log('second brain: ' + e.message); }
   }

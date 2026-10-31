@@ -128,3 +128,15 @@ test('first GitHub sync: the whole vault goes up once per repository, pictures 3
   assert.ok(pushes.at(-1).includes('machine/trades/old trade.md'));
   b.stop();
 });
+
+test("the bot's own guides (changes, going live, Obsidian setup) are written into the vault and synced", async () => {
+  const dir = tmp(), rules = { maxPayPct: 15, stopLossPct: 20, gainGatePct: 15 }, pushed = [];
+  fs.writeFileSync(path.join(dir, 'CHANGES.md'), '## v9: something new');
+  const b = createThinkingBrain({ file: path.join(dir, 'mem.json'), study: { records: [], brain: createBrain({ buySol: 0.1 }) }, mode: 'paper', rules, defaults: { ...rules }, solUsd: () => 100, vaultDir: path.join(dir, 'vault'), vaultSyncMin: 0,
+    docs: [{ path: 'Bot/Changes.md', file: path.join(dir, 'CHANGES.md') }, { path: 'Bot/Missing.md', file: path.join(dir, 'nope.md') }],
+    gitSync: { repo: 'me/b', branch: 'main', status: () => null, push: async (files) => { pushed.push(...files.map((f) => f.name)); return 'pushed'; } } });
+  assert.equal(fs.readFileSync(path.join(dir, 'vault/Bot/Changes.md'), 'utf8'), '## v9: something new');
+  assert.ok(!fs.existsSync(path.join(dir, 'vault/Bot/Missing.md')), 'a guide that is not shipped is skipped');
+  await b.pushVault(); assert.ok(pushed.includes('Bot/Changes.md'));
+  b.stop();
+});
