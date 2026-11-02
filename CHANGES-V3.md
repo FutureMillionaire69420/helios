@@ -566,3 +566,12 @@ No trade setting changed.
 - The duel's notes are written every 5 minutes (was 10).
 - **Home → Brain notes:** a card with when the notes last reached Obsidian, and a **Download brain notes (.zip)** button.
 - **OBSIDIAN.md:** why Obsidian matters, the new folders, and what to do when new notes don't show up on the phone.
+
+## v4.6: fewer Helius credits, and a credit meter
+
+- **Main bot price checks:** a check answered by the free pushed price still runs every 0.5 s. One that has to ask Helius runs that fast only in the first 20 s after a buy or within 8 points of the stop-loss; otherwise every 2 s (`PRICE_FAST_SEC`, `PRICE_CALM_MS`).
+- **DIP vs FCAT price watching:** a coin whose pushed price is trusted is re-read only after 30 s of silence, at most every 30 s (was every second after 10 s). Without a push it's read every second for 20 s after a Decu buy or a fill, then every 3 s.
+- **Helius credit meter:** every answered call is counted (DAS reads 10 credits, others 1) by month and day, in `helius-usage.json` next to the state.
+  - Bot → Connections shows the month's use, today and the month's pace.
+  - One phone alert at 80% of `HELIUS_MONTHLY_CREDITS` (1,000,000, the free plan).
+- Nothing turned off: holder snapshots, buyers-ahead counting and the Solscan watcher are unchanged.

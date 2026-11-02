@@ -149,9 +149,12 @@ export function createDuel({
       if (feeds.get(f.mint) !== f || stopped) { f.polling = false; return; }
       try {
         const un = f.unwatch, trusted = f.state?.src === 'push' && un?.ready?.() && !(un.readyAt?.() != null && f.at < un.readyAt());
-        if (powered && (!trusted || now() - f.at > 10_000)) { const s = await readState(f.mint); if (s) onState(f, s, now()); }
+        // a trusted push needs no reads (Helius credits): only a check after 30 s of silence, at most every 30 s
+        if (powered && (!trusted || (now() - f.at > 30_000 && now() - (f.readAt || 0) > 30_000))) { const s = await readState(f.mint); if (s) onState(f, s, now()); }
       } catch (e) { fault('poll', e); }
-      if (feeds.get(f.mint) === f && !stopped) later(busyFeed(f) ? 1000 : 5000, tick); else f.polling = false;
+      // without a push: every second while it matters (20 s after a Decu buy or our fill), then every 3 s
+      const fast = [...f.cands].some((c) => now() - c.hisMs < 20_000) || [...variants.values()].some((v) => { const p = v.open.get(f.mint); return p && now() - p.fillAt < 20_000; });
+      if (feeds.get(f.mint) === f && !stopped) later(fast ? 1000 : busyFeed(f) ? 3000 : 5000, tick); else f.polling = false;
     };
     tick();
   };

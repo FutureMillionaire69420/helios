@@ -130,7 +130,7 @@ test('after a restart, held coins are watched again: stop-loss still protects th
   await first.ws(fx.buy.signature, 'ws', fx.buy.logs); await first.r.engine.idle();
   first.r.engine.d.positions[MINT].boughtAt = Date.now() - 60_000; first.r.engine.save();
   const file = process.env.ENGINE_STATE_FILE; first.r.stop();
-  const again = await bot(t, {MAX_HOLD_SEC: '15', MONITOR_MS: '20', ENGINE_STATE_FILE: file}, async () => price);
+  const again = await bot(t, {MAX_HOLD_SEC: '15', MONITOR_MS: '20', PRICE_CALM_MS: '20', ENGINE_STATE_FILE: file}, async () => price);
   await sleep(120); await again.r.engine.idle();
   assert.equal(again.r.engine.d.positions[MINT].raw, '1000000', 'past 15 s without a known +15%: held for his sell');
   price = 0.08; await sleep(150); await again.r.engine.idle();
@@ -490,4 +490,17 @@ test('a burst of his arbitrage swaps is downloaded 2 at a time, none skipped; hi
   const st = (await statusOf(r)).connection.arb;
   assert.equal(st.seen, 20); assert.equal(st.waiting, 0);
   assert.equal(Object.keys(r.engine.d.positions).length, 0, 'nothing bought');
+});
+
+test('Helius credits: a calm coin that needs Helius is checked every PRICE_CALM_MS, fast only early or near the stop', async (t) => {
+  let calls = 0, price = 0.11;
+  const {r, ws} = await bot(t, {MAX_HOLD_SEC: '0', MONITOR_MS: '20', PRICE_CALM_MS: '300', PRICE_FAST_SEC: '0'}, async () => { calls++; return price; });
+  r.engine.style('auto');
+  await ws(fx.buy.signature, 'ws', fx.buy.logs); await r.engine.idle();
+  r.engine.d.positions[MINT].boughtAt = Date.now() - 60_000;
+  await sleep(200); const c0 = calls; await sleep(650);
+  assert.ok(calls - c0 <= 4, `calm: ${calls - c0} checks in 650 ms (fast would be ~30)`);
+  price = 0.084; // near the stop (−20%): checks speed up again
+  await sleep(700); const c1 = calls; await sleep(200);
+  assert.ok(calls - c1 >= 4 || r.engine.d.positions[MINT].raw === '0', 'near the stop: fast checks (or already sold)');
 });

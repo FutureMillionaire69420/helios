@@ -7,7 +7,7 @@ import {createStream} from './stream.mjs';
 import {holderVerdict, exitSim} from './learn.mjs';
 import {createStudy, research, latencyLine, toCsv} from './study.mjs';
 import crypto from 'node:crypto';
-import {setFetch, setStream, refreshFees, currentFees, solUsdNow, confirm, holderStats, findProgramAddress, b58decode, b58encode, PROGRAMS, startSenderWarm, senderUrl, config, landTest, checkLandTestTx, parseTransaction, TIP_ACCOUNTS} from './copybot.mjs';
+import {heliusUsageNow, rpc, setFetch, setStream, refreshFees, currentFees, solUsdNow, confirm, holderStats, findProgramAddress, b58decode, b58encode, PROGRAMS, startSenderWarm, senderUrl, config, landTest, checkLandTestTx, parseTransaction, TIP_ACCOUNTS} from './copybot.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tmp = (t) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-speed-')); t.after(() => fs.rmSync(d, {recursive: true, force: true})); return path.join(d, 'study.jsonl'); };
@@ -258,4 +258,17 @@ test('landing-speed test: shows the cost and sends nothing without --yes; then o
   const {compileLegacy} = await import('./pumpbuild.mjs');
   const bad = compileLegacy(payer, [{program: '11111111111111111111111111111111', accounts: [{k: payer, s: true, w: true}, {k: b58encode(Buffer.alloc(32, 5)), w: true}], data: Buffer.alloc(12)}], b58encode(Buffer.alloc(32, 9)), b58decode);
   assert.throws(() => checkLandTestTx(bad, payer, null), /unexpected account/);
+});
+
+test('Helius credits are counted: DAS reads 10, other calls 1, refused calls not at all', async (t) => {
+  const saved = {heliusKey: config.heliusKey, rpcUrl: config.rpcUrl};
+  Object.assign(config, {heliusKey: 'k', rpcUrl: 'https://mainnet.helius-rpc.com/?api-key=k'});
+  t.after(() => { setFetch(null); Object.assign(config, saved); });
+  let refuse = false;
+  setFetch(async () => refuse ? {ok: false, status: 429, text: async () => 'max usage reached'} : {ok: true, json: async () => ({jsonrpc: '2.0', id: 1, result: {value: null}})});
+  const before = heliusUsageNow();
+  await rpc('getAccountInfo', ['x']); await rpc('getTokenAccounts', {mint: 'x'});
+  refuse = true; await rpc('getSlot', []).catch(() => {});
+  const after = heliusUsageNow();
+  assert.equal(after.credits - before.credits, 11); assert.equal(after.today - before.today, 11); assert.equal(after.limit, 1_000_000);
 });

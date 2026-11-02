@@ -632,10 +632,10 @@ export async function startRuntime(k, {demo=false}={}) {
     const valueNow=async(p)=>{
       // a push from before a websocket reconnect may have missed trades made while it was down: poll until the next one
       const since=m.unwatch?.readyAt?.();
-      if(m.pushed && !m.pushed.curve.complete && m.unwatch?.ready?.() && !(since!=null && m.pushed.at<since) && k.curveSell) { status.priceChecks.push++; return k.curveSell(m.pushed.curve,Number(p.raw)); }
+      if(m.pushed && !m.pushed.curve.complete && m.unwatch?.ready?.() && !(since!=null && m.pushed.at<since) && k.curveSell) { status.priceChecks.push++; m.polled=false; return k.curveSell(m.pushed.curve,Number(p.raw)); }
       const t0=Date.now();
       let v=await Promise.race([k.quoteSell(mint,Number(p.raw)),new Promise(r=>setTimeout(()=>r(null),quoteTimeoutMs).unref?.())]).catch(()=>null);
-      status.priceChecks.poll++; status.priceChecks.pollMsLast=Date.now()-t0;
+      status.priceChecks.poll++; status.priceChecks.pollMsLast=Date.now()-t0; m.polled=true;
       if(!Number.isFinite(v) && m.pushed && !m.pushed.curve.complete && k.curveSell && Date.now()-m.pushed.at<=pushFallbackMs) { v=k.curveSell(m.pushed.curve,Number(p.raw)); status.priceChecks.pushFallback=(status.priceChecks.pushFallback||0)+1; }
       if(!Number.isFinite(v)) status.priceChecks.failed=(status.priceChecks.failed||0)+1;
       return v;
@@ -672,7 +672,12 @@ export async function startRuntime(k, {demo=false}={}) {
       } finally { m.busy=false; }
       if(m.again && alive()) { m.again=false; return evaluate('push'); }
     };
-    const tick=async()=>{ if(!alive()) return unwatch(); await evaluate('tick'); if(alive()) setTimeout(tick,monitorMs).unref?.(); else unwatch(); };
+    // HELIUS CREDITS (balanced): a check answered by the free pushed price costs nothing and runs every MONITOR_MS.
+    // One that has to ask Helius runs that fast only while it matters: the first PRICE_FAST_SEC (20) after the buy,
+    // or within 8 points of the stop-loss; otherwise every PRICE_CALM_MS (2000).
+    const nextIn=()=>{ const p=engine.d.positions[mint], age=Date.now()-(p?.boughtAt||Date.now()), nearStop=Number.isFinite(m.last) && rules.stopLossPct>0 && m.last<=-(rules.stopLossPct-8)/100;
+      return m.polled && age>number('PRICE_FAST_SEC',20)*1000 && !nearStop ? number('PRICE_CALM_MS',2000) : monitorMs; };
+    const tick=async()=>{ if(!alive()) return unwatch(); await evaluate('tick'); if(alive()) setTimeout(tick,nextIn()).unref?.(); else unwatch(); };
     tick();
   };
   // after a restart, keep watching coins still held (peak unknown: treated as never reached +15%)
@@ -1003,7 +1008,7 @@ export async function startRuntime(k, {demo=false}={}) {
       if(!token && c.mode==='live') {res.writeHead(403);return res.end('Token required');}
       if(url.pathname==='/api/status' && req.method==='GET') {
         status.pumpportal=pumpPortalStatus(); status.pumpportalBuilder=ppCheck.result; status.rpcHealth=k.rpcHealth?.()||null;
-        const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',solscanUsage:k.solscanUsage?.()||null,paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
+        const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',solscanUsage:k.solscanUsage?.()||null,heliusUsage:k.heliusUsage?.()||null,paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
           wallet:{publicKey:c.wallet||null,signerAddress:k.kp?.publicKey||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true},
           held:heldNow(),readiness:readiness(),solUsd:solUsd(),timezone:c.timezone,leader:{label:k.config.leaderLabel||'Decu',address:k.config.leader||null},
           settings:{buySol:c.buySol,maxPositions:c.maxPositions,minLeaderUsd:c.minLeaderUsd,dailyCapUsd:c.dailyCapUsd||0,dailyLossLimit:c.dailyLossLimit||0,rules:{...rules},ruleDefaults:{...ruleDefaults},holdLimitSec:holdLimitMs/1000,gateSec:maxHoldMs/1000,autoTune:c.mode==='paper'&&val('BRAIN_AUTOTUNE','true')!=='false'}};

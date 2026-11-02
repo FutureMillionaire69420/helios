@@ -386,6 +386,30 @@ let id = 1;
 // RPC HEALTH: every Helius call counted per minute (refused = HTTP 429 "too many requests", timed out, other
 // errors, by method). A minute with any trouble is logged as one line, so a burst of refusals is visible.
 const rpcHealth = { calls: 0, refused: 0, timedOut: 0, errors: 0, byMethod: {}, refusedBy: {}, since: Date.now(), last: null };
+// HELIUS CREDITS: every answered call counted by month and by day (DAS reads such as getTokenAccounts cost 10
+// credits, other RPC calls 1), saved next to the state file. The dashboard shows today, the month and its pace;
+// one phone alert at HELIUS_ALERT_PCT (80) of HELIUS_MONTHLY_CREDITS (1,000,000: the free plan).
+const heliusUsageFile = path.join(path.dirname(config.stateFile), 'helius-usage.json');
+const HELIUS_COST = { getTokenAccounts: 10, getAsset: 10, getAssetBatch: 10, getAssetsByOwner: 10, getProgramAccounts: 10 };
+let heliusUsage = (() => { try { return JSON.parse(fs.readFileSync(heliusUsageFile, 'utf8')); } catch { return {}; } })(), heliusDirty = false;
+function heliusCount(method) {
+  if (!config.heliusKey || !/helius/i.test(config.rpcUrl)) return;
+  const now = new Date().toISOString(), month = now.slice(0, 7), day = now.slice(0, 10), c = HELIUS_COST[method] ?? 1;
+  if (heliusUsage.month !== month) heliusUsage = { month, credits: 0, calls: 0, days: {}, alerted: false };
+  heliusUsage.credits += c; heliusUsage.calls++; heliusUsage.days[day] = (heliusUsage.days[day] || 0) + c; heliusDirty = true;
+  const limit = num('HELIUS_MONTHLY_CREDITS', 1_000_000), at = num('HELIUS_ALERT_PCT', 80) / 100;
+  if (!heliusUsage.alerted && heliusUsage.credits >= limit * at) {
+    heliusUsage.alerted = true;
+    notify({ title: `Helius credits: ${Math.round(at * 100)}% of the month used`, body: `${heliusUsage.credits.toLocaleString('en-US')} of ${limit.toLocaleString('en-US')} credits used in ${month}. When they run out the bot can't see Decu's trades or price coins. Upgrade the plan, or turn Power OFF until the reset.`, priority: 4, tags: ['warning'] }).catch(() => {});
+  }
+}
+setInterval(() => { if (!heliusDirty) return; heliusDirty = false; try { fs.writeFileSync(heliusUsageFile, JSON.stringify(heliusUsage), { mode: 0o600 }); } catch { /* best effort */ } }, 60_000).unref();
+/** This month's Helius use: credits, today, and the month's pace at today's rate. */
+function heliusUsageNow() {
+  const now = new Date(), month = now.toISOString().slice(0, 7), u = heliusUsage.month === month ? heliusUsage : { credits: 0, days: {} };
+  const dayOfMonth = now.getUTCDate() - 1 + (now.getUTCHours() * 3600 + now.getUTCMinutes() * 60) / 86400, daysIn = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();
+  return { month, credits: u.credits || 0, today: u.days?.[now.toISOString().slice(0, 10)] || 0, limit: num('HELIUS_MONTHLY_CREDITS', 1_000_000), pace: dayOfMonth > 0.25 ? Math.round((u.credits || 0) / dayOfMonth * daysIn) : null };
+}
 function rpcCount(method, kind) {
   rpcHealth[kind]++; const b = kind === 'calls' ? rpcHealth.byMethod : kind === 'refused' ? rpcHealth.refusedBy : null;
   if (b) b[method] = (b[method] || 0) + 1;
@@ -404,6 +428,7 @@ async function rpc(method, params, timeoutMs = 10000) {
     try {
       rpcCount(method, 'calls');
       const r = await http(config.rpcUrl, { method: 'POST', body: { jsonrpc: '2.0', id: id++, method, params }, timeoutMs });
+      heliusCount(method);
       if (r.error) throw new Error(`RPC ${method}: ${r.error.message || JSON.stringify(r.error)}`.slice(0, 240));
       return r.result;
     } catch (e) {
@@ -2751,7 +2776,7 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
     idle: () => {},
   };
   if (power) stopSol = stopFees = stopWarm = power.idle;
-  const r = await startRuntime({config,kp,notify,rpcHealth:()=>rpcHealth.last,graduatedPool,ntfyUsage:()=>ntfyToday(),ntfyHealth:()=>({...ntfyHealth,topic:!!config.ntfyTopic,token:!!env('NTFY_TOKEN')}),solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,readPool,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,startPumpPortalWatcher:pumpPortalWatch,checkPumpPortalBuild,venueOf,venuesOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  const r = await startRuntime({config,kp,notify,rpcHealth:()=>rpcHealth.last,heliusUsage:heliusUsageNow,graduatedPool,ntfyUsage:()=>ntfyToday(),ntfyHealth:()=>({...ntfyHealth,topic:!!config.ntfyTopic,token:!!env('NTFY_TOKEN')}),solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,readPool,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,startPumpPortalWatcher:pumpPortalWatch,checkPumpPortalBuild,venueOf,venuesOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();stopWarm();solscan.flush();process.exit(0);});
   // The settings that decide speed and filtering, as the bot actually uses them (no keys).
   if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'false')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.001)} + ${num('TIP_MAX_SOL', 0.002)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · PumpPortal feed ${pumpPortalWatch ? 'on' : 'off (no PUMPPORTAL_API_KEY)'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);
@@ -3147,6 +3172,6 @@ async function main(argv = process.argv) {
 
 // ===== entry =====
 const setStream = (s) => (stream = s); // tests
-export {refreshFees,currentFees,solUsdNow,confirm,holderStats,setStream,startSenderWarm,senderUrl,checkTradeInstructions,checkPumpPortalBuild,describeInstructions,landTest,checkLandTestTx};
+export {heliusUsageNow,refreshFees,currentFees,solUsdNow,confirm,holderStats,setStream,startSenderWarm,senderUrl,checkTradeInstructions,checkPumpPortalBuild,describeInstructions,landTest,checkLandTestTx};
 export {config,setFetch,rpc,relevantLogs,venueOf,venuesOf,quoteSell,quoteBuy,watchCurve,canonicalPoolPda,leaderPumpBuys,leaderPumpSells,decodeTradeEvent,findProgramAddress,associatedTokenAddress as ata,diagnose,solscan,runControlCmd,PROGRAMS,associatedTokenAddress,detectBuy,detectSell,transactionBlockhash,validateTrade,parseTransaction,signTransaction,loadKeypair,addTransferInstruction,TIP_ACCOUNTS,b58encode,b58decode};
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main(process.argv);
