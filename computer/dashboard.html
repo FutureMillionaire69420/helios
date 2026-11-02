@@ -286,6 +286,16 @@
         </div>
       </article>
 
+      <article class="card" id="credits">
+        <div class="card-head"><h2>Credit usage</h2><span class="fine" id="credits-state">—</span></div>
+        <div class="credit-grid">
+          <div class="credit-box" id="credit-helius"></div>
+          <div class="credit-box" id="credit-solscan"></div>
+        </div>
+        <div class="credit-days"><div class="credit-days-head"><h3>Helius credits per day</h3><span class="fine" id="credit-days-note"></span></div><div class="credit-bars" id="credit-bars" role="img" aria-label="Helius credits used per day"></div></div>
+        <p class="fine">Power OFF uses no credits. You get a phone alert at 80% of the month.</p>
+      </article>
+
       <article class="card" id="wallets">
         <div class="card-head"><h2>Wallets</h2></div>
         <div class="wallet-grid">
@@ -306,6 +316,23 @@
             <p class="fine">Connecting only reads your wallet's public address to check it. The dashboard never asks your wallet to sign anything.</p>
           </div>
         </div>
+      </article>
+
+      <article class="card" id="pumpfun">
+        <div class="card-head"><h2>Your pump.fun profile</h2><span class="tag good">READ-ONLY</span></div>
+        <div id="pf-setup" class="pf-setup">
+          <p class="fine">Paste your pump.fun profile link (pump.fun → your profile → copy the address bar) or its wallet address. The bot only reads its public trades. It can't buy, sell or sign.</p>
+          <div class="btn-row"><input type="search" id="pf-input" placeholder="https://pump.fun/profile/…" autocomplete="off" spellcheck="false"><button class="btn small" id="pf-save">Save</button><button class="btn ghost small" id="pf-mine" hidden>Use my connected wallet</button></div>
+        </div>
+        <div id="pf-body" hidden>
+          <div class="pf-top"><p class="mono" id="pf-addr">—</p><div class="btn-row"><a class="btn ghost small" id="pf-open" target="_blank" rel="noopener noreferrer">Open on pump.fun</a><button class="btn ghost small" id="pf-refresh">Refresh</button><button class="btn ghost small" id="pf-change">Change</button></div></div>
+          <div class="pf-stats" id="pf-stats"></div>
+          <h3 class="pf-h">Recent trades</h3>
+          <div id="pf-trades" class="rows scroll"></div>
+          <h3 class="pf-h">By coin <span class="fine">(SOL sold minus SOL bought; coins still held show negative)</span></h3>
+          <div id="pf-coins" class="rows"></div>
+        </div>
+        <p class="fine" id="pf-note"></p>
       </article>
 
       <div class="grid2">

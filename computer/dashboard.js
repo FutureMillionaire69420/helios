@@ -638,8 +638,90 @@ function renderResearch() {
 
 // ================= BOT =================
 let walletsStarted = false;
+const fmtN = (n) => Math.round(n).toLocaleString('en-US');
+const fmtK = (n) => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'k' : fmtN(n);
+function creditRing(box, frac, cls, eyebrow, num, of, lines) {
+  box.replaceChildren();
+  const ring = h('div', 'credit-ring', null, box), R = 40, C = 2 * Math.PI * R, f = Math.max(0, Math.min(1, frac ?? 0));
+  const NS = 'http://www.w3.org/2000/svg', svg = document.createElementNS(NS, 'svg'); svg.setAttribute('viewBox', '0 0 92 92'); svg.setAttribute('aria-hidden', 'true');
+  for (const [k, dash] of [['track', null], ['arc ' + cls, `${(f * C).toFixed(1)} ${C.toFixed(1)}`]]) { const c = document.createElementNS(NS, 'circle'); c.setAttribute('cx', '46'); c.setAttribute('cy', '46'); c.setAttribute('r', String(R)); c.setAttribute('class', k); if (dash) c.setAttribute('stroke-dasharray', dash); if (dash && f === 0) c.setAttribute('stroke-opacity', '0'); svg.append(c); }
+  ring.append(svg); h('span', 'pct ' + cls, frac == null ? '—' : Math.round(frac * 100) + '%', ring);
+  const w = h('div', null, null, box); h('p', 'eyebrow', eyebrow, w); const n = h('p', 'num', num, w); if (of) h('small', null, ' ' + of, n);
+  for (const l of lines) if (l) h('p', 'fine', l, w);
+}
+function renderCredits(s) {
+  const off = s.power === 'off', HU = s.heliusUsage, SU = s.solscanUsage;
+  const level = (used, pace) => off ? 'c-off' : used >= 0.9 || pace > 1.1 ? 'c-crit' : used >= 0.8 || pace > 1 ? 'c-warn' : 'c-good';
+  let state = off ? 'Power OFF: none used' : 'OK';
+  if (HU) {
+    const used = HU.credits / HU.limit, pace = HU.pace != null ? HU.pace / HU.limit : 0, cls = level(used, pace);
+    creditRing($('credit-helius'), used, cls, 'Helius · this month', fmtN(HU.credits), `of ${fmtK(HU.limit)}`, [
+      `Today ${fmtN(HU.today)}`,
+      HU.pace != null ? `On pace for ${fmtK(HU.pace)} this month${pace > 1 ? ' (over the plan)' : ''}` : 'Pace shows after a few hours',
+      HU.resetsInDays != null ? `Resets in ${HU.resetsInDays} day${HU.resetsInDays === 1 ? '' : 's'}` : null]);
+    if (!off && cls !== 'c-good') state = cls === 'c-crit' ? 'Helius running out' : 'Helius running fast';
+    const bars = $('credit-bars'); bars.replaceChildren(); const hist = HU.history || [];
+    const budget = HU.limit / (HU.daysIn || 30), top = Math.max(budget * 1.25, ...hist.map((d) => d.credits), 1);
+    hist.forEach((d, i) => { const b = h('div', 'bar' + (d.credits > budget ? ' over' : i === hist.length - 1 ? ' today' : ''), null, bars); b.style.height = Math.max(d.credits ? 2 : 0, d.credits / top * 100) + '%'; b.title = `${d.day}: ${fmtN(d.credits)} credits`; });
+    const line = h('div', 'budget', null, bars); line.style.bottom = (budget / top * 100) + '%'; line.title = `Daily budget ${fmtN(budget)}`;
+    let labels = bars.nextElementSibling; if (!labels || !labels.classList.contains('credit-labels')) { labels = h('div', 'credit-labels'); bars.after(labels); }
+    labels.replaceChildren(); hist.forEach((d, i) => h('span', null, i === hist.length - 1 ? 'today' : (i % 2 === (hist.length - 1) % 2 ? String(+d.day.slice(8)) : ''), labels));
+    $('credit-days-note').textContent = `dashed line = ${fmtK(budget)} a day keeps you under ${fmtK(HU.limit)}`;
+  } else { creditRing($('credit-helius'), null, 'c-off', 'Helius · this month', '—', null, ['No usage yet']); $('credit-bars').replaceChildren(); $('credit-days-note').textContent = ''; }
+  if (SU) {
+    const used = SU.budget ? SU.requests / SU.budget : null, cls = SU.budget ? level(used, 0) : 'c-off';
+    creditRing($('credit-solscan'), used, cls, 'Solscan · today', fmtN(SU.requests), SU.budget ? `of ${fmtN(SU.budget)}` : 'requests (no cap)', [
+      SU.budget ? `${fmtN(Math.max(0, SU.left ?? SU.budget - SU.requests))} left today` : null,
+      SU.budget && SU.left <= 0 ? 'Paused until 00:00 UTC' : 'Resets at 00:00 UTC']);
+    if (!off && state === 'OK' && cls !== 'c-good' && cls !== 'c-off') state = 'Solscan near its daily cap';
+  } else creditRing($('credit-solscan'), null, 'c-off', 'Solscan · today', 'off', null, ['Solscan backup is not on']);
+  $('credits-state').textContent = state;
+}
+
+// ---------- your pump.fun profile (READ-ONLY: the server reads its public trades from Solscan) ----------
+const short = (a) => a ? a.slice(0, 4) + '…' + a.slice(-4) : '—';
+const agoS = (sec) => { const d = Date.now() / 1000 - sec; return d < 90 ? Math.max(1, Math.round(d)) + 's ago' : d < 5400 ? Math.round(d / 60) + 'm ago' : d < 129600 ? Math.round(d / 3600) + 'h ago' : Math.round(d / 86400) + 'd ago'; };
+async function renderPumpfun(refresh = false) {
+  let P; try { P = await api('/api/pumpfun' + (refresh ? '?refresh=1' : '')); } catch (e) { $('pf-note').textContent = e.message; return; }
+  S.pumpfun = P; const has = !!P.address;
+  $('pf-setup').hidden = has && !S.pfEditing; $('pf-body').hidden = !has || S.pfEditing;
+  $('pf-mine').hidden = !S.wallet?.address;
+  $('pf-note').textContent = P.error ? `Couldn't read the trades: ${P.error}` : P.note || (P.at ? `Updated ${clock(P.at)}${P.cached ? ' (saved copy, refreshes every minute)' : ''} · source: Solscan, ${P.trades.length} latest swaps` : '');
+  if (!has) return;
+  $('pf-addr').textContent = P.address; $('pf-open').href = P.profileUrl;
+  const st = $('pf-stats'); st.replaceChildren(); const sm = P.summary;
+  if (sm) for (const [label, w] of [['Last 24 hours', sm.day], ['Last 7 days', sm.week]]) {
+    const d = h('div', null, null, st); h('p', 'eyebrow', label, d); h('b', signed(w.net), `${w.net >= 0 ? '+' : ''}${w.net.toFixed(3)} SOL`, d);
+    h('p', 'fine', `${w.buys} buys (${w.solIn.toFixed(3)} SOL) · ${w.sells} sells (${w.solOut.toFixed(3)} SOL)`, d);
+  }
+  const tr = $('pf-trades'); tr.replaceChildren();
+  if (!P.trades.length) h('p', 'fine', 'No swaps found for this wallet yet.', tr);
+  for (const t of P.trades.slice(0, 40)) {
+    const r = h('div', 'r', null, tr); h('span', 'tag ' + (t.side === 'buy' ? 'bought' : 'gold'), t.side === 'buy' ? 'BUY' : 'SELL', r);
+    const w = h('div', 'what', null, r); const nm = h('a', null, t.name || short(t.mint), h('b', null, null, w)); nm.href = pumpFun(t.mint); nm.target = '_blank'; nm.rel = 'noopener noreferrer';
+    h('small', null, `${agoS(t.time)}${t.quote && t.quote !== 'SOL' ? ' · paid in ' + t.quote : ''}${t.pump ? '' : ' · not on pump.fun'}`, w);
+    const v = h('a', 'val link', fin(t.sol) ? `${t.side === 'buy' ? '−' : '+'}${t.sol.toFixed(3)} SOL` : fin(t.usd) ? C.money(t.usd) : 'tx', r); v.href = 'https://solscan.io/tx/' + encodeURIComponent(t.sig); v.target = '_blank'; v.rel = 'noopener noreferrer';
+  }
+  const co = $('pf-coins'); co.replaceChildren();
+  for (const c of (sm?.coins || []).slice(0, 12)) {
+    const r = h('div', 'r', null, co); const w = h('div', 'what', null, r); const nm = h('a', null, c.name || short(c.mint), h('b', null, null, w)); nm.href = pumpFun(c.mint); nm.target = '_blank'; nm.rel = 'noopener noreferrer';
+    h('small', null, `${c.buys} buy${c.buys === 1 ? '' : 's'} · ${c.sells} sell${c.sells === 1 ? '' : 's'} · last ${agoS(c.last)}`, w);
+    h('span', 'val ' + signed(c.net), `${c.net >= 0 ? '+' : ''}${c.net.toFixed(3)} SOL`, r);
+  }
+}
+async function savePumpfun(value) {
+  try { await api('/api/pumpfun/profile?address=' + encodeURIComponent(value), { method: 'POST' }); S.pfEditing = false; toast(value ? 'pump.fun profile saved.' : 'Removed.'); renderPumpfun(true); } catch (e) { toast(e.message); }
+}
+$('pf-save').onclick = () => savePumpfun($('pf-input').value.trim());
+$('pf-input').onkeydown = (e) => { if (e.key === 'Enter') savePumpfun($('pf-input').value.trim()); };
+$('pf-mine').onclick = () => S.wallet?.address && savePumpfun(S.wallet.address);
+$('pf-refresh').onclick = () => renderPumpfun(true);
+$('pf-change').onclick = () => { S.pfEditing = true; $('pf-input').value = S.pumpfun?.address || ''; renderPumpfun(); };
+
 function renderBot() {
   const s = S.status; if (!s) return;
+  renderCredits(s);
+  if (every('pumpfun', 60000)) renderPumpfun();
   const off = s.power === 'off';
   $('power-state').textContent = off ? 'OFF: not watching Decu, no Helius or Solscan credits used.' : 'ON: watching Decu.';
   $('power-on').setAttribute('aria-pressed', String(!off)); $('power-off').setAttribute('aria-pressed', String(off));

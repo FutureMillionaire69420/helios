@@ -448,3 +448,36 @@ table.t caption { text-align: left; padding: 12px 0 4px; }
 
 /* Home: the brain notes card and its full-width download button */
 .notes-card .btn.block { width: 100%; margin-top: 10px; padding: 14px; font-size: 1rem; }
+
+/* Credit usage (Bot tab) */
+.credit-grid { display: grid; gap: 12px; grid-template-columns: 1fr; }
+@media (min-width: 560px) { .credit-grid { grid-template-columns: 1fr 1fr; } }
+.credit-box { display: grid; grid-template-columns: 92px 1fr; align-items: center; gap: 14px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 16px; padding: 14px; min-width: 0; }
+.credit-ring { position: relative; width: 92px; height: 92px; }
+.credit-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.credit-ring .track { fill: none; stroke: var(--surface-3); stroke-width: 9; }
+.credit-ring .arc { fill: none; stroke-width: 9; stroke-linecap: round; transition: stroke-dasharray .6s ease; }
+.credit-ring .pct { position: absolute; inset: 0; display: grid; place-items: center; font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.credit-box .num { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 2px 0; overflow-wrap: anywhere; }
+.credit-box .num small { font-size: 12px; font-weight: 500; color: var(--ink-3); }
+.c-good { stroke: var(--good); color: var(--good); } .c-warn { stroke: var(--warn); color: var(--warn); } .c-crit { stroke: var(--crit); color: var(--crit); } .c-off { stroke: var(--ink-3); color: var(--ink-3); }
+.credit-days { margin: 16px 0 10px; }
+.credit-days-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.credit-bars { position: relative; display: flex; align-items: flex-end; gap: 4px; height: 96px; padding-top: 4px; border-bottom: 1px solid var(--line-2); }
+.credit-bars .bar { flex: 1; min-width: 0; max-width: 34px; border-radius: 4px 4px 0 0; background: var(--accent-lo); }
+.credit-bars .bar.today { background: var(--accent); }
+.credit-bars .bar.over { background: var(--crit); }
+.credit-bars .budget { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--ink-3); pointer-events: none; }
+.credit-labels { display: flex; gap: 4px; margin-top: 4px; }
+.credit-labels span { flex: 1; min-width: 0; text-align: center; font-size: 10px; color: var(--ink-3); overflow: hidden; white-space: nowrap; }
+
+/* Your pump.fun profile (Bot tab) */
+.pf-setup input { flex: 1 1 220px; }
+.pf-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.pf-top .mono { margin: 0; font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
+.pf-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.pf-stats div { background: var(--surface-2); border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px; min-width: 0; }
+.pf-stats b { display: block; font-size: 17px; font-variant-numeric: tabular-nums; margin: 2px 0; }
+.pf-stats b.up { color: #8fe08f; } .pf-stats b.down { color: #ffb4b4; }
+.pf-h { margin: 16px 0 8px; }
+#pf-trades { max-height: 360px; }

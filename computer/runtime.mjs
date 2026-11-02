@@ -12,6 +12,7 @@ import {createThinkingBrain,createBackup,restoreIfEmpty} from './brain.mjs';
 import {createGitSync,createVault} from './vault.mjs';
 import {createDuel} from './duel.mjs';
 import {createPumpApi} from './pumpapi.mjs';
+import {createPumpProfile,parseProfile} from './pumpprofile.mjs';
 import {tradeRows} from './dashcalc.mjs';
 import {createGoal} from './goal.mjs';
 import {buyContextFromLogs,tokensOut,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache,createSellDesk,decodeBondingCurve,quotedInSol,PUMP,TOKEN,TOKEN_2022} from './pumpbuild.mjs';
@@ -992,6 +993,9 @@ export async function startRuntime(k, {demo=false}={}) {
     else { notReadySince??=Date.now(); if(!readyAlerted && Date.now()-notReadySince>=number('READY_ALERT_SEC',120)*1000) { readyAlerted=true; engine.event('not-ready',{message:`not ready to trade: ${r.blocking.join(', ')}`}); if(k.notify&&!engine.d.alertsOff) Promise.resolve(k.notify({title:`${tag}Bot NOT READY to trade`,body:r.checks.filter(x=>!x.ok).map(x=>`${x.warn?'⚠':'✕'} ${x.name}: ${x.detail}`).join('\n'),priority:4,tags:['warning']})).catch(()=>{}); } }
   },number('READY_CHECK_MS',15000)); readyTimer?.unref?.();
   const balanceCache=new Map();
+  // your pump.fun profile's trades, READ-ONLY (Solscan history of that public wallet; never trades)
+  const pumpProfile=demo?null:createPumpProfile({activities:k.solscanActivities||null,tokenMeta:k.tokenMeta||null,solUsd});
+  const profileAddr=()=>engine.d.pumpfunProfile||parseProfile(val('PUMPFUN_PROFILE',''))||null;
   const sendJson=(req,res,obj)=>{ const body=JSON.stringify(obj);
     if(body.length>4096 && /\bgzip\b/.test(req.headers['accept-encoding']||'')) { res.writeHead(200,{'Content-Type':'application/json','Content-Encoding':'gzip','Vary':'Accept-Encoding'}); return res.end(zlib.gzipSync(body)); }
     res.writeHead(200,{'Content-Type':'application/json'}); return res.end(body); };
@@ -1071,6 +1075,18 @@ export async function startRuntime(k, {demo=false}={}) {
         if(engine.d.jobs[mint]?.side==='sell' || engine.d.queues[mint]?.some(x=>x.side==='sell')) { res.writeHead(409,{'Content-Type':'text/plain'}); return res.end('A sell of this coin is already on its way.'); }
         const m=monitors.get(mint); exitNow(mint,p,'manual-sell',Number.isFinite(m?.last)?m.last:null,null);
         res.writeHead(200,{'Content-Type':'text/plain'}); return res.end('OK');
+      }
+      if(url.pathname==='/api/pumpfun' && req.method==='GET') {
+        const address=profileAddr(), base={address,on:!!pumpProfile,profileUrl:address?'https://pump.fun/profile/'+address:null};
+        if(!address || !pumpProfile) return sendJson(req,res,{...base,trades:[],note:!pumpProfile?'Needs the Solscan key on the server (SOLSCAN_API_KEY).':'Add your pump.fun profile link below.'});
+        if(engine.d.dataOff) return sendJson(req,res,{...base,trades:[],note:'Bot power is OFF: no lookups (no credits used).'});
+        try { return sendJson(req,res,{...base,...await pumpProfile.trades(address,{refresh:url.searchParams.get('refresh')==='1'})}); }
+        catch(e) { return sendJson(req,res,{...base,trades:[],error:String(e.message).slice(0,200)}); }
+      }
+      if(url.pathname==='/api/pumpfun/profile' && req.method==='POST') {
+        const raw=url.searchParams.get('address')||'', a=raw?parseProfile(raw):null;
+        if(raw && !a) { res.writeHead(400,{'Content-Type':'text/plain'}); return res.end('That is not a pump.fun profile link or a Solana address.'); }
+        engine.d.pumpfunProfile=a; engine.save(); res.writeHead(200,{'Content-Type':'text/plain'}); return res.end(a?'Saved.':'Removed.');
       }
       if(url.pathname==='/api/wallet/balance' && req.method==='GET') {
         // the SOL balance of the wallet connected in the browser (Solflare, Phantom...): one RPC read, cached 30 s

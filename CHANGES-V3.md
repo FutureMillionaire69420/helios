@@ -575,3 +575,11 @@ No trade setting changed.
   - Bot → Connections shows the month's use, today and the month's pace.
   - One phone alert at 80% of `HELIUS_MONTHLY_CREDITS` (1,000,000, the free plan).
 - Nothing turned off: holder snapshots, buyers-ahead counting and the Solscan watcher are unchanged.
+
+## v4.7: credit usage card, and your pump.fun profile (read-only)
+
+- **Credit usage (Bot tab):** two rings, Helius this month and Solscan today, with the pace for the month and when each resets. Below them, a bar per day of Helius credits, with a dashed line for the daily amount that keeps you under the plan. Green, then amber at 80% or when the month's pace is over the plan, then red at 90%.
+- **Your pump.fun profile (Bot tab):** paste your pump.fun profile link once. The card shows that wallet's recent buys and sells, its SOL in and out over 24 hours and 7 days, and a total per coin, with links to each coin on pump.fun and each transaction on Solscan.
+  - **Read-only.** A pump.fun profile is a public Solana wallet; the server reads its swaps from Solscan. No key, no signing, no buying or selling (a test checks the module contains no trading code).
+  - **Cost:** one Solscan request a minute while the Bot tab is open (cached), plus one per new coin name. Nothing while Power is OFF.
+  - **Why Solscan and not pump.fun's own API:** pump.fun has no documented public data API for wallet trades. Its website's internal API is unofficial and can change or block servers without notice.
