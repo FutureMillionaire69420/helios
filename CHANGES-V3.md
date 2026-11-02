@@ -554,3 +554,15 @@ No trade setting changed.
 
 - The bot's two note writers (the brain and the DIP vs FCAT duel) push to the same GitHub branch. When one moved the branch while the other was uploading, GitHub refused the update (HTTP 422, not a fast-forward), and the big first upload kept losing that race.
 - The commit is now rebuilt on the newest version and retried, up to 3 times, without uploading anything again.
+
+## v4.5: the brains write it all down
+
+- **A note for every DIP and FCAT trade, as its brain saw it** (`machine/DIP vs FCAT/<trader>/trades/`):
+  - why it bought: each filter's value, the price paid vs Decu, holders, buyers ahead;
+  - what happened: best, worst, the exit;
+  - what the other trader, the no-filter version and each running experiment did on the same Decu buy;
+  - what it takes from it.
+- **A daily brain log** (`machine/DIP vs FCAT/Brain log/`): every decision of the DIP and FCAT brains that day, what they're testing, their best ideas looking back, and what they believe.
+- The duel's notes are written every 5 minutes (was 10).
+- **Home → Brain notes:** a card with when the notes last reached Obsidian, and a **Download brain notes (.zip)** button.
+- **OBSIDIAN.md:** why Obsidian matters, the new folders, and what to do when new notes don't show up on the phone.

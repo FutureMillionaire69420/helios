@@ -69,6 +69,7 @@ test('dashboard: wallet balance lookup for Solflare/Phantom, files and security 
   }
   const html = await page.text();
   assert.match(html, /type="module" src="\/dashboard.js"/);
+  assert.match(html, /data-download="\/api\/brain\/vault.zip">Download brain notes/, 'the Home download button');
 });
 
 test('dashboard: the trade list (compact, gzip, newest only) and one trade in full', async (t) => {

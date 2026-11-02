@@ -126,7 +126,7 @@ const poll = {
   async duel() { try { S.duel = await api('/api/duel'); if (S.tab === 'duel') renderDuelTab(); if (S.tab === 'whatif') renderDuelWhatIf($('wf-duel'), S.duel, DUEL_UI); } catch (e) { failed(e); } },
   async goal() { try { S.goal = await api('/api/goal'); if (S.tab === 'home') renderHero(); } catch (e) { failed(e); } },
   async goalEntries() { try { const g = await api('/api/goal?entries=1'); S.goal = g; S.goalEntries = g; if (S.tab === 'calendar') renderCalendar(); } catch (e) { failed(e); } },
-  async research() { try { S.research = await api('/api/research'); if (S.tab === 'brain') renderBrain(); if (S.tab === 'bot') renderBot(); if (S.tab === 'home') renderFeed(); } catch (e) { failed(e); } },
+  async research() { try { S.research = await api('/api/research'); homeVault(); if (S.tab === 'brain') renderBrain(); if (S.tab === 'bot') renderBot(); if (S.tab === 'home') renderFeed(); } catch (e) { failed(e); } },
   async analytics() { try { S.analytics = await api('/api/analytics'); if (S.tab === 'bot') { renderAnalytics($('analytics'), S.analytics); $('analytics-updated').textContent = 'Updated ' + clock(Date.parse(S.analytics.generatedAt)); } } catch (e) { failed(e); } },
   async trades() {
     try {
@@ -586,6 +586,11 @@ function renderPath(g) {
 }
 
 // ================= BRAIN =================
+// the Home card's line under "Brain notes": how many notes, and when they last reached GitHub (Obsidian)
+function homeVault() {
+  const V = S.research?.thinking?.vault, el = $('home-vault'); if (!el) return;
+  el.textContent = !V ? 'Notes start with the first studied trade.' : `${V.files} notes · ${V.sync ? (V.sync.ok === false ? `GitHub sync failing: ${V.sync.error}` : V.sync.at ? `synced to Obsidian ${C.ago(V.sync.at)}` : 'first sync coming') : 'GitHub sync off: use the download'}${V.sync && V.unsynced ? ` · ${V.unsynced} waiting` : ''}`;
+}
 function renderBrain() {
   const r = S.research, T = r?.thinking;
   const rank = $('brain-rank'); rank.replaceChildren();

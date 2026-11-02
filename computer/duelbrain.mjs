@@ -196,7 +196,9 @@ export function createDuelBrain({ strategy, api, log = () => {}, minForward = 30
 // ---------- Obsidian notes (written by duel.mjs into the second-brain vault, machine/DIP vs FCAT/) ----------
 const fm = (o) => ['---', ...Object.entries(o).map(([k, v]) => `${k}: ${typeof v === 'string' ? JSON.stringify(v) : Array.isArray(v) ? `[${v.map((x) => JSON.stringify(x)).join(', ')}]` : v ?? ''}`), '---', ''].join('\n');
 const D = 'machine/DIP vs FCAT';
-export const notePaths = { home: `${D}/DIP vs FCAT.md`, brain: (s) => `${D}/${s.toUpperCase()}/${s.toUpperCase()} brain.md`, day: (s, d) => `${D}/${s.toUpperCase()}/days/${s.toUpperCase()} ${d}.md`, holder: `${D}/Holder rule experiment.md`, dips: `${D}/Dip triggers.md`, holders: `${D}/Holders.md` };
+export const notePaths = { home: `${D}/DIP vs FCAT.md`, brain: (s) => `${D}/${s.toUpperCase()}/${s.toUpperCase()} brain.md`, day: (s, d) => `${D}/${s.toUpperCase()}/days/${s.toUpperCase()} ${d}.md`, holder: `${D}/Holder rule experiment.md`, dips: `${D}/Dip triggers.md`, holders: `${D}/Holders.md`,
+  trade: (s, t) => `${D}/${s.toUpperCase()}/trades/${t.day} ${new Date(t.fillAt).toISOString().slice(11, 16).replace(':', '')} ${s.toUpperCase()} ${t.sym ? '$' + String(t.sym).replace(/[\\/:*?"<>|#^[\]]/g, '') : t.mint.slice(0, 6)}.md`,
+  log: (d) => `${D}/Brain log/Brain log ${d}.md` };
 const link = (p, text) => `[[${p.replace(/\.md$/, '')}|${text}]]`;
 
 export function brainNote(r) {
@@ -217,6 +219,46 @@ export function brainNote(r) {
     '## My newest experiment vs me', r.newest ? `- ${paramText(r.newest.diff)}: ${r.newest.status}, ${r.newest.result?.n ?? 0} shared buys, ${sol(r.newest.result?.totalSol, 4)} in total vs me (${sol(r.newest.result?.meanSol, 4)} per buy).` : '- none yet', '',
     '## Validated on unseen future data?', ...(r.validation.length ? r.validation.map((x) => `- ${paramText(x.diff)}: **${x.status}** after ${x.result?.n ?? 0} unseen buys (${sol(x.result?.meanSol, 4)} per buy, 90% interval ${sol(x.result?.low, 4)} to ${sol(x.result?.high, 4)})`) : ['- No experiment has finished yet.']), '',
     '## My decisions', ...(r.decisions.length ? r.decisions.map((d) => `- ${String(d.at).slice(0, 16).replace('T', ' ')} **${d.kind}**: ${d.text}`) : ['- none yet']), ''];
+  return L.join('\n');
+}
+/** One closed DIP or FCAT trade, as its brain saw it: why it bought, what happened, what the other trader and
+ *  every experiment did on the SAME Decu buy, and the lesson. ctx: {rec, other, unfiltered, tests:[{label, diff, t}], report}. */
+export function tradeNote(strategy, t, ctx = {}) {
+  const S = strategy.toUpperCase(), r = ctx.rec || {}, h = r.holder0, d = r.decisions?.[strategy] || {};
+  const res = (x) => (x ? `${sol(x.pnlSol, 4)} (${pct(x.ret)}, ${x.exit}${fin(x.holdSec) ? `, held ${x.holdSec}s` : ''})` : 'did not buy');
+  const lessons = [];
+  if (t.ret > 0) lessons.push(t.exit === 'tp-early' ? 'The early take-profit caught the jump.' : t.exit === 'tp-late' ? 'Patience paid: the later target was reached.' : 'Decu sold while I was in profit.');
+  else {
+    if (fin(t.premium) && t.premium > 0.3) lessons.push(`I paid ${pct(t.premium)} above Decu: the price had already run before my copy landed.`);
+    if (t.exit === 'stop') lessons.push('The stop took me out: the coin kept falling after the dip.');
+    if (t.exit === 'his-sell' || t.exit === 'his-sell-late') lessons.push('Decu sold before my target.');
+    if (fin(t.peak) && t.peak > 0.1) lessons.push(`It was up ${pct(t.peak)} at its best: a lower take-profit would have won.`);
+    if (!lessons.length) lessons.push('It never went my way.');
+  }
+  if (!ctx.other) lessons.push(`${strategy === 'dip' ? 'FCAT' : 'DIP'} did not take this buy.`);
+  const beat = (ctx.tests || []).filter((x) => x.t && x.t.pnlSol > t.pnlSol + 1e-9);
+  if (beat.length) lessons.push(`${beat.length === 1 ? 'An experiment' : `${beat.length} experiments`} did better here: ${beat.map((x) => paramText(x.diff)).join('; ')}.`);
+  return [fm({ type: 'duel-trade', trader: S, version: t.version, coin: t.sym ? '$' + t.sym : t.mint, day: t.day, won: t.ret > 0, ret: Math.round(t.ret * 1e4) / 1e4, pnl_sol: Math.round(t.pnlSol * 1e6) / 1e6, exit: t.exit, premium: fin(t.premium) ? Math.round(t.premium * 1e4) / 1e4 : null, held_sec: t.holdSec }),
+    `# ${S} ${t.ret > 0 ? 'won' : 'lost'} ${pct(t.ret)} on ${t.sym ? '$' + t.sym : t.mint.slice(0, 6)}`, '',
+    `${link(notePaths.brain(strategy), `${S} brain`)} · ${link(notePaths.day(strategy, t.day), t.day)} · ${link(notePaths.log(t.day), 'brain log')} · paper · v${t.version}`, '',
+    '## Why I bought', `- ${strategy === 'fcat' ? 'As soon as Decu bought and my checks passed' : `The price came back to Decu's${fin(d.triggeredSec) ? ` ${d.triggeredSec}s after his buy` : ''}`}; filled ${pct(t.premium)} vs his price.`,
+    `- Decu's buy ${fin(r.hisUsd) ? '$' + Math.round(r.hisUsd) : '—'}, market cap ${fin(r.hisMcapUsd) ? '$' + Math.round(r.hisMcapUsd).toLocaleString('en-US') : '—'}, spotted ${fin(r.secAtSeen) ? r.secAtSeen + 's' : '—'}${fin(r.blocksAtSeen) ? ` / ${r.blocksAtSeen} blocks` : ''} after him, ${r.crowd?.status === 'done' ? `${r.crowd.buysAhead} buyers ahead` : 'buyers ahead unknown'}.`,
+    `- Holders: ${h?.status === 'done' ? `${h.holders} holding $${Math.round(h.heldUsd).toLocaleString('en-US')}${h.verdict ? ` (${h.verdict.safe ? 'SAFE' : 'RISKY'}${h.verdict.safe !== h.verdict.relaxedPass ? ', let in by the relaxed rule' : ''})` : ''}, top 10 own ${pct(h.top10Pct, 0).replace('+', '')}` : 'no snapshot'}.`, '',
+    '## What happened', `- ${res(t)}. Best ${pct(t.peak)}${fin(t.peakAtSec) ? ` after ${t.peakAtSec}s` : ''}, worst ${pct(t.worst)}.`, '',
+    '## The same Decu buy, other ways', `- ${strategy === 'dip' ? 'FCAT' : 'DIP'}: ${res(ctx.other)}`, `- My rules with no filters: ${res(ctx.unfiltered)}`,
+    ...(ctx.tests || []).map((x) => `- Experiment ${paramText(x.diff)}: ${res(x.t)}`), '',
+    '## What I take from it', ...lessons.map((x) => `- ${x}`), ''].join('\n');
+}
+/** A day of brain activity (DIP and FCAT): every decision, then what each brain is testing and thinking now. */
+export function brainLogNote(day, reports) {
+  const L = [fm({ type: 'brain-log', day }), `# Brain log ${day}`, '', `${link(notePaths.home, 'DIP vs FCAT')} · the main brain's decisions: [[machine/decisions|decisions]]`, ''];
+  for (const r of reports.filter(Boolean)) {
+    const ds = (r.decisions || []).filter((x) => String(x.at).slice(0, 10) === day).reverse();
+    L.push(`## ${r.label} brain (v${r.version})`, '', '**Decisions today**', ...(ds.length ? ds.map((x) => `- ${String(x.at).slice(11, 16)} **${x.kind}**: ${x.text}`) : ['- none']), '',
+      '**Testing now**', ...(r.testing?.length ? r.testing.map((x) => `- ${paramText(x.diff)}: ${x.result?.n ?? 0}/${x.need} shared buys, ${sol(x.result?.meanSol, 4)} per buy vs the trader`) : ['- nothing']), '',
+      '**Best ideas from looking back**', ...(r.lookBack?.top?.length ? r.lookBack.top.slice(0, 3).map((x) => `- ${paramText(x.diff)}: ${pct(x.meanDiff)} per buy on ${x.n} past buys`) : ['- not enough buys yet']), '',
+      '**What I believe**', ...[...(r.beliefs?.working || []).slice(0, 3).map((b) => `- working: ${b.text} (${pct(b.avg)} over ${b.n})`), ...(r.beliefs?.hurting || []).slice(0, 3).map((b) => `- hurting: ${b.text} (${pct(b.avg)} over ${b.n})`)].concat((r.beliefs?.working?.length || r.beliefs?.hurting?.length) ? [] : [`- ${r.beliefs?.note || 'nothing stands out yet'}`]), '');
+  }
   return L.join('\n');
 }
 export function dayNote(strategy, day, trades) {

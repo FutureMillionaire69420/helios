@@ -445,3 +445,6 @@ dialog.sheet::backdrop { background: rgba(0,0,0,.62); backdrop-filter: blur(3px)
 .brains .brain-l { font-size: 12px; margin: 2px 0; overflow-wrap: anywhere; }
 table.t caption { text-align: left; padding: 12px 0 4px; }
 @media (max-width: 560px) { .duel-split > .side { padding-right: 8px; } .duel-split > .side + .side { padding-left: 8px; } .duel-split .big { font-size: 17px; } .brains .brain-l { font-size: 11px; } }
+
+/* Home: the brain notes card and its full-width download button */
+.notes-card .btn.block { width: 100%; margin-top: 10px; padding: 14px; font-size: 1rem; }

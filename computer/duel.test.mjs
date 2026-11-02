@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { buyRaw, sellSol, buyPriceNow, dipTriggered, exitCheck, holderCheck, calibrateK, kFloor, replay, DEFAULTS, entryChecks, allowedChange, bootstrapMean, summarize } from './duelmath.mjs';
 import { createDuel, tradeEventsFromLogs } from './duel.mjs';
-import { lookBack, brainNote } from './duelbrain.mjs';
+import { lookBack, brainNote, tradeNote, brainLogNote, notePaths } from './duelbrain.mjs';
 import { createVault } from './vault.mjs';
 
 const FEE = 0.0125, RULES = [[10000, 1000], [20000, 2500], [30000, 4000]];
@@ -226,4 +226,14 @@ test('saved paper state from before rev 2: FCAT\'s old +20% cap gives way to +50
   duel = createDuel(opts(k, dir));
   assert.equal(duel.variants.get('fcat').p.maxPayPct, 20, 'only once');
   duel.stop();
+});
+
+test('brain notes: each DIP/FCAT trade as its brain saw it, and a daily brain log', () => {
+  const t = { day: '2026-11-02', fillAt: Date.parse('2026-11-02T03:15:00Z'), sym: 'A/B', mint: 'Mint1', version: 2, ret: -0.12, pnlSol: -0.012, exit: 'his-sell', premium: 0.38, holdSec: 12, peak: 0.15, worst: -0.2, peakAtSec: 3 };
+  assert.equal(notePaths.trade('fcat', t), 'machine/DIP vs FCAT/FCAT/trades/2026-11-02 0315 FCAT $AB.md', 'a safe file name');
+  const md = tradeNote('fcat', t, { rec: { hisUsd: 150, crowd: { status: 'done', buysAhead: 1 }, decisions: {} }, other: null, unfiltered: null, tests: [{ diff: { tpEarlyPct: 12 }, t: { pnlSol: 0.008, ret: 0.08, exit: 'tp-early' } }] });
+  for (const x of ['## Why I bought', '## What happened', '## The same Decu buy, other ways', '## What I take from it', 'above Decu', 'An experiment did better here: early take-profit % 12', 'DIP did not take this buy']) assert.ok(md.includes(x), x);
+  const log = brainLogNote('2026-11-02', [{ label: 'FCAT', version: 2, decisions: [{ at: '2026-11-02T04:00:00Z', kind: 'test', text: 'Started testing X' }, { at: '2026-11-01T04:00:00Z', kind: 'adopt', text: 'old' }], testing: [], lookBack: { top: [{ diff: { maxPayPct: 40 }, meanDiff: 0.03, n: 50 }] }, beliefs: { working: [], hurting: [] } }]);
+  assert.ok(log.includes('Started testing X') && !log.includes('old'), "only that day's decisions");
+  assert.ok(log.includes('price paid at most') || log.includes('maxPayPct') || log.includes('40'), 'its best idea');
 });

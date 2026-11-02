@@ -2,6 +2,15 @@
 
 The bot writes its thinking as notes: one per trade, one per day, the DIP vs FCAT duel, its patterns and decisions, and a Home page. To have them show up in Obsidian on your phone by themselves, the bot uploads them to a **private GitHub repository** and Obsidian pulls them from there.
 
+## Why Obsidian matters
+
+The bot has three brains: the main one, DIP's and FCAT's. They decide, test and change their rules on their own, in paper. Obsidian is where you can see and check that thinking:
+
+- **It's their memory, in words.** Every trade note says why the brain bought, what it expected, what happened, what the other trader and each experiment did on the same Decu buy, and what it takes from it. The daily brain log lists every test it started, adopted, dropped or reverted.
+- **It's the audit trail.** A brain only changes a rule after the change won on Decu buys it had never seen; the notes keep the numbers behind each change. Before any real money, you can read exactly what it learned and why.
+- **It's yours, outside the server.** The notes live in your private GitHub repository and on your phone. They survive a Render restart, a full disk or a lost dashboard token, and Obsidian works offline.
+- **It connects the dots.** Search, links and the graph view let you follow a pattern across trades, days and decisions, which a dashboard can't.
+
 You set it up once, in about 10 minutes. After that it runs by itself: new notes reach GitHub within 5 minutes, and Obsidian fetches them whenever you open it.
 
 ## 1. GitHub: a private repository and a key for it
@@ -64,11 +73,25 @@ Done. Open **Home**.
 | `machine/trades/` | one note per trade: what the bot thought, what happened, its charts |
 | `machine/daily/` | one note per day |
 | `machine/DIP vs FCAT/` | the duel: scoreboard, each brain, the holder experiment |
+| `machine/DIP vs FCAT/DIP/trades/`, `.../FCAT/trades/` | every DIP and FCAT trade as its brain saw it: why it bought, what happened, the other ways the same buy went, the lesson |
+| `machine/DIP vs FCAT/Brain log/` | one note per day: every decision of the DIP and FCAT brains, what they're testing, their best ideas and beliefs |
+| `machine/decisions.md` | the main brain's decisions |
+| `Bot/` | what changed in the bot, the go-live checklist, this guide |
 | `human/` | your own notes; the bot never writes here |
+
+## If new notes don't show up on your phone
+
+The bot uploads every few minutes. If Obsidian still shows only old notes, it isn't pulling:
+
+1. Settings → Git → **Advanced** → "Repository folder within the vault" must be **empty**.
+2. Command palette → **Git: Pull**. New notes should appear.
+3. Settings → Git → **Pull on startup** on, **Auto pull interval** 5.
+
+The dashboard's Home → **Brain notes** card shows when the notes last reached GitHub.
 
 ## Without GitHub
 
-1. Dashboard → Brain → **Download whole brain**.
+1. Dashboard → Home → **Download brain notes**.
 2. Unzip it in the Files app.
 3. Move it into On My iPhone → Obsidian.
 

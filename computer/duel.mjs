@@ -21,7 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DEFAULTS, SETTINGS_REV, entryChecks, isMissing, dipTriggered, exitCheck, markPnl, buyRaw, sellSol, netPrice, buyPriceNow, sellPriceNow, mcapUsd, holderCheck, calibrateK, kFloor, summarize, headToHead, fin, CHECK_NAMES, evidence } from './duelmath.mjs';
 import { dayKey } from './dashcalc.mjs';
-import { createDuelBrain, notePaths, homeNote, brainNote, dayNote, holderNote, dipsNote, holdersNote } from './duelbrain.mjs';
+import { createDuelBrain, notePaths, homeNote, brainNote, dayNote, holderNote, dipsNote, holdersNote, tradeNote, brainLogNote } from './duelbrain.mjs';
 
 const PUMP = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
 const TRADE_EVENT_DISC = Buffer.from([189, 219, 127, 211, 78, 230, 97, 238]); // sha256("event:TradeEvent")[0..8]
@@ -562,10 +562,18 @@ export function createDuel({
       [notePaths.holder]: holderNote(a.holderRule), [notePaths.dips]: dipsNote(a.variants.filter((v) => v.strategy === 'dip' && (v.role === 'main' || v.role === 'analytics'))), [notePaths.holders]: holdersNote(a.holders),
     };
     const recentDays = new Set([0, 1, 2].map((i) => dayKey(now() - i * 86400e3, timezone)));
+    const recBy = new Map(done.map((r) => [r.id, r])), tradeOn = (vid, candId) => variants.get(vid)?.trades.find((x) => x.candId === candId && !x.provisional) || null;
     for (const s of ['dip', 'fcat']) {
       const byDay = {}; for (const t of variants.get(s).trades) if (!t.provisional) (byDay[t.day] ||= []).push(t);
-      for (const [d, list] of Object.entries(byDay)) if (!notesWritten || recentDays.has(d)) files[notePaths.day(s, d)] = dayNote(s, d, list);
+      for (const [d, list] of Object.entries(byDay)) {
+        if (notesWritten && !recentDays.has(d)) continue;
+        files[notePaths.day(s, d)] = dayNote(s, d, list);
+        // every trade as its brain saw it, next to what the other trader and each experiment did on the same buy
+        for (const t of list) files[notePaths.trade(s, t)] = tradeNote(s, t, { rec: recBy.get(t.candId), other: tradeOn(s === 'dip' ? 'fcat' : 'dip', t.candId), unfiltered: tradeOn(`${s}-all`, t.candId),
+          tests: [...variants.values()].filter((v) => v.role === 'challenger' && v.strategy === s).map((v) => ({ label: v.label, diff: v.diff, t: tradeOn(v.id, t.candId) })) });
+      }
     }
+    for (const d of recentDays) files[notePaths.log(d)] = brainLogNote(d, [a.brains.dip, a.brains.fcat]);
     for (const p of notes.vault.sync(files)) unsynced.add(p);
     notesWritten = true;
   };

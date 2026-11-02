@@ -325,7 +325,7 @@ export async function startRuntime(k, {demo=false}={}) {
       holderSnapSec:String(val('DUEL_HOLDER_SNAP_SEC','0,60')).split(',').map(Number).filter(x=>x>=0), minUsd:number('DUEL_MIN_USD',20), powered:false,
       relax:{on:val('HOLDER_RELAX','on')!=='off', target:1+number('HOLDER_RELAX_MORE_PCT',70)/100, floorUsd:number('HOLDER_RELAX_FLOOR_USD',500), window:200, minSamples:20, every:5},
       autoTune:val('DUEL_AUTOTUNE','true')!=='false', brainEveryMin:number('DUEL_BRAIN_EVERY_MIN',10),
-      notes:{vault:createVault(vdir,{log:m=>console.log(m)}), gitSync:createGitSync({token:val('GITHUB_VAULT_TOKEN',''),repo:val('GITHUB_VAULT_REPO',''),branch:val('GITHUB_VAULT_BRANCH','main'),log:m=>console.log(m)}), everyMin:number('DUEL_NOTES_EVERY_MIN',10)},
+      notes:{vault:createVault(vdir,{log:m=>console.log(m)}), gitSync:createGitSync({token:val('GITHUB_VAULT_TOKEN',''),repo:val('GITHUB_VAULT_REPO',''),branch:val('GITHUB_VAULT_BRANCH','main'),log:m=>console.log(m)}), everyMin:number('DUEL_NOTES_EVERY_MIN',5)},
       log:m=>console.log(m)});
   } catch(e) { console.log('duel: not started: '+e.message); return null; } })();
   // A Decu buy the bot did not take (filtered, paused, style off, too late, failed): still priced
