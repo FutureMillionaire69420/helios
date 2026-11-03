@@ -13,6 +13,7 @@ import {createGitSync,createVault} from './vault.mjs';
 import {createDuel} from './duel.mjs';
 import {createPumpApi} from './pumpapi.mjs';
 import {createPumpProfile,parseProfile} from './pumpprofile.mjs';
+import {voiceConfig,voiceStatus,createVoiceCaller} from './voicecall.mjs';
 import {tradeRows} from './dashcalc.mjs';
 import {createGoal} from './goal.mjs';
 import {buyContextFromLogs,tokensOut,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache,createSellDesk,decodeBondingCurve,quotedInSol,PUMP,TOKEN,TOKEN_2022} from './pumpbuild.mjs';
@@ -168,7 +169,7 @@ export async function startRuntime(k, {demo=false}={}) {
   try { if (fs.statSync(k.config.logFile).size > 50e6) fs.renameSync(k.config.logFile, k.config.logFile+'.1'); } catch {}
   const token = val('DASHBOARD_TOKEN','');
   if (!demo && !k.config.dryRun && token.length<24) throw new Error('LIVE requires DASHBOARD_TOKEN of at least 24 characters');
-  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey,k.config.pumpPortalKey,val('GITHUB_VAULT_TOKEN',''),val('GITHUB_BACKUP_TOKEN',''),val('PUMP_API_KEY','')].filter(Boolean);
+  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey,k.config.pumpPortalKey,val('GITHUB_VAULT_TOKEN',''),val('GITHUB_BACKUP_TOKEN',''),val('PUMP_API_KEY',''),val('TWILIO_API_SECRET',''),val('TWILIO_AUTH_TOKEN','')].filter(Boolean);
   const clean = v => { let s=JSON.stringify(v); for(const secret of secrets) s=s.split(secret).join('[REDACTED]'); return JSON.parse(k.redact(s)); };
   const log = e => {
     // Sell outcomes: was the position closed, and how did the fill compare with the exit trigger?
@@ -993,6 +994,8 @@ export async function startRuntime(k, {demo=false}={}) {
     else { notReadySince??=Date.now(); if(!readyAlerted && Date.now()-notReadySince>=number('READY_ALERT_SEC',120)*1000) { readyAlerted=true; engine.event('not-ready',{message:`not ready to trade: ${r.blocking.join(', ')}`}); if(k.notify&&!engine.d.alertsOff) Promise.resolve(k.notify({title:`${tag}Bot NOT READY to trade`,body:r.checks.filter(x=>!x.ok).map(x=>`${x.warn?'⚠':'✕'} ${x.name}: ${x.detail}`).join('\n'),priority:4,tags:['warning']})).catch(()=>{}); } }
   },number('READY_CHECK_MS',15000)); readyTimer?.unref?.();
   const balanceCache=new Map();
+  // Ultron voice calls (Twilio): off until all settings are present; only the owner's own phone, rate-limited
+  const voiceCfg=voiceConfig(), voiceCaller=demo?null:createVoiceCaller({cfg:voiceCfg});
   // your pump.fun profile's trades, READ-ONLY (Solscan history of that public wallet; never trades)
   const pumpProfile=demo?null:createPumpProfile({activities:k.solscanActivities||null,tokenMeta:k.tokenMeta||null,solUsd});
   const profileAddr=()=>engine.d.pumpfunProfile||parseProfile(val('PUMPFUN_PROFILE',''))||null;
@@ -1005,6 +1008,10 @@ export async function startRuntime(k, {demo=false}={}) {
     res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"); // data: = wallet icons (Solflare, Phantom...)
     const url=new URL(req.url,'http://localhost');
     const authorized=()=> {const supplied=(req.headers.authorization||'').replace(/^Bearer /,'');return token && Buffer.byteLength(supplied)===Buffer.byteLength(token) && crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(token));};
+    if(req.method==='GET' && /^\/voice\/[a-z0-9-]+\.mp3$/.test(url.pathname)) { // public so Twilio can fetch it; robot-voice audio only
+      const f=path.join(path.dirname(fileURLToPath(import.meta.url)),'voice',path.basename(url.pathname));
+      try { const b=fs.readFileSync(f); res.writeHead(200,{'Content-Type':'audio/mpeg','Content-Length':b.length}); return res.end(b); } catch { res.writeHead(404); return res.end('Not found'); }
+    }
     if(url.pathname==='/health') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({running:true,mode:c.mode}));}
     if(url.pathname==='/ready') { const r=readiness(); res.writeHead(r.ready?200:503,{'Content-Type':'application/json'}); return res.end(JSON.stringify({ready:r.ready,mode:r.mode,at:r.at,blocking:r.blocking,warnings:r.warnings})); }
     if(url.pathname.startsWith('/api/')) {
@@ -1012,7 +1019,7 @@ export async function startRuntime(k, {demo=false}={}) {
       if(!token && c.mode==='live') {res.writeHead(403);return res.end('Token required');}
       if(url.pathname==='/api/status' && req.method==='GET') {
         status.pumpportal=pumpPortalStatus(); status.pumpportalBuilder=ppCheck.result; status.rpcHealth=k.rpcHealth?.()||null;
-        const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',solscanUsage:k.solscanUsage?.()||null,heliusUsage:k.heliusUsage?.()||null,paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
+        const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',solscanUsage:k.solscanUsage?.()||null,voiceCall:voiceStatus(voiceCfg),heliusUsage:k.heliusUsage?.()||null,paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
           wallet:{publicKey:c.wallet||null,signerAddress:k.kp?.publicKey||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true},
           held:heldNow(),readiness:readiness(),solUsd:solUsd(),timezone:c.timezone,leader:{label:k.config.leaderLabel||'Decu',address:k.config.leader||null},
           settings:{buySol:c.buySol,maxPositions:c.maxPositions,minLeaderUsd:c.minLeaderUsd,dailyCapUsd:c.dailyCapUsd||0,dailyLossLimit:c.dailyLossLimit||0,rules:{...rules},ruleDefaults:{...ruleDefaults},holdLimitSec:holdLimitMs/1000,gateSec:maxHoldMs/1000,autoTune:c.mode==='paper'&&val('BRAIN_AUTOTUNE','true')!=='false'}};
@@ -1075,6 +1082,11 @@ export async function startRuntime(k, {demo=false}={}) {
         if(engine.d.jobs[mint]?.side==='sell' || engine.d.queues[mint]?.some(x=>x.side==='sell')) { res.writeHead(409,{'Content-Type':'text/plain'}); return res.end('A sell of this coin is already on its way.'); }
         const m=monitors.get(mint); exitNow(mint,p,'manual-sell',Number.isFinite(m?.last)?m.last:null,null);
         res.writeHead(200,{'Content-Type':'text/plain'}); return res.end('OK');
+      }
+      if(url.pathname==='/api/call/test' && req.method==='POST') {
+        if(!voiceCaller) { res.writeHead(503,{'Content-Type':'text/plain'}); return res.end('Voice calls are off in demo mode.'); }
+        try { const r=await voiceCaller.call('ultron-test'); engine.event('connection',{message:`Ultron test call placed to ${r.to} (${r.status})`}); return sendJson(req,res,r); }
+        catch(e) { res.writeHead(400,{'Content-Type':'text/plain'}); return res.end(String(e.message).slice(0,300)); }
       }
       if(url.pathname==='/api/pumpfun' && req.method==='GET') {
         const address=profileAddr(), base={address,on:!!pumpProfile,profileUrl:address?'https://pump.fun/profile/'+address:null};

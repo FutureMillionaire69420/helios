@@ -718,9 +718,19 @@ $('pf-mine').onclick = () => S.wallet?.address && savePumpfun(S.wallet.address);
 $('pf-refresh').onclick = () => renderPumpfun(true);
 $('pf-change').onclick = () => { S.pfEditing = true; $('pf-input').value = S.pumpfun?.address || ''; renderPumpfun(); };
 
+// ---------- Ultron voice calls ----------
+function renderVoice(s) {
+  const v = s.voiceCall; if (!v) return;
+  $('vc-state').textContent = v.ready ? `Ready · calls ${v.to}` : 'Not set up';
+  $('vc-note').textContent = v.ready ? 'Press the button for a short test call in the Ultron voice.' : 'Add in Render → Environment: ' + v.missing.join(', ') + '.';
+  $('vc-test').disabled = !v.ready;
+}
+$('vc-test').onclick = () => act('/api/call/test', { ok: 'Calling your phone now…', confirmText: 'Ring your phone now with a test call in the Ultron voice?' });
+
 function renderBot() {
   const s = S.status; if (!s) return;
   renderCredits(s);
+  renderVoice(s);
   if (every('pumpfun', 60000)) renderPumpfun();
   const off = s.power === 'off';
   $('power-state').textContent = off ? 'OFF: not watching Decu, no Helius or Solscan credits used.' : 'ON: watching Decu.';

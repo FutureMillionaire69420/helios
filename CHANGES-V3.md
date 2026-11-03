@@ -583,3 +583,10 @@ No trade setting changed.
   - **Read-only.** A pump.fun profile is a public Solana wallet; the server reads its swaps from Solscan. No key, no signing, no buying or selling (a test checks the module contains no trading code).
   - **Cost:** one Solscan request a minute while the Bot tab is open (cached), plus one per new coin name. Nothing while Power is OFF.
   - **Why Solscan and not pump.fun's own API:** pump.fun has no documented public data API for wallet trades. Its website's internal API is unofficial and can change or block servers without notice.
+
+## v4.8: Ultron voice calls (Twilio), off until set up
+
+- **Bot tab → Ultron voice calls:** a "Test call my phone" button. The bot asks Twilio to ring OWNER_PHONE and play a short robot-voice message (voice/ultron-test.mp3, served at /voice/ultron-test.mp3 so Twilio can fetch it).
+- **Off until every setting is in Render → Environment:** TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN (or TWILIO_API_KEY + TWILIO_API_SECRET), TWILIO_FROM_NUMBER, OWNER_PHONE. The card lists what's missing.
+- **Limits:** only the owner's number, at most one call every 2 minutes and 10 a day. The secret never appears in status, logs or the dashboard; phone numbers show only their last 4 digits. It can't trade.
+- **Voice:** piper "en-us-ryan-high" (CC BY-NC-SA 4.0), pitched down and processed; kept in the private deploy repo only.
