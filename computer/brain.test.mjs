@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { mirror10, mirrorTotals, mirrorChart, RANKS, rankFacts, rankChecks, earnedRank, tuneStopGate, createThinkingBrain, createBackup, restoreIfEmpty } from './brain.mjs';
+import { mirror10, mirrorTotals, mirrorChart, RANKS, rankFacts, rankChecks, earnedRank, tuneStopGate, createThinkingBrain, createBackup, restoreIfEmpty, versionLine } from './brain.mjs';
 import { createBrain } from './learn.mjs';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'brain-'));
@@ -190,4 +190,17 @@ test('the $1000 profit goal is tracked, announced at 25/50/75/100%, and patterns
   const n = notes.filter((x) => x.kind === 'brain').at(-1);
   assert.match(n.body, /GOAL \$10\.00 profit/); assert.match(n.body, /Patterns I remember/);
   assert.equal(b.status().goal.reached, true);
+});
+
+test('the version line says when a gap between versions is just luck', () => {
+  const rs = (n, f) => Array.from({ length: n }, (_, i) => ({ fcat: f(i) }));
+  // 19 trades on the new version: too few to judge, whatever the averages say.
+  assert.match(versionLine('4.8.0', rs(19, (i) => (i % 4 ? -0.2 : 0.1)), '4.7.0', rs(200, (i) => (i % 3 ? -0.15 : 0.2))), /^Since v4\.8\.0: 19 trades, 5 won, .* over 200 trades on v4\.7\.0 → too few trades to compare versions/);
+  // Same spread of results on both: within luck.
+  const noisy = (i) => [-0.3, -0.1, 0.05, 0.25][i % 4];
+  assert.match(versionLine('2', rs(60, noisy), '1', rs(80, (i) => noisy(i + 1))), /within normal luck \(±\d+\.\d pts\): no real difference/);
+  // A big, steady gap: more than luck.
+  assert.match(versionLine('2', rs(60, (i) => 0.1 + (i % 2) * 0.01), '1', rs(60, (i) => -0.1 - (i % 2) * 0.01)), /better by more than luck/);
+  assert.equal(versionLine('2', []), null);
+  assert.equal(versionLine('2', rs(3, () => 0.1)), 'Since v2: 3 trades, 3 won, avg FCAT +10.0%.');
 });

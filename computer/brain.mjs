@@ -87,6 +87,27 @@ export function mirrorTotals(records, opts = {}) {
 }
 
 // ---------- ranks ----------
+/** "Since vX" line. A new version only explains a difference if it changed trading, and only when the gap
+ *  is bigger than the luck of which coins came along (about two standard errors), with 30+ trades each side. */
+export function versionLine(version, cur = [], prevVersion = null, prev = []) {
+  if (!version || !cur.length) return null;
+  const st = (rs) => {
+    const xs = rs.map((r) => r.fcat), n = xs.length, m = xs.reduce((a, x) => a + x, 0) / n;
+    const v = n > 1 ? xs.reduce((a, x) => a + (x - m) ** 2, 0) / (n - 1) : 0;
+    return { n, m, se: Math.sqrt(v / n), wins: rs.filter((r) => r.fcat > 0).length };
+  };
+  const a = st(cur);
+  let line = `Since v${version}: ${a.n} trades, ${a.wins} won, avg FCAT ${pct(a.m)}`;
+  if (prevVersion && prev.length) {
+    const b = st(prev), gap = a.m - b.m, noise = 2 * Math.sqrt(a.se ** 2 + b.se ** 2), band = `±${(noise * 100).toFixed(1)} pts`;
+    const verdict = a.n < 30 || b.n < 30 ? 'too few trades to compare versions (needs 30+ on each side)'
+      : Math.abs(gap) <= noise ? `within normal luck (${band}): no real difference`
+      : `${gap > 0 ? 'better' : 'worse'} by more than luck (${band}), if this version changed trading at all`;
+    line += ` vs ${pct(b.m)} over ${b.n} trades on v${prevVersion} → ${verdict}`;
+  }
+  return line + '.';
+}
+
 // trades = bought trades · win = FCAT win rate · bank = $1000 paper bankroll at least this · last = the last
 // N bought trades must be positive in total · beat = predictions beat always-guessing by this many points
 // (null = not needed) · pf = profit factor (money won / money lost) · days = green days among the last 7.
@@ -475,7 +496,7 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
     const m = mirror10(rec, { rules: { stopLossPct: rules.stopLossPct, gainGatePct: rules.gainGatePct, gateSec }, solUsd: solUsd() });
     const day = mirrorTotals(records.filter((r) => String(r.time).slice(0, 10) === String(rec.time).slice(0, 10)), { solUsd: solUsd() });
     const v = mem.versions.at(-1), sinceV = bought(records).slice(v?.fromBought ?? 0), prevV = mem.versions.at(-2);
-    const verLine = sinceV.length ? `Since v${v.version}: ${sinceV.length} trades, ${sinceV.filter((r) => r.fcat > 0).length} won, avg FCAT ${pct(sinceV.reduce((a, r) => a + r.fcat, 0) / sinceV.length)}${prevV ? (() => { const pv = bought(records).slice(prevV.fromBought, v.fromBought); return pv.length ? ` vs ${pct(pv.reduce((a, r) => a + r.fcat, 0) / pv.length)} on v${prevV.version}` : ''; })() : ''}.` : null;
+    const verLine = versionLine(v?.version, sinceV, prevV?.version, prevV ? bought(records).slice(prevV.fromBought, v.fromBought) : []);
     const name = rec.symbol ? `$${rec.symbol}` : `${rec.mint.slice(0, 6)}…`;
     const body = [
       `BRAIN · ${rankLine()}`,

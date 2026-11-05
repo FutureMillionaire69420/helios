@@ -2992,7 +2992,7 @@ async function runStudyCmd(argv = process.argv) {
   for (const [k, v] of Object.entries(R.skipReasons)) console.log(`  skipped ${v}×: ${k}`);
   console.log(`\n${st.brain.journeyLine(st.records)}`);
   console.log(`Go-live readiness ${j.readiness.passed}/${j.readiness.of}:`); for (const c of j.readiness.checks) console.log(`  ${c.ok ? 'OK  ' : 'NOT '} ${c.text}`);
-  if (L.accuracy) console.log(`Predictions: ${L.accuracy.hits}/${L.accuracy.total} right (${Math.round(L.accuracy.rate * 100)}%), last 20 ${Math.round(L.accuracyLast20.rate * 100)}%; always guessing the usual result: ${Math.round(L.accuracy.baseline * 100)}%`);
+  if (L.accuracy) console.log(`Predictions: ${L.accuracy.hits}/${L.accuracy.total} right (${Math.round(L.accuracy.rate * 100)}%), last 20 ${Math.round(L.accuracyLast20.rate * 100)}%; always guessing "${L.accuracy.usual}": ${Math.round(L.accuracy.baseline * 100)}% (${L.accuracy.beating ? 'beating it' : 'not clearly beating it'})${L.accuracy.miss != null ? `; average miss ${(L.accuracy.miss * 100).toFixed(1)} pts vs ${(L.accuracy.baseMiss * 100).toFixed(1)} for guessing the average` : ''}`);
   console.log(L.lessons.length ? '\nPatterns the bot has learned:' : '\nPatterns: none strong enough yet (they need 5+ trades).');
   for (const g of L.lessons) console.log(`  ${g.status.padEnd(9)} ${g.avgFcat >= 0 ? 'WIN ' : 'LOSE'} ${g.label}: ${g.wins}/${g.trades} won, avg FCAT ${(g.avgFcat * 100).toFixed(1)}% (z ${g.z.toFixed(1)})`);
   console.log('\nAdvisor (nothing changes automatically):'); for (const x of st.brain.adviceLines(st.records)) console.log(`  ${x}`);

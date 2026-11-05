@@ -590,3 +590,11 @@ No trade setting changed.
 - **Off until every setting is in Render → Environment:** TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN (or TWILIO_API_KEY + TWILIO_API_SECRET), TWILIO_FROM_NUMBER, OWNER_PHONE. The card lists what's missing.
 - **Limits:** only the owner's number, at most one call every 2 minutes and 10 a day. The secret never appears in status, logs or the dashboard; phone numbers show only their last 4 digits. It can't trade.
 - **Voice:** piper "en-us-ryan-high" (CC BY-NC-SA 4.0), pitched down and processed; kept in the private deploy repo only.
+
+## v4.9: the bot's own morning push, and honest scores
+
+- **Morning push (Bot tab):** every day at 07:43 New York time the bot sends your phone one summary: its health (version, uptime, ready or not, Decu's feed, Helius credits), the paper results of the last 24 hours (trades, wins, FCAT, the $10 mirror before and after fees, the brain's rank and bankroll) and the SOL price with its change since yesterday's push.
+  - The bot builds it itself: no AI, no connectors, nothing it can change. It replaces the Claude "Daily bot briefing" scheduled task.
+  - `MORNING_PUSH=false` turns it off; `MORNING_PUSH_AT` moves it (local time in `TIMEZONE`). Once a day at most; a restart more than 3 hours late skips that day. **Send it now** on the card sends a copy at once.
+- **The brain's score, compared with guessing:** "Score 887/1270 (70%)" used to count a guess as right when only its direction was right (−0.2% predicted, −21.3% actual was "RIGHT"). Now every score also says what always guessing the usual result scores, whether the brain beats that by more than luck (about two standard errors), and the average size of its misses against simply guessing the average. Per trade: "direction RIGHT, off by 21.1 pts".
+- **"Since vX" line:** now shows the trade count on both versions and says "too few trades to compare" under 30 trades each, "within normal luck" when the gap is inside about two standard errors, and only otherwise "better/worse by more than luck, if this version changed trading at all". (v4.8 changed no trading code, yet its 19 trades read 4 points worse than v4.7: that was luck.)

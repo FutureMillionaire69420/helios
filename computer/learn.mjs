@@ -289,10 +289,25 @@ export function createBrain({ buySol = 0.1, stopLossPct = 20, gainGatePct = 15, 
   function accuracy(lastN = null) {
     const ps = lastN ? predictions.slice(-lastN) : predictions;
     if (!ps.length) return null;
-    const hits = ps.filter((p) => p.hit).length;
-    // Baseline: always guessing the most common result. The brain is only useful if it beats this.
-    const winsShare = ps.filter((p) => p.actualWin).length / ps.length;
-    return { hits, total: ps.length, rate: hits / ps.length, baseline: Math.max(winsShare, 1 - winsShare) };
+    const hits = ps.filter((p) => p.hit).length, rate = hits / ps.length;
+    // Baseline: always guessing the most common result. The brain is only useful if it beats this,
+    // and by more than luck: about two standard errors (a 70% score over a 66% baseline can be chance).
+    const winsShare = ps.filter((p) => p.actualWin).length / ps.length, baseline = Math.max(winsShare, 1 - winsShare);
+    const margin = 2 * Math.sqrt((baseline * (1 - baseline)) / ps.length);
+    // Size of the miss, not just the direction: the brain's guess vs simply guessing the average so far
+    // (both made before the result was known). Direction-only scoring calls -0.2% vs -21% "right".
+    const sized = ps.filter((p) => Number.isFinite(p.base) && Number.isFinite(p.pred));
+    const avgMiss = (f) => (sized.length ? sized.reduce((a, p) => a + Math.abs(f(p) - p.actual), 0) / sized.length : null);
+    return { hits, total: ps.length, rate, baseline, usual: winsShare >= 0.5 ? 'win' : 'loss', edge: rate - baseline, margin, beating: rate - baseline > margin,
+      miss: avgMiss((p) => p.pred), baseMiss: avgMiss((p) => p.base), sized: sized.length };
+  }
+  /** One honest line: the score, what always guessing the usual result would score, and the size of the misses. */
+  function scoreLine(acc) {
+    if (!acc) return '';
+    const pts = Math.round(acc.edge * 100);
+    const verdict = acc.beating ? `the brain is ${pts} points better` : pts > 0 ? `only ${pts} point${pts === 1 ? '' : 's'} better: could be luck` : 'no better than guessing';
+    const miss = acc.miss != null && acc.baseMiss != null ? ` Average miss ${(acc.miss * 100).toFixed(1)} pts vs ${(acc.baseMiss * 100).toFixed(1)} for guessing the average (${acc.miss < acc.baseMiss ? 'better' : 'not better'}).` : '';
+    return `Score ${acc.hits}/${acc.total} (${Math.round(acc.rate * 100)}%) · always guessing "${acc.usual}" scores ${Math.round(acc.baseline * 100)}% → ${verdict}.${miss}`;
   }
 
   const describe = (st) => `${st.dev >= 0 ? '▲' : '▼'} ${st.label}: ${st.wins}/${st.n} won, avg FCAT ${pct(st.avg)} vs ${pct(mean())} overall`;
@@ -307,7 +322,7 @@ export function createBrain({ buySol = 0.1, stopLossPct = 20, gainGatePct = 15, 
   }
   const journeyLine = (records) => {
     const j = journey(records);
-    return `Journey: L${j.level} ${j.name} · trade ${j.trades}${j.next ? ` · ${j.next.left} to L${j.level + 1} ${j.next.name}` : ''} · go-live ${j.readiness.passed}/${j.readiness.of}${j.accuracy ? ` · predictions ${Math.round(j.accuracy.rate * 100)}% right` : ''}`;
+    return `Journey: L${j.level} ${j.name} · trade ${j.trades}${j.next ? ` · ${j.next.left} to L${j.level + 1} ${j.next.name}` : ''} · go-live ${j.readiness.passed}/${j.readiness.of}${j.accuracy ? ` · predictions ${Math.round(j.accuracy.rate * 100)}% right (always guessing "${j.accuracy.usual}": ${Math.round(j.accuracy.baseline * 100)}%)` : ''}`;
   };
 
   // Results per entry-premium filter (FCAT, all studied Decu buys incl. skipped ones) and per holder verdict.
@@ -344,7 +359,7 @@ export function createBrain({ buySol = 0.1, stopLossPct = 20, gainGatePct = 15, 
     if (!Number.isFinite(rec.fcat)) return { prediction: null, matched: [], events };
     // 1. Score the prediction made before this result was known.
     const prediction = predict(rec);
-    if (prediction) predictions.push({ pred: prediction.fcat, actual: rec.fcat, hit: prediction.win === rec.fcat > 0, actualWin: rec.fcat > 0 });
+    if (prediction) predictions.push({ pred: prediction.fcat, base: prediction.baseline, actual: rec.fcat, hit: prediction.win === rec.fcat > 0, actualWin: rec.fcat > 0 });
     // 2. Which active lessons this trade matched, and whether it agreed with them.
     const ks = keysOf(bucketsOf(rec));
     const matched = ks.filter((k) => ['confirmed', 'emerging'].includes(lessons.get(k.key)?.status))
@@ -413,7 +428,7 @@ export function createBrain({ buySol = 0.1, stopLossPct = 20, gainGatePct = 15, 
       events.push({ kind: levelUp ? 'level' : 'report', title: levelUp ? `Level up: L${level + 1} ${LEVELS[level].name} (${all.n} trades studied)` : `Learning report: ${all.n} trades studied`, priority: levelUp ? 4 : 3, tags: [levelUp ? 'trophy' : 'books'], body: [
         levelUp ? `The bot reached L${level + 1} ${LEVELS[level].name}. Next goal: ${LEVELS[level].goal}.` : null,
         `FCAT last ${lastK.length}: ${pct(avg(lastK))} avg${prevK.length ? ` vs ${pct(avg(prevK))} the ${prevK.length} before (${trend})` : ''} · all ${all.n}: ${pct(mean())} avg, ${all.wins}/${all.n} won`,
-        acc ? `Predictions: ${acc.hits}/${acc.total} right (${Math.round(acc.rate * 100)}%), last 20: ${Math.round(accRecent.rate * 100)}%. Always guessing the usual result scores ${Math.round(acc.baseline * 100)}%: the brain ${acc.rate > acc.baseline + 0.03 ? 'is beating it (it understands something real)' : 'is not beating it yet (needs more trades)'}.` : `Predictions start at ${minTrades} trades.`,
+        acc ? `Predictions (last 20: ${Math.round(accRecent.rate * 100)}% right): ${scoreLine(acc)}` : `Predictions start at ${minTrades} trades.`,
         act.length ? 'Patterns it trusts:' : 'No patterns strong enough yet.',
         ...act.slice(0, 5).map((s) => `${s.status === 'confirmed' ? '✔' : '…'} ${describe(s)}`),
         Object.keys(shapes).length ? `Price shapes: ${Object.entries(shapes).sort((a, c) => c[1].length - a[1].length).map(([k, v]) => `${k} ${v.length}× (${pct(v.reduce((a, x) => a + x, 0) / v.length, 0)})`).join(', ')}` : null,
@@ -441,7 +456,7 @@ export function createBrain({ buySol = 0.1, stopLossPct = 20, gainGatePct = 15, 
     const p = out?.prediction;
     if (p) {
       const acc = accuracy();
-      n.push(`Prediction before the result: ${pct(p.fcat)}${p.basis.length ? ` (from ${p.basis.map((b) => b.label).join(', ')})` : ' (overall average)'} → actual ${pct(rec.fcat)}: ${p.win === rec.fcat > 0 ? 'RIGHT' : 'WRONG'}. Score ${acc.hits}/${acc.total} (${Math.round(acc.rate * 100)}%).`);
+      n.push(`Prediction before the result: ${pct(p.fcat)}${p.basis.length ? ` (from ${p.basis.map((b) => b.label).join(', ')})` : ' (overall average)'} → actual ${pct(rec.fcat)}: direction ${p.win === rec.fcat > 0 ? 'RIGHT' : 'WRONG'}, off by ${(Math.abs(p.fcat - rec.fcat) * 100).toFixed(1)} pts. ${scoreLine(acc)}`);
     } else n.push(`Predictions start after ${minTrades} trades (${all.n} so far).`);
     for (const m of (out?.matched || []).slice(0, 2)) n.push(`Matched ${m.status} pattern ${m.dev >= 0 ? '▲' : '▼'} "${m.label}" (${pct(m.avg)} avg) → ${m.agreed ? 'it held again' : 'this trade went against it'}.`);
     if (rec.shape) { const same = records.filter((r) => r.shape === rec.shape && Number.isFinite(r.fcat)); n.push(`Shape: ${rec.shape}. ${same.length} of ${all.n} trades look like this (avg FCAT ${pct(same.reduce((a, r) => a + r.fcat, 0) / (same.length || 1))}).`); }
@@ -453,7 +468,7 @@ export function createBrain({ buySol = 0.1, stopLossPct = 20, gainGatePct = 15, 
   }
 
   return {
-    observe, predict, accuracy, journey, journeyLine, adviceLines, thinkingNotes,
+    observe, predict, accuracy, scoreLine, journey, journeyLine, adviceLines, thinkingNotes,
     lessons: () => active(),
     snapshot: (records) => ({ journey: journey(records), lessons: active().map((s) => ({ label: s.label, status: s.status, trades: s.n, wins: s.wins, avgFcat: s.avg, z: s.z })), accuracy: accuracy(), accuracyLast20: accuracy(20), advice: advise(records, { buySol, maxPayPct, ...ruleOpts }) }),
     stats: () => ({ ...all, mean: mean(), sd: sd() }),

@@ -601,7 +601,7 @@ function renderBrain() {
   const goal = $('brain-goal'); goal.replaceChildren();
   const gh = h('div', 'card-head', null, goal); h('h2', null, "The brain's own goal", gh); h('span', 'fine', 'paper', gh);
   if (T.goal) { h('p', 'hero-sub', `${C.money(T.goal.profitUsd, { sign: true })} of ${C.money(T.goal.usd, { cents: false })} profit on its $1,000 paper bankroll${T.goal.reached ? ' · REACHED' : ''}`, goal); const m = h('div', 'meter thin steel', null, goal); const f = h('div', 'meter-fill', null, m); f.style.width = Math.max(0, Math.min(1, T.goal.pct)) * 100 + '%'; }
-  if (r.brain) h('p', 'fine', `Level ${r.brain.level} ${r.brain.name} · ${r.brain.trades} trades · go-live checklist ${r.brain.readiness.passed}/${r.brain.readiness.of}${r.brain.accuracy ? ` · predictions ${Math.round(r.brain.accuracy.rate * 100)}% right` : ''}`, goal);
+  if (r.brain) h('p', 'fine', `Level ${r.brain.level} ${r.brain.name} · ${r.brain.trades} trades · go-live checklist ${r.brain.readiness.passed}/${r.brain.readiness.of}${r.brain.accuracy ? ` · predictions ${Math.round(r.brain.accuracy.rate * 100)}% right (always guessing "${r.brain.accuracy.usual || 'loss'}": ${Math.round(r.brain.accuracy.baseline * 100)}%${r.brain.accuracy.beating === false ? ', not clearly better yet' : ''})` : ''}`, goal);
   const rules = $('brain-rules'); rules.replaceChildren(); const rh = h('div', 'card-head', null, rules); h('h2', null, 'Rules the brain trades by', rh); h('span', 'fine', T.autoTune ? 'auto-tune ON (paper)' : 'auto-tune off', rh);
   kv(h('div', 'kv', null, rules), [['Pay at most above Decu', `${T.rules.maxPayPct}% (your setting ${T.defaults.maxPayPct}%)`], ['Stop loss', `−${T.rules.stopLossPct}% (setting −${T.defaults.stopLossPct}%)`], ['Gain gate', `+${T.rules.gainGatePct}% (setting +${T.defaults.gainGatePct}%)`], ['Brain skips', `${T.vetoes.skipped} (${T.vetoes.rightSkips} were right)`]]);
   const mir = $('brain-mirror'); mir.replaceChildren(); const mh = h('div', 'card-head', null, mir); h('h2', null, '$10 mirror', mh); h('span', 'fine', `${T.mirror.trades} trades`, mh);
@@ -727,10 +727,19 @@ function renderVoice(s) {
 }
 $('vc-test').onclick = () => act('/api/call/test', { ok: 'Calling your phone now…', confirmText: 'Ring your phone now with a test call in the Ultron voice?' });
 
+function renderMorning(s) {
+  const m = s.morningPush; if (!m) return;
+  const [hh, mm] = String(m.at || '07:43').split(':').map(Number), t = new Date(2000, 0, 1, hh || 0, mm || 0).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  $('mp-state').textContent = !m.on ? 'Off' : m.alertsOff ? 'Paused (phone alerts off)' : `Daily at ${t}`;
+  $('mp-note').textContent = !m.on ? 'Off. Set MORNING_PUSH=true in Render → Environment to turn it on.' : `${t} ${m.timezone || ''} every day.${m.lastAt ? ` Last sent ${new Date(m.lastAt).toLocaleString()}${m.lastResult && m.lastResult !== 'sent' ? ` (${m.lastResult})` : ''}.` : ' Not sent yet.'}`;
+}
+$('mp-send').onclick = async () => { try { toast(await api('/api/morning/send', { method: 'POST' })); } catch (e) { toast(e.message); } };
+
 function renderBot() {
   const s = S.status; if (!s) return;
   renderCredits(s);
   renderVoice(s);
+  renderMorning(s);
   if (every('pumpfun', 60000)) renderPumpfun();
   const off = s.power === 'off';
   $('power-state').textContent = off ? 'OFF: not watching Decu, no Helius or Solscan credits used.' : 'ON: watching Decu.';

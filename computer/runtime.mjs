@@ -8,12 +8,13 @@ import {Engine} from './engine.mjs';
 import {PUMP_TOKEN,QUOTES} from './solscan.mjs';
 import {createStudy,summaryText} from './study.mjs';
 import {buildAnalytics,digestMessages} from './analytics.mjs';
-import {createThinkingBrain,createBackup,restoreIfEmpty} from './brain.mjs';
+import {createThinkingBrain,createBackup,restoreIfEmpty,mirrorTotals} from './brain.mjs';
 import {createGitSync,createVault} from './vault.mjs';
 import {createDuel} from './duel.mjs';
 import {createPumpApi} from './pumpapi.mjs';
 import {createPumpProfile,parseProfile} from './pumpprofile.mjs';
 import {voiceConfig,voiceStatus,createVoiceCaller} from './voicecall.mjs';
+import {morningDue,morningBrief} from './morning.mjs';
 import {tradeRows} from './dashcalc.mjs';
 import {createGoal} from './goal.mjs';
 import {buyContextFromLogs,tokensOut,buildBuyTransaction,readGlobal,pickFeeRecipient,pickBuybackRecipient,startBlockhashCache,createSellDesk,decodeBondingCurve,quotedInSol,PUMP,TOKEN,TOKEN_2022} from './pumpbuild.mjs';
@@ -1019,7 +1020,7 @@ export async function startRuntime(k, {demo=false}={}) {
       if(!token && c.mode==='live') {res.writeHead(403);return res.end('Token required');}
       if(url.pathname==='/api/status' && req.method==='GET') {
         status.pumpportal=pumpPortalStatus(); status.pumpportalBuilder=ppCheck.result; status.rpcHealth=k.rpcHealth?.()||null;
-        const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',solscanUsage:k.solscanUsage?.()||null,voiceCall:voiceStatus(voiceCfg),heliusUsage:k.heliusUsage?.()||null,paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
+        const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',solscanUsage:k.solscanUsage?.()||null,voiceCall:voiceStatus(voiceCfg),morningPush:morningStatus(),heliusUsage:k.heliusUsage?.()||null,paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
           wallet:{publicKey:c.wallet||null,signerAddress:k.kp?.publicKey||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true},
           held:heldNow(),readiness:readiness(),solUsd:solUsd(),timezone:c.timezone,leader:{label:k.config.leaderLabel||'Decu',address:k.config.leader||null},
           settings:{buySol:c.buySol,maxPositions:c.maxPositions,minLeaderUsd:c.minLeaderUsd,dailyCapUsd:c.dailyCapUsd||0,dailyLossLimit:c.dailyLossLimit||0,rules:{...rules},ruleDefaults:{...ruleDefaults},holdLimitSec:holdLimitMs/1000,gateSec:maxHoldMs/1000,autoTune:c.mode==='paper'&&val('BRAIN_AUTOTUNE','true')!=='false'}};
@@ -1111,6 +1112,7 @@ export async function startRuntime(k, {demo=false}={}) {
       }
       if(url.pathname==='/api/export.csv' && req.method==='GET') {const {toCsv}=await import('./study.mjs');res.writeHead(200,{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':`attachment; filename="decu-trades-${c.mode}-${new Date().toISOString().slice(0,10)}.csv"`});return res.end(toCsv(study?study.records:[]));}
       if(url.pathname==='/api/analytics' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean({...analyticsNow(),ntfy:k.ntfyUsage?.()||null})));}
+      if(url.pathname==='/api/morning/send' && req.method==='POST') {const msg=await sendMorning({test:true});res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8'});return res.end(msg);}
       if(url.pathname==='/api/analytics/send' && req.method==='POST') {const msg=await sendDigest();res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8'});return res.end(msg);}
       if(url.pathname==='/api/research' && req.method==='GET') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(clean({...(study?study.research():{trades:0}),thinking:(()=>{const t=thinking?.status();return t?{vault:thinking.vaultStatus?.()||null,tests:t.tests,speed:t.speed,marketCaps:t.marketCaps,goal:t.goal,patterns:t.patterns,rank:t.rank,rules:t.rules,defaults:t.defaults,autoTune:t.autoTune,veto:t.veto,vetoes:t.vetoes,mirror:t.mirror,decisions:t.decisions.slice(-5)}:null;})(),live:{fees:fee(),feeMode:val('FEE_MODE','max'),push:!!k.stream?.connected?.(),priceChecks:status.priceChecks,sellDesk:desk?{...desk.snapshot(),liveSells:status.localSells||0,lastLiveSellMs:status.lastLocalSellMs??null,paperSellBuilds:status.paperSellBuilds||0,pushedBalances:status.pushedBalances||0}:null,solscan:k.solscanUsage?.()||null,pumpportal:{...pumpPortalStatus(),fastBuys:status.pumpportalFast||0,chainContexts:status.chainCtx||0,race:status.feedRace||null,builderCheck:ppCheck.result}}})));}
       if(req.method==='POST' && ['/api/autocopy/on','/api/autocopy/off'].includes(url.pathname)) {
@@ -1146,5 +1148,30 @@ export async function startRuntime(k, {demo=false}={}) {
     if(Date.now()-(engine.d.analyticsDigestAt||0)>=number('ANALYTICS_DIGEST_HOURS',24)*3600e3 && n>(engine.d.analyticsDigestN||0)) sendDigest().then(m=>engine.event('analytics-digest',{message:m})).catch(()=>{});
   },number('ANALYTICS_CHECK_MS',600_000)); digestTimer?.unref?.();
   const boughtCount=()=>(study?.records||[]).filter(r=>r.taken!==false && !r.skipReason).length;
-  return {engine,server,study,thinking,rules,goal,duel,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;duel?.stop();clearInterval(readyTimer);study?.stop?.();goal?.flush?.();clearInterval(digestTimer);thinking?.stop?.();desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  // MORNING PUSH (morning.mjs): the bot's own daily briefing on the phone at MORNING_PUSH_AT (07:43) in TIMEZONE.
+  // Built from what the bot already knows; no AI, no connectors, nothing it can change. MORNING_PUSH=false = off.
+  let pkgVersion='0'; try { pkgVersion=JSON.parse(fs.readFileSync(new URL('./package.json',import.meta.url),'utf8')).version; } catch {}
+  const morningAt=()=>val('MORNING_PUSH_AT','07:43'), morningOn=()=>val('MORNING_PUSH','true')!=='false';
+  const morningFacts=()=>{
+    const now=Date.now(), since=now-86_400_000;
+    const rs=(study?.records||[]).filter(r=>r.taken!==false && !r.skipReason && Number.isFinite(r.fcat) && Date.parse(r.time)>=since);
+    let mirror=null; try { mirror=rs.length?mirrorTotals(rs,{solUsd:solUsd()}):null; } catch {}
+    return {mode:c.mode,version:pkgVersion,uptimeMs:now-startedAt,ready:readiness(),feed:engine.d.dataOff?'OFF (power off)':status.websocket,lastSignalAt:status.lastSignal,errors:status.errors,
+      trades:rs,buySol:c.buySol,mirror,rankLine:thinking?.rankLine?.()||null,solUsd:solUsd(),solUsdPrev:engine.d.morningPush?.solUsd??null,helius:k.heliusUsage?.()||null,ntfy:k.ntfyUsage?.()||null,now};
+  };
+  const sendMorning=async({test=false}={})=>{
+    if(demo || !k.notify) return 'Phone alerts are not set up here (NTFY_TOPIC).';
+    const f=morningFacts(), m=morningBrief(f), r=await k.notify({...m,priority:3,tags:['sunrise'],kind:'morning'});
+    if(!test) { engine.d.morningPush={...(engine.d.morningPush||{}),solUsd:f.solUsd??engine.d.morningPush?.solUsd??null,at:new Date().toISOString(),result:r}; engine.saveSoon?.(); }
+    return r==='sent'?'Morning push sent to your phone.':`Not sent (${r}).`;
+  };
+  const morningTimer=demo?null:setInterval(()=>{
+    if(stopped || !k.notify || engine.d.alertsOff || !morningOn()) return;
+    const d=morningDue({now:Date.now(),timezone:c.timezone,at:morningAt(),lastDay:engine.d.morningPush?.day});
+    if(!d.due) return;
+    engine.d.morningPush={...(engine.d.morningPush||{}),day:d.day}; engine.saveSoon?.(); // mark first: never twice in a day
+    sendMorning().then(m=>engine.event('morning-push',{message:m})).catch(e=>engine.event('error',{message:'morning push: '+e.message}));
+  },60_000); morningTimer?.unref?.();
+  const morningStatus=()=>({on:morningOn()&&!demo,at:morningAt(),timezone:c.timezone,alertsOff:!!engine.d.alertsOff,lastAt:engine.d.morningPush?.at||null,lastResult:engine.d.morningPush?.result||null});
+  return {engine,server,study,thinking,rules,goal,duel,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;duel?.stop();clearInterval(readyTimer);study?.stop?.();goal?.flush?.();clearInterval(digestTimer);clearInterval(morningTimer);thinking?.stop?.();desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
 }

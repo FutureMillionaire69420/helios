@@ -115,6 +115,29 @@ test('shapes and the real exit rules replayed on a path (gate counts from Decu\'
   assert.equal(simulateRules({curve: [-0.09, -0.05, -0.1], delaySec: 2}).open, true, 'never +15% → holds for his sell');
 });
 
+test('the brain score is judged against always guessing, and by the size of its misses', () => {
+  // Nothing predicts the result: 70% lose, the trades all look alike. Guessing "loss" every time scores 70%.
+  const blind = createBrain({reportEvery: 0}), r1 = [];
+  for (let i = 0; i < 80; i++) { const r = mkRec(i, {fcat: i % 10 < 7 ? -0.2 + (i % 3) * 0.01 : 0.15}); r1.push(r); blind.observe(r, r1); }
+  const a = blind.accuracy();
+  assert.equal(a.usual, 'loss');
+  assert.ok(Math.abs(a.baseline - 0.7) < 0.03, String(a.baseline));
+  assert.equal(a.beating, false, `a ${Math.round(a.rate * 100)}% score over a ${Math.round(a.baseline * 100)}% baseline is not skill`);
+  assert.ok(a.miss != null && a.baseMiss != null && a.sized === a.total);
+  assert.match(blind.scoreLine(a), /always guessing "loss" scores 70%/);
+  assert.match(blind.scoreLine(a), /no better than guessing|could be luck/);
+  // A real pattern: overpaying loses, good entries win → beats guessing, with smaller misses than the average.
+  const smart = createBrain({reportEvery: 0}), r2 = [];
+  for (let i = 0; i < 90; i++) { const bad = i % 3 === 0; const r = mkRec(i, bad ? {entryGap: 1.3, fcat: -0.3} : {entryGap: 0.2, fcat: 0.1}); r2.push(r); smart.observe(r, r2); }
+  const b = smart.accuracy();
+  assert.equal(b.beating, true, JSON.stringify(b));
+  assert.ok(b.miss < b.baseMiss, `${b.miss} vs ${b.baseMiss}`);
+  assert.match(smart.scoreLine(b), /the brain is \d+ points better/);
+  // The per-trade note says the direction and how far off it was.
+  const note = smart.thinkingNotes(r2.at(-1), smart.observe(mkRec(99, {entryGap: 0.2, fcat: 0.1}), [...r2, mkRec(99, {entryGap: 0.2, fcat: 0.1})]), r2)[0];
+  assert.match(note, /direction (RIGHT|WRONG), off by \d+\.\d pts\. Score/);
+});
+
 test('the brain finds a real pattern, confirms it, predicts with it and alerts once', () => {
   const brain = createBrain({reportEvery: 10});
   const recs = [], events = [];
@@ -141,7 +164,7 @@ test('the brain finds a real pattern, confirms it, predicts with it and alerts o
   // Reports every 10 trades and level-ups (10 → Learner, 25 → Analyst), never both for one trade.
   assert.deepEqual(events.filter((e) => e.kind === 'report' || e.kind === 'level').map((e) => e.kind), ['level', 'report', 'level', 'report', 'report']);
   const rep = events.find((e) => e.kind === 'report' && /40 trades/.test(e.title));
-  assert.ok(/Predictions: \d+\/\d+ right/.test(rep.body) && /Go-live readiness \d\/4/.test(rep.body) && /Advisor/.test(rep.body), rep.body);
+  assert.ok(/Predictions \(last 20: \d+% right\): Score \d+\/\d+ \(\d+%\) · always guessing "(win|loss)" scores \d+% → the brain is \d+ points better/.test(rep.body) && /Go-live readiness \d\/4/.test(rep.body) && /Advisor/.test(rep.body), rep.body);
 });
 
 test('advisor recommends the max-pay guard that the data supports; readiness checklist', () => {
