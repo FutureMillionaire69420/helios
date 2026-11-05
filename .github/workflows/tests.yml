@@ -1,0 +1,20 @@
+# Runs the bot's tests on every push and pull request: the full suite (npm test) and the demo smoke run.
+# Nothing here touches a wallet, a key or the Render service.
+name: tests
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: computer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+      - run: npm run smoke
