@@ -140,6 +140,24 @@ export function holderCheck(heldUsd, mcap, rules, k) {
   const required = baselineRequired(mcap, rules), relaxedRequired = required * k;
   return { heldUsd, mcapUsd: mcap, required, safe: heldUsd >= required, k, relaxedRequired, relaxedPass: heldUsd >= relaxedRequired, ratio: required > 0 ? heldUsd / required : null };
 }
+// STRICTER (measured only: no trader filters on it). Your baseline almost never rejects a coin: on pump.fun the
+// money held outside the curve grows with the market cap, and under the first step every coin passes. The stricter
+// label scales your steps in proportion below the first one too ($1000 at $10k -> $500 at $5k) and multiplies them
+// by k >= 1, with k set so that rejectShare of recent otherwise-eligible coins would be rejected. Its point is the
+// evidence: what the coins it rejects went on to do, next to the ones it keeps.
+export function scaledRequired(mcapUsd, rules) {
+  if (!fin(mcapUsd) || !rules?.length) return 0;
+  const [m0, h0] = rules[0];
+  return mcapUsd >= m0 ? baselineRequired(mcapUsd, rules) : (h0 * mcapUsd) / m0;
+}
+export function calibrateTight(samples, rules, { rejectShare = 0.3 } = {}) {
+  const ratios = (samples || []).filter((x) => fin(x.heldUsd) && fin(x.mcapUsd) && x.mcapUsd > 0).map((x) => x.heldUsd / scaledRequired(x.mcapUsd, rules)).filter(fin).sort((a, b) => a - b);
+  if (!ratios.length) return { k: null, n: 0, rejected: 0, share: null, rejectShare };
+  const k = Math.max(1, ratios[Math.min(ratios.length - 1, Math.floor(rejectShare * ratios.length))]);
+  const rejected = ratios.filter((r) => r < k).length;
+  return { k, n: ratios.length, rejected, share: rejected / ratios.length, rejectShare };
+}
+export const tightPass = (heldUsd, mcapUsd, rules, k) => (fin(heldUsd) && fin(mcapUsd) && fin(k) ? heldUsd >= k * scaledRequired(mcapUsd, rules) : null);
 /** samples [{heldUsd, mcapUsd}] (coins that passed every other check and HAVE holder data). -> the k to use. */
 export function calibrateK(samples, rules, { target = 1.7, kMin = 0.5 } = {}) {
   const rows = samples.filter((x) => fin(x.heldUsd) && fin(x.mcapUsd));

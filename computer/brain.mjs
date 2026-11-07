@@ -23,7 +23,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { advise, simulateRules } from './learn.mjs';
 import { runTests, speedReport, findingsMarkdown, marketCapGroups } from './tests.mjs';
-import { createVault, tradeNote, dailyNote, patternNote, homeNote, decisionsNote, tradeNoteName, patternNoteName, AGENTS_MD, zipFiles, safeName } from './vault.mjs';
+import { createVault, tradeNote, dailyNote, patternNote, homeNote, decisionsNote, tradeNoteName, patternNoteName, AGENTS_MD, zipFiles, safeName, delayWords } from './vault.mjs';
 import { tradeAnalysis, dayCharts, delayAnalysis, analysisCharts, analysisMarkdown, renderPng, chartUrl } from './notecharts.mjs';
 import { coinChart } from './study.mjs';
 
@@ -68,11 +68,11 @@ export function mirror10(rec, { usd: size = 10, poolFee = 0.0125, rules = {}, so
  *  then the bot's other exits at $10. Blue = made money, red = lost, gray = fees. */
 export function mirrorChart(rec, m) {
   const r2 = (x) => (fin(x) ? Math.round(x * 100) / 100 : null);
-  const rows = [['Decu perfect $10', m.perfectUsd], ['Delay cost', m.delayUsd], ['Your $10 mirror', m.yourUsd], ['Network fees', m.feesUsd == null ? null : -m.feesUsd], ['Mirror after fees', m.afterFeesUsd], ['FCAT at $10', m.fcatUsd], ['PCAT at $10', m.pcatUsd], ['Stop/gate rules', m.rulesUsd]];
+  const rows = [['Decu perfect $10', m.perfectUsd], ['The delay', m.delayUsd], ['Your $10 mirror', m.yourUsd], ['Network fees', m.feesUsd == null ? null : -m.feesUsd], ['Mirror after fees', m.afterFeesUsd], ['FCAT at $10', m.fcatUsd], ['PCAT at $10', m.pcatUsd], ['Stop/gate rules', m.rulesUsd]];
   const color = (label, v) => (label === 'Network fees' ? '#898781' : v >= 0 ? '#2a78d6' : '#e34948');
   const cfg = { type: 'bar', data: { labels: rows.map(([l]) => l), datasets: [{ label: '$ result of a $10 trade', data: rows.map(([, v]) => r2(v)), backgroundColor: rows.map(([l, v]) => color(l, v ?? 0)) }] },
     options: { legend: { display: false }, title: { display: true, fontColor: '#0b0b0b', fontSize: 13, text: [
-      `${rec.symbol ? '$' + rec.symbol : rec.mint.slice(0, 6)}: $10 mirror ${usd(m.yourUsd)} vs Decu ${usd(m.perfectUsd)} · delay cost ${usd(m.delayUsd)} (paid ${pct(m.premium)} more)`,
+      `${rec.symbol ? '$' + rec.symbol : rec.mint.slice(0, 6)}: $10 mirror ${usd(m.yourUsd)} vs Decu ${usd(m.perfectUsd)} · ${delayWords(m.delayUsd)} (paid ${pct(m.premium)} ${m.premium >= 0 ? 'more' : 'less'})`,
       `sold at ${m.exitAt} · ${rec.delaySec ?? '?'} s${rec.latency?.blocksAfter != null ? ` / ${rec.latency.blocksAfter} blocks` : ''} after him · fees ${usd(m.feesUsd == null ? null : -m.feesUsd)} (${m.feeSol.toFixed(4)} SOL)`] },
       plugins: { datalabels: { display: true, anchor: 'end', align: 'end', color: '#0b0b0b', formatter: (v) => v } },
       scales: { xAxes: [{ gridLines: { display: false }, ticks: { fontColor: '#52514e', autoSkip: false, maxRotation: 40 } }], yAxes: [{ gridLines: { color: '#e1e0d9', zeroLineColor: '#52514e' }, ticks: { fontColor: '#52514e' }, scaleLabel: { display: true, labelString: '$ on a $10 trade', fontColor: '#52514e' } }] } } };
@@ -322,7 +322,7 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
     // the same trades under the old and the new rules: did the change help?
     const score = (r) => since.reduce((a, x) => { if (x.entryGap != null && x.entryGap > r.maxPayPct / 100) return a; const s = simulateRules(x, { gateSec, stopLossPct: r.stopLossPct, gainGatePct: r.gainGatePct }); return s ? a + s.pnl * buySol : a; }, 0);
     const before = score(last.from), after = score(last.to);
-    last.judged = true; last.resultSol = after - before;
+    last.judged = true; last.resultSol = after - before; last.judgedAt = records.length;
     if (after < before - 0.002) {
       Object.assign(rules, last.from); mem.tuning.rules = { ...last.from };
       remember('revert', `Reverted my change (${ruleText(last.to)}): it did ${(after - before).toFixed(4)} SOL worse on the ${since.length} trades since.`);
@@ -330,7 +330,17 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
       mem.tuning.history.push({ time: new Date(now()).toISOString(), from: last.to, to: { ...last.from }, why: 'revert: did worse after the change', applied: true, judged: true, fromRecord: records.length });
     } else remember('kept', `Kept ${ruleText(last.to)}: ${(after - before) >= 0 ? '+' : ''}${(after - before).toFixed(4)} SOL vs before on ${since.length} trades.`);
   }
-  const triedAndFailed = (to) => mem.tuning.history.some((h) => h.judged && h.resultSol != null && h.resultSol < -0.002 && JSON.stringify(h.to) === JSON.stringify(to) && records.length - h.fromRecord < 200);
+  // A change that did worse and was undone is not tried (or suggested) again, in whole OR IN PART, until retryAfter
+  // more BOUGHT trades came in after it was UNDONE: the same move on mostly the same evidence would fail the same
+  // way, and a combined change can't say which half hurt. A move is the rules it changes and to what ("cap=20").
+  const retryAfter = 200;
+  const moveOf = (from, to) => Object.keys(limits).filter((k) => fin(to?.[k]) && to[k] !== from?.[k]).map((k) => `${k}=${to[k]}`);
+  const sameRules = (a, b) => Object.keys(limits).every((k) => a?.[k] === b?.[k]);
+  const triedAndFailed = (to) => { const mine = moveOf(rules, to); return mem.tuning.history.some((h, i) => {
+    if (!(h.judged && h.resultSol != null && h.resultSol < -0.002) || /^revert/.test(h.why || '') || !moveOf(h.from, h.to).some((x) => mine.includes(x))) return false;
+    const undoneAt = h.judgedAt ?? mem.tuning.history.slice(i + 1).find((x) => /^revert/.test(x.why || '') && sameRules(x.from, h.to))?.fromRecord ?? h.fromRecord;
+    return bought(records.slice(undoneAt)).length < retryAfter;
+  }); };
   // ----- the paper-test pack (tests.mjs): side by side, never skips; suggests a test only when it is SUPPORTED -----
   let lastTests = null, lastSpeed = null;
   function runPack() {
@@ -342,8 +352,9 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
       const key = `${t.best?.key}`;
       if (!t.supported || mem.testAlerts[t.id] === key) continue;
       mem.testAlerts[t.id] = key;
-      remember('suggest', `Test "${t.name}": ${t.best.label} is SUPPORTED (${t.best.train >= 0 ? '+' : ''}${t.best.train.toFixed(4)} SOL on older trades, ${t.best.test >= 0 ? '+' : ''}${t.best.test.toFixed(4)} SOL on newer ones).`);
-      send({ title: `${tag}Brain suggests: ${t.name.replace(/ \(.*\)$/, '')}`, priority: 4, tags: ['bulb'], body: [`${t.what}`, '', `Best version: ${t.best.label}.`, `On older trades: ${t.best.train >= 0 ? '+' : ''}${t.best.train.toFixed(4)} SOL vs what the bot does now. On ${t.test} newer trades it never saw: ${t.best.test >= 0 ? '+' : ''}${t.best.test.toFixed(4)} SOL.`, '', t.sideOnly ? 'This is a side test: it never skips a paper trade.' : 'Nothing was changed. Say the word and it can become a rule.', mode === 'live' ? '' : 'Paper: no real money used.'].join('\n') });
+      const total = fin(t.withSol) ? ` In total on these ${t.trades} trades: the bot now ${t.nowSol >= 0 ? '+' : ''}${t.nowSol.toFixed(4)} SOL, with it ${t.withSol >= 0 ? '+' : ''}${t.withSol.toFixed(4)} SOL${t.withSol < 0 ? ' (loses less, still a loss)' : ''}.` : '';
+      remember('suggest', `Test "${t.name}": ${t.best.label} is SUPPORTED (${t.best.train >= 0 ? '+' : ''}${t.best.train.toFixed(4)} SOL on older trades, ${t.best.test >= 0 ? '+' : ''}${t.best.test.toFixed(4)} SOL on newer ones).${total}`);
+      send({ title: `${tag}Brain suggests: ${t.name.replace(/ \(.*\)$/, '')}`, priority: 4, tags: ['bulb'], body: [`${t.what}`, '', `Best version: ${t.best.label}.`, `On older trades: ${t.best.train >= 0 ? '+' : ''}${t.best.train.toFixed(4)} SOL vs what the bot does now. On ${t.test} newer trades it never saw: ${t.best.test >= 0 ? '+' : ''}${t.best.test.toFixed(4)} SOL.${total}`, '', t.sideOnly ? 'This is a side test: it never skips a paper trade.' : 'Nothing was changed. Say the word and it can become a rule.', mode === 'live' ? '' : 'Paper: no real money used.'].join('\n') });
     }
     writeVault();
     return lastTests;
@@ -461,6 +472,10 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
       remember('tune', `Changed: ${why.join('; ')}.`);
       send({ title: `${tag}Brain: I changed my paper rules`, priority: 4, tags: ['gear'], body: ['What I changed and why:', ...why.map((w) => '• ' + w), '', `Now: ${ruleText(rules)}.`, `Your settings stay ${ruleText(defaults)}; I check my change after ${revertAfter} more trades and undo it if it did worse.`, 'Paper only: live settings never change on their own.'].join('\n') });
     } else {
+      // a suggestion is made once: again only after the rules change or retryAfter more bought trades
+      const key = moveOf(rules, to).join(',');
+      if (mem.lastSuggestion?.key === key && bought(records.slice(mem.lastSuggestion.at)).length < retryAfter) return;
+      mem.lastSuggestion = { key, at: records.length };
       mem.tuning.history.push({ time: new Date(now()).toISOString(), from: { ...rules }, to: { ...to }, why: why.join('; '), applied: false, fromRecord: records.length });
       remember('suggest', `Suggested: ${why.join('; ')}.`);
       send({ title: `${tag}Brain suggests a change`, priority: 4, tags: ['bulb'], body: ['I would change:', ...why.map((w) => '• ' + w), '', `Now: ${ruleText(rules)}. Suggested: ${ruleText(to)}.`, mode === 'live' ? 'LIVE: I never change live settings. Change them on Render if you agree.' : 'Auto-tune is off (BRAIN_AUTOTUNE=false), so nothing was changed.'].join('\n') });
@@ -509,11 +524,11 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
       m ? '' : null,
       m ? `$10 MIRROR (bought at your real entry, sold ${m.exitAt}):` : '$10 mirror: no Decu price for this trade.',
       m ? `• Decu perfect $10: ${usd(m.perfectUsd)} (his price in, same exit)` : null,
-      m ? `• Your $10 mirror: ${usd(m.yourUsd)} → the delay cost ${usd(m.delayUsd)} (you paid ${pct(m.premium)} ${m.premium >= 0 ? 'more' : 'less'}, ${rec.delaySec ?? '?'} s${rec.latency?.blocksAfter != null ? ` / ${rec.latency.blocksAfter} blocks` : ''} after him)` : null,
+      m ? `• Your $10 mirror: ${usd(m.yourUsd)} → ${delayWords(m.delayUsd)} (you paid ${pct(m.premium)} ${m.premium >= 0 ? 'more' : 'less'}, ${rec.delaySec ?? '?'} s${rec.latency?.blocksAfter != null ? ` / ${rec.latency.blocksAfter} blocks` : ''} after him)` : null,
       m && m.feesUsd != null ? `• Network fees: ${usd(-m.feesUsd)} (${m.feeSol.toFixed(4)} SOL priority + tip, the same at any size) → after fees ${usd(m.afterFeesUsd)}` : null,
       m ? `• Same trade at $10: FCAT ${usd(m.fcatUsd)} · PCAT ${usd(m.pcatUsd)} · your stop/gate rules ${usd(m.rulesUsd)}${m.rulesHow ? ` (${m.rulesHow})` : ''}` : null,
       rec.crowd ? `• Place in line: #${rec.crowd.place} after Decu (${rec.crowd.trades} trade${rec.crowd.trades === 1 ? '' : 's'} by others landed between his buy and yours${rec.crowd.sol != null ? `, ${rec.crowd.sol >= 0 ? '+' : ''}${rec.crowd.sol} SOL into the curve` : ''}${rec.crowd.exact ? '' : ', paper estimate'})` : null,
-      day.trades ? `Today at $10: Decu ${usd(day.perfectUsd)} · you ${usd(day.yourUsd)} · delay cost ${usd(day.delayUsd)} · fees ${usd(-day.feesUsd)} over ${day.trades} trades` : null,
+      day.trades ? `Today at $10: Decu ${usd(day.perfectUsd)} · you ${usd(day.yourUsd)} · ${delayWords(day.delayUsd)} · fees ${usd(-day.feesUsd)} over ${day.trades} trades` : null,
       '',
       `My rules now: ${ruleText(rules)}${JSON.stringify(rules) !== JSON.stringify(defaults) ? ` (your settings: ${ruleText(defaults)})` : ''}`,
       verLine,
@@ -554,5 +569,5 @@ export function createThinkingBrain({ file, study, mode = 'paper', buySol = 0.1,
     if (noteCharts) notesQueue = notesQueue.then(async () => { analysisAt = now(); await renderInto('analysis', analysisCharts(delayAnalysis(records, { buySol, solUsd: solUsd(), mirrorOf }))); writeNotes([]); }).catch((e) => log('second brain charts: ' + e.message));
     if (gitSync) setTimeout(() => pushVault().catch(() => {}), 30_000).unref?.();
   }
-  return { onTrade, gate, status, save, backup: backupSoon, rankLine, memory: () => mem, runPack, vaultZip, pushVault, notesIdle: () => notesQueue, vaultStatus: () => (vault ? { files: vault.list().length, unsynced: unsynced.size, sync: gitSync ? gitSync.status() || { pending: true } : null } : null), stop: () => { clearInterval(syncTimer); vault?.close(); }, findings: () => findingsMarkdown({ tests: lastTests || runPack(), speed: lastSpeed, mode, updated: new Date(now()).toISOString(), solUsd: solUsd() }) };
+  return { onTrade, gate, status, save, backup: backupSoon, rankLine, memory: () => mem, runPack, _test: { triedAndFailed, moveOf }, vaultZip, pushVault, notesIdle: () => notesQueue, vaultStatus: () => (vault ? { files: vault.list().length, unsynced: unsynced.size, sync: gitSync ? gitSync.status() || { pending: true } : null } : null), stop: () => { clearInterval(syncTimer); vault?.close(); }, findings: () => findingsMarkdown({ tests: lastTests || runPack(), speed: lastSpeed, mode, updated: new Date(now()).toISOString(), solUsd: solUsd() }) };
 }

@@ -10,6 +10,9 @@
 //  3. DECIDE: after 30+ shared buys, a challenger whose 90% interval of "extra SOL per buy" is above zero is
 //     adopted (a new version of the trader); below zero, dropped; still unclear after 80, dropped as "no
 //     clear difference". After an adoption the old settings keep running for a while: if they win, it reverts.
+//  4. EXPLORE: a trader whose filters let nothing through learns nothing. After idleHours with no trade and no
+//     look-back idea good enough to test, it loosens the ONE filter that alone rejected the most recent Decu buys
+//     by one step, as a paper challenger. Same rule as any test: adopted only if it wins on buys it has not seen.
 import { DEFAULTS, LIMITS, allowedChange, replay, bootstrapMean, evidence, summarize, fin, CHECK_NAMES, isMissing, entryChecks } from './duelmath.mjs';
 
 // The values a brain tries, in BOTH directions around your numbers (each one must still win a forward test).
@@ -53,7 +56,7 @@ export function lookBack(strategy, p, recs, api, { minN = 20 } = {}) {
   return { n: pop.length, ideas };
 }
 
-export function createDuelBrain({ strategy, api, log = () => {}, minForward = 30, maxForward = 80, maxActive = 4 }) {
+export function createDuelBrain({ strategy, api, log = () => {}, minForward = 30, maxForward = 80, maxActive = 4, idleHours = 24, minOnly = 10 }) {
   const label = strategy.toUpperCase();
   let mem = { experiments: [], decisions: [], nextId: 1, lookBack: null };
   let cached = null, dirty = true, tradesSince = 0;
@@ -109,12 +112,47 @@ export function createDuelBrain({ strategy, api, log = () => {}, minForward = 30
     const lb = lookBack(strategy, m.p, api.candidates(), api);
     mem.lookBack = { at: new Date(now()).toISOString(), n: lb.n, top: lb.ideas.slice(0, 5) };
     const recent = new Set(mem.experiments.slice(-12).map((e) => JSON.stringify(e.diff)));
+    let started = 0;
     for (const idea of lb.ideas) {
       if (active.length >= maxActive) break;
       if (idea.meanDiff <= 0.005 || idea.changed < 5 || recent.has(JSON.stringify(idea.diff))) continue;
       if (active.some((e) => Object.keys(e.diff).some((k) => k in idea.diff))) continue;
-      active.push(startExperiment(idea.diff, 'challenger', `looking back at ${idea.n} buys it was ${pct(idea.meanDiff)} per buy better`));
+      active.push(startExperiment(idea.diff, 'challenger', `looking back at ${idea.n} buys it was ${pct(idea.meanDiff)} per buy better`)); started++;
     }
+    const best = lb.ideas[0];
+    mem.idle = lb.n < 20 ? `I need 20+ recorded Decu buys with a price path before I look back for ideas (I have ${lb.n}).`
+      : `none of my ${lb.ideas.length} look-back ideas clears +0.5% per buy${best ? ` (best: ${paramText(best.diff)}, ${pct(best.meanDiff)} on ${best.n} past buys)` : ''}.`;
+    if (!started && active.length < maxActive) explore(active, recent);
+  };
+  /** The filter that ALONE rejected the most recent Decu buys, loosened one step (never a value tested lately). */
+  const explore = (active, recent) => {
+    const m = main(); if (!m || active.some((e) => e.kind === 'explore')) return null;
+    const trades = api.tradesOf(strategy), lastAt = trades.length ? Math.max(...trades.map((t) => t.closedAt || 0)) : 0;
+    const idleMs = now() - lastAt;
+    if (idleMs < idleHours * 3600e3 || now() - (mem.lastExploreAt || 0) < idleHours * 3600e3) return null;
+    const recs = api.candidates().slice(-600), rj = rejections(recs);
+    const steps = (key) => {
+      const p = m.p;
+      if (key === 'hisUsd') return [150, 75, 40].filter((v) => v < p.hisUsdMin).map((v) => ({ hisUsdMin: v }));
+      if (key === 'pay') return (GRID[strategy]?.maxPayPct || []).filter((v) => v > p.maxPayPct).map((v) => ({ maxPayPct: v }));
+      if (key === 'crowd') return fin(p.maxBuysAhead) ? [{ maxBuysAhead: p.maxBuysAhead + 1 }] : [];
+      if (key === 'mcap') { // too big or too small? loosen the side that rejected more
+        const out = recs.filter((r) => r.decisions?.[strategy]?.fails?.includes('mcap') && fin(r.hisMcapUsd));
+        const over = out.filter((r) => r.hisMcapUsd > p.mcapMax).length;
+        return over >= out.length - over ? [15000, 22000, 30000, 45000].filter((v) => v > p.mcapMax).map((v) => ({ mcapMax: v })) : [5000, 3000, 500].filter((v) => v < p.mcapMin).map((v) => ({ mcapMin: v }));
+      }
+      return [];
+    };
+    for (const b of [...rj.byReason].sort((a, b) => b.only - a.only)) {
+      if (b.missing || b.only < minOnly) continue;
+      const diff = steps(b.key).find((d) => Object.entries(d).every(([k, v]) => allowedChange(strategy, k, v)) && !recent.has(JSON.stringify(d)) && !active.some((e) => Object.keys(e.diff).some((k) => k in d)));
+      if (!diff) continue;
+      mem.lastExploreAt = now();
+      const x = startExperiment(diff, 'explore', `exploring: ${trades.length ? `no trade for ${Math.round(idleMs / 3600e3)} h` : 'no trade yet'} and "${b.text}" alone rejected ${b.only} of the last ${recs.length} Decu buys; a paper test on buys I have not seen decides`);
+      if (x) mem.idle = null;
+      return x;
+    }
+    return null;
   };
 
   // ---------- what it believes, what it rejects, what each filter cost ----------
@@ -158,10 +196,11 @@ export function createDuelBrain({ strategy, api, log = () => {}, minForward = 30
         b.n++;
         if (fails.length === 1) { b.only++; if (cf) { b.cfN++; b.cfSol += cf.pnlSol; b.cfRet += cf.ret; } }
       }
-      if (recent.length < 25) recent.push({ id: r.id, sym: r.sym, mint: r.mint, time: r.hisTime, reasons: fails.map((f) => CHECK_NAMES[f] || f), cf: cf ? cf.ret : null });
+      recent.push({ id: r.id, sym: r.sym, mint: r.mint, time: r.hisTime, reasons: fails.map((f) => CHECK_NAMES[f] || f), cf: cf ? cf.ret : null });
     }
     const list = Object.values(by).map((b) => ({ ...b, cfAvg: b.cfN ? b.cfRet / b.cfN : null, verdict: !b.cfN ? 'no outcome yet' : b.cfSol < 0 ? `saved ${sol(-b.cfSol)}` : `missed ${sol(b.cfSol)}` })).sort((a, b) => b.n - a.n);
-    return { total, missing, byReason: list, recent: recent.reverse().slice(0, 25).reverse() };
+    // recs run oldest to newest: keep the NEWEST 25 (oldest first, newest last; the note shows them newest first)
+    return { total, missing, byReason: list, recent: recent.slice(-25) };
   };
 
   const build = () => {
@@ -176,7 +215,7 @@ export function createDuelBrain({ strategy, api, log = () => {}, minForward = 30
     return {
       strategy, label, version: m.version, params: m.p, defaults: DEFAULTS[strategy], autoTune: api.autoTune, updated: new Date(now()).toISOString(),
       summary: s, evidence: evidence(trades.map((t) => t.ret)), optimizing, protected: protectedList,
-      testing, newest, lookBack: mem.lookBack, beliefs: beliefs(trades, recs), rejections: rejections(recs.slice(-600)),
+      testing, newest, lookBack: mem.lookBack, idle: mem.idle || null, beliefs: beliefs(trades, recs), rejections: rejections(recs.slice(-600)),
       validation: mem.experiments.filter((e) => e.status !== 'testing').slice(-15).reverse(), decisions: mem.decisions.slice(-20).reverse(),
       versions: m.version,
     };
@@ -208,7 +247,7 @@ export function brainNote(r) {
     `# ${r.label} brain (v${r.version})`, '', `${link(notePaths.home, 'DIP vs FCAT')} · paper only`, '',
     `**Results:** ${s.n} trades, ${fin(s.winRate) ? Math.round(s.winRate * 100) + '% won' : '—'}, ${sol(s.pnlSol, 4)}, average ${pct(s.avgRet)} per trade, worst drop ${sol(s.maxDrawdownSol, 3)}.`,
     `**Evidence:** ${r.evidence.text}.`, '',
-    '## What I am testing right now', ...(r.testing.length ? r.testing.map((x) => `- ${paramText(x.diff)} (${x.kind === 'revert-check' ? 'checking my last change' : 'challenger'}): ${x.result?.n ?? 0} of ${x.need} shared Decu buys so far, ${sol(x.result?.meanSol, 4)} per buy vs me${x.result?.n >= 2 ? ` (90% interval ${sol(x.result.low, 4)} to ${sol(x.result.high, 4)})` : ''}. Every buy it is judged on came after it started: unseen data.`) : ['- Nothing yet: I need 20+ recorded Decu buys that passed my filters before I look back for ideas.']), '',
+    '## What I am testing right now', ...(r.testing.length ? r.testing.map((x) => `- ${paramText(x.diff)} (${x.kind === 'revert-check' ? 'checking my last change' : x.kind === 'explore' ? 'exploring: my filters let almost nothing through' : 'challenger'}): ${x.result?.n ?? 0} of ${x.need} shared Decu buys so far, ${sol(x.result?.meanSol, 4)} per buy vs me${x.result?.n >= 2 ? ` (90% interval ${sol(x.result.low, 4)} to ${sol(x.result.high, 4)})` : ''}. Every buy it is judged on came after it started: unseen data.`) : [`- Nothing right now: ${r.idle || 'no idea good enough to test yet.'}`]), '',
     '## Settings I optimise (and their limits)', ...r.optimizing.map((o) => `- ${o.name}: now ${o.now ?? '—'} (allowed ${o.range[0]}–${o.range[1]})`), '', `Protected (never changed by me): ${r.protected.join('; ')}.`, '',
     '## What I believe is working', ...(r.beliefs.working?.length ? r.beliefs.working.map((b) => `- ${b.text}: ${pct(b.avg)} average over ${b.n} trades (${pct(b.vsAll)} vs my average)`) : [`- ${r.beliefs.note || 'nothing stands out yet'}`]), '',
     '## What I believe is hurting', ...(r.beliefs.hurting?.length ? r.beliefs.hurting.map((b) => `- ${b.text}: ${pct(b.avg)} average over ${b.n} trades (${pct(b.vsAll)} vs my average)`) : [`- ${r.beliefs.note || 'nothing stands out yet'}`]), '',
@@ -255,7 +294,7 @@ export function brainLogNote(day, reports) {
   for (const r of reports.filter(Boolean)) {
     const ds = (r.decisions || []).filter((x) => String(x.at).slice(0, 10) === day).reverse();
     L.push(`## ${r.label} brain (v${r.version})`, '', '**Decisions today**', ...(ds.length ? ds.map((x) => `- ${String(x.at).slice(11, 16)} **${x.kind}**: ${x.text}`) : ['- none']), '',
-      '**Testing now**', ...(r.testing?.length ? r.testing.map((x) => `- ${paramText(x.diff)}: ${x.result?.n ?? 0}/${x.need} shared buys, ${sol(x.result?.meanSol, 4)} per buy vs the trader`) : ['- nothing']), '',
+      '**Testing now**', ...(r.testing?.length ? r.testing.map((x) => `- ${paramText(x.diff)}${x.kind === 'explore' ? ' (exploring)' : ''}: ${x.result?.n ?? 0}/${x.need} shared buys, ${sol(x.result?.meanSol, 4)} per buy vs the trader`) : [`- nothing${r.idle ? `: ${r.idle}` : ''}`]), '',
       '**Best ideas from looking back**', ...(r.lookBack?.top?.length ? r.lookBack.top.slice(0, 3).map((x) => `- ${paramText(x.diff)}: ${pct(x.meanDiff)} per buy on ${x.n} past buys`) : ['- not enough buys yet']), '',
       '**What I believe**', ...[...(r.beliefs?.working || []).slice(0, 3).map((b) => `- working: ${b.text} (${pct(b.avg)} over ${b.n})`), ...(r.beliefs?.hurting || []).slice(0, 3).map((b) => `- hurting: ${b.text} (${pct(b.avg)} over ${b.n})`)].concat((r.beliefs?.working?.length || r.beliefs?.hurting?.length) ? [] : [`- ${r.beliefs?.note || 'nothing stands out yet'}`]), '');
   }
@@ -280,13 +319,23 @@ export function homeNote(a) {
 }
 export function holderNote(hr) {
   const o = hr.outcomes, line = (x) => (x.n ? `${pct(x.avg)} average over ${x.n} (${x.wins} won)` : 'no outcomes yet');
-  return [fm({ type: 'duel-holder-rule', k: hr.k, increase: fin(hr.increase) ? Math.round(hr.increase * 1000) / 10 : null, coins: hr.coins, missing: hr.missing }), '# Holder rule experiment', '', link(notePaths.home, 'DIP vs FCAT'), '',
+  const T = hr.tight, money = (x) => `$${Math.round(x).toLocaleString('en-US')}`, allIn = hr.withData > 0 && hr.baselineSafe >= hr.withData * 0.98;
+  const tk = T?.outcomes, cmp = tk && tk.kept.n >= 20 && tk.rejected.n >= 20 ? tk.rejected.avg - tk.kept.avg : null;
+  const tightLines = ['## A stricter rule (measured only: no trader uses it)',
+    allIn ? `Why: your baseline accepted ${hr.baselineSafe} of ${hr.withData} coins with holder data. On pump.fun the money held outside the curve grows with the market cap, so "$${hr.rules[0][1]} at a $${hr.rules[0][0] / 1000}k market cap" is almost always met, and under $${hr.rules[0][0] / 1000}k every coin passes. A rule that rejects nothing cannot help, and relaxing it cannot add coins.` : null,
+    T?.k ? `The stricter rule: holders other than the dev hold at least ${T.k.toFixed(2)}× your steps, scaled in proportion below $${hr.rules[0][0] / 1000}k too (${money(T.k * hr.rules[0][1] / 2)} at a $${hr.rules[0][0] / 2000}k market cap, ${money(T.k * hr.rules[0][1])} at $${hr.rules[0][0] / 1000}k${hr.rules[1] ? `, ${money(T.k * hr.rules[1][1])} at $${hr.rules[1][0] / 1000}k` : ''}). k is set so it would reject about ${Math.round((T.rejectShare ?? 0.3) * 100)}% of recent coins that passed every other check (${T.rejected} of ${T.n}).` : '- Not enough coins with holder data yet (20 needed).',
+    ...(T?.k ? [`- On every coin with holder data it keeps ${T.kept} and rejects ${T.rejectedAll}.`,
+      `- Kept: FCAT ${line(tk.kept)} · DIP ${line(tk.keptDip)}`, `- Rejected: FCAT ${line(tk.rejected)} · DIP ${line(tk.rejectedDip)}`,
+      cmp == null ? '- Verdict: not enough outcomes yet (20 on each side).' : `- Verdict so far (FCAT, no filters): the coins it rejects did ${Math.abs(cmp * 100).toFixed(1)} points ${cmp < 0 ? 'worse' : 'better'} per trade than the ones it keeps, so it ${cmp < -0.02 ? 'looks useful' : cmp > 0.02 ? 'would hurt' : 'makes little difference'}.`] : []),
+    'Nothing changes for the traders: they still use the label above. Turning the stricter rule into a filter is your call.', ''].filter((x) => x != null);
+  return [fm({ type: 'duel-holder-rule', k: hr.k, increase: fin(hr.increase) ? Math.round(hr.increase * 1000) / 10 : null, coins: hr.coins, missing: hr.missing, tight_k: T?.k ? Math.round(T.k * 100) / 100 : null, tight_rejects: T?.rejectedAll ?? null }), '# Holder rule experiment', '', link(notePaths.home, 'DIP vs FCAT'), '',
     `Your baseline (unchanged, still labelled SAFE/RISKY): holders other than the dev must hold ${hr.rules.map(([m, h]) => `$${h} at a $${m / 1000}k market cap`).join(', ')}. Under $${hr.rules[0][0] / 1000}k a coin is always SAFE.`,
     `Relaxed (a separate label): the same steps × k. Now **k = ${hr.k}** (floor ${hr.kMin}: never under $${hr.floorUsd} at a $10k market cap). Target: ${Math.round((hr.target - 1) * 100)}% more coins accepted than the baseline.`, '',
     `- Coins checked: ${hr.coins}; with holder data ${hr.withData}; missing data ${hr.missing} (counted apart, never as rejected)`,
     `- Baseline SAFE: ${hr.baselineSafe}; relaxed accepts: ${hr.relaxedPass} (${fin(hr.increase) ? pct(hr.increase) : '—'} vs baseline); added by relaxing: ${hr.added}`,
     hr.calibration ? `- Last calibration: ${hr.calibration.n} coins that passed every other check, baseline ${hr.calibration.baseline}, relaxed ${hr.calibration.accepted}, ${hr.calibration.targetMet ? 'target met' : `target NOT reachable within the floor: the most this floor allows is ${pct(hr.calibration.maxIncrease)}`}${hr.calibration.note ? ` (${hr.calibration.note})` : ''}` : '- No calibration yet.', '',
     '## What the coins did (FCAT rules, no filters)', `- Baseline SAFE: ${line(o.baselineSafe)}`, `- Added by the relaxed rule: ${line(o.added)}`, `- Rejected by both: ${line(o.rejected)}`, '',
+    ...tightLines,
     'To undo the experiment: set HOLDER_RELAX=off on Render (both traders then use your baseline). The baseline label is kept on every coin either way.', ''].join('\n');
 }
 export function dipsNote(vs) {

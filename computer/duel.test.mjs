@@ -3,9 +3,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { buyRaw, sellSol, buyPriceNow, dipTriggered, exitCheck, holderCheck, calibrateK, kFloor, replay, DEFAULTS, entryChecks, allowedChange, bootstrapMean, summarize } from './duelmath.mjs';
+import { buyRaw, sellSol, buyPriceNow, dipTriggered, exitCheck, holderCheck, calibrateK, kFloor, replay, DEFAULTS, entryChecks, allowedChange, bootstrapMean, summarize, scaledRequired, calibrateTight, tightPass } from './duelmath.mjs';
 import { createDuel, tradeEventsFromLogs } from './duel.mjs';
-import { lookBack, brainNote, tradeNote, brainLogNote, notePaths } from './duelbrain.mjs';
+import { lookBack, brainNote, tradeNote, brainLogNote, notePaths, createDuelBrain, holderNote } from './duelbrain.mjs';
 import { createVault } from './vault.mjs';
 
 const FEE = 0.0125, RULES = [[10000, 1000], [20000, 2500], [30000, 4000]];
@@ -236,4 +236,70 @@ test('brain notes: each DIP/FCAT trade as its brain saw it, and a daily brain lo
   const log = brainLogNote('2026-11-02', [{ label: 'FCAT', version: 2, decisions: [{ at: '2026-11-02T04:00:00Z', kind: 'test', text: 'Started testing X' }, { at: '2026-11-01T04:00:00Z', kind: 'adopt', text: 'old' }], testing: [], lookBack: { top: [{ diff: { maxPayPct: 40 }, meanDiff: 0.03, n: 50 }] }, beliefs: { working: [], hurting: [] } }]);
   assert.ok(log.includes('Started testing X') && !log.includes('old'), "only that day's decisions");
   assert.ok(log.includes('price paid at most') || log.includes('maxPayPct') || log.includes('40'), 'its best idea');
+});
+
+// ---------- an idle trader explores; the newest rejections are the ones shown ----------
+const idleApi = ({ t, recs, lastTradeAgoH, added, p = { ...DEFAULTS.dip, hisUsdMin: 300, mcapMax: 12000 } }) => {
+  const dip = { id: 'dip', strategy: 'dip', role: 'main', version: 2, p };
+  return { now: () => t, variants: () => [dip], candidates: () => recs, autoTune: true, fee: () => FEE, sideFee: () => 0.001, landMs: 500,
+    tradesOf: (id) => (id === 'dip' && lastTradeAgoH != null ? [{ id: 'old', candId: 'old', closedAt: t - lastTradeAgoH * 3600e3, ret: -0.1, pnlSol: -0.01 }] : []),
+    addVariant: (v) => added.push(v), removeVariant: () => true, adopt: () => null };
+};
+const skippedRecs = (t, n = 40) => [...Array(n)].map((_, i) => ({ id: `c${i}`, mint: `Mint${i}`, sym: `S${i}`, hisTime: Math.round(t / 1000) - 4000 + i * 60, hisUsd: 120, hisMcapUsd: 8000, decisions: { dip: { status: 'skipped', fails: ['hisUsd'] } } }));
+
+test('an idle trader explores: after 24 h with no trade it loosens the filter that alone rejected the most buys, one step, once', () => {
+  const t = Date.parse('2026-11-07T12:00:00Z'), added = [], recs = skippedRecs(t);
+  const b = createDuelBrain({ strategy: 'dip', api: idleApi({ t, recs, lastTradeAgoH: 30, added }) });
+  b.cycle();
+  assert.equal(added.length, 1, 'one exploring challenger');
+  assert.deepEqual(added[0].diff, { hisUsdMin: 150 }, "Decu's buy at least $300 → $150, not further");
+  assert.equal(added[0].p.hisUsdMin, 150); assert.equal(added[0].p.sizeSol, 0.1, 'trade size untouched');
+  const x = b._test.mem().experiments[0];
+  assert.equal(x.kind, 'explore'); assert.match(x.why, /no trade for 30 h and "Decu's buy too small" alone rejected 40 of the last 40/);
+  b.cycle(); assert.equal(added.length, 1, 'never a second explorer while one runs');
+  const md = brainNote(b.report());
+  assert.match(md, /Decu's buy at least \(\$\) 150 \(exploring: my filters let almost nothing through\): 0 of 30/);
+});
+
+test('a trader that traded recently does not explore, and its note says the real reason it tests nothing', () => {
+  const t = Date.parse('2026-11-07T12:00:00Z'), added = [];
+  const b = createDuelBrain({ strategy: 'dip', api: idleApi({ t, recs: skippedRecs(t), lastTradeAgoH: 2, added }) });
+  b.cycle();
+  assert.equal(added.length, 0);
+  const md = brainNote(b.report());
+  assert.match(md, /Nothing right now: I need 20\+ recorded Decu buys with a price path before I look back for ideas \(I have 0\)\./);
+  assert.doesNotMatch(md, /that passed my filters/);
+  const log = brainLogNote('2026-11-07', [b.report()]);
+  assert.match(log, /- nothing: I need 20\+ recorded Decu buys/);
+});
+
+test('"Latest rejections" are the newest Decu buys, newest first (not the oldest of the window)', () => {
+  const t = Date.parse('2026-11-07T12:00:00Z'), recs = skippedRecs(t, 40);
+  const r = createDuelBrain({ strategy: 'dip', api: idleApi({ t, recs, lastTradeAgoH: 2, added: [] }) }).report();
+  assert.equal(r.rejections.total, 40);
+  assert.equal(r.rejections.recent.length, 25);
+  assert.equal(r.rejections.recent.at(-1).id, 'c39'); assert.equal(r.rejections.recent[0].id, 'c15');
+  const lines = brainNote(r).split('\n'), at = lines.indexOf('Latest rejections:');
+  assert.match(lines[at + 1], /\$S39: Decu's buy too small/); assert.match(lines[at + 10], /\$S30:/);
+});
+
+test('a stricter holder rule (measured only): scaled below $10k, k set to reject ~30%, and the note shows what those coins did', () => {
+  assert.equal(scaledRequired(5000, RULES), 500, 'in proportion below the first step'); assert.equal(scaledRequired(20000, RULES), 2500, 'your steps above it');
+  // 20 coins all SAFE by your baseline (rich holders): the baseline rejects none, the stricter rule rejects the poorest ~30%
+  const samples = [...Array(20)].map((_, i) => ({ heldUsd: 1500 + i * 200, mcapUsd: 12000 }));
+  assert.ok(samples.every((x) => holderCheck(x.heldUsd, x.mcapUsd, RULES, 1).safe));
+  const t = calibrateTight(samples, RULES, { rejectShare: 0.3 });
+  assert.equal(t.n, 20); assert.equal(t.rejected, 6); assert.ok(t.k > 1);
+  assert.equal(tightPass(1500, 12000, RULES, t.k), false); assert.equal(tightPass(5300, 12000, RULES, t.k), true);
+  assert.equal(calibrateTight([{ heldUsd: 100, mcapUsd: 12000 }, { heldUsd: 200, mcapUsd: 12000 }], RULES, { rejectShare: 0.3 }).k, 1, 'never looser than your baseline');
+  const out = (n, avg) => ({ n, avg, wins: Math.round(n / 3) });
+  const md = holderNote({ on: true, target: 1.7, floorUsd: 500, rules: RULES, k: 0.5, kMin: 0.5, calibration: null, coins: 120, withData: 100, missing: 20, baselineSafe: 100, relaxedPass: 100, added: 0, increase: 0,
+    outcomes: { baselineSafe: out(60, -0.15), added: out(0, null), rejected: out(0, null) },
+    tight: { k: 1.8, n: 100, rejected: 30, rejectShare: 0.3, kept: 70, rejectedAll: 30, outcomes: { kept: out(42, -0.1), rejected: out(25, -0.25), keptDip: out(30, -0.12), rejectedDip: out(20, -0.2) } } });
+  assert.match(md, /tight_k: 1\.8\ntight_rejects: 30/);
+  assert.match(md, /## A stricter rule \(measured only: no trader uses it\)/);
+  assert.match(md, /your baseline accepted 100 of 100 coins with holder data/);
+  assert.match(md, /at least 1\.80× your steps.*\$900 at a \$5k market cap, \$1,800 at \$10k, \$4,500 at \$20k/);
+  assert.match(md, /the coins it rejects did 15\.0 points worse per trade than the ones it keeps, so it looks useful/);
+  assert.match(md, /Nothing changes for the traders/);
 });

@@ -598,3 +598,23 @@ No trade setting changed.
   - `MORNING_PUSH=false` turns it off; `MORNING_PUSH_AT` moves it (local time in `TIMEZONE`). Once a day at most; a restart more than 3 hours late skips that day. **Send it now** on the card sends a copy at once.
 - **The brain's score, compared with guessing:** "Score 887/1270 (70%)" used to count a guess as right when only its direction was right (−0.2% predicted, −21.3% actual was "RIGHT"). Now every score also says what always guessing the usual result scores, whether the brain beats that by more than luck (about two standard errors), and the average size of its misses against simply guessing the average. Per trade: "direction RIGHT, off by 21.1 pts".
 - **"Since vX" line:** now shows the trade count on both versions and says "too few trades to compare" under 30 trades each, "within normal luck" when the gap is inside about two standard errors, and only otherwise "better/worse by more than luck, if this version changed trading at all". (v4.8 changed no trading code, yet its 19 trades read 4 points worse than v4.7: that was luck.)
+
+## v4.10: what the Obsidian notes showed, fixed (paper only)
+
+- **DIP and FCAT stop sitting out (A1).** Both traders' filters had rejected nearly every recent Decu buy ("Decu's buy at least $300" alone rejected 583 of the last 600), so neither had traded since Nov 3, and DIP's brain had no idea worth testing.
+  - A trader idle for 24 hours or more now **explores**: its brain loosens the one filter that alone rejected the most recent buys by one step (DIP: Decu's buy at least $300 → $150), as a paper challenger next to it.
+  - Same rule as every brain test: it is adopted only if it makes more on 30+ Decu buys it has never seen, and the old settings keep running to check it. At most one explorer per trader, at most one a day. Trade size, paper mode and the protected limits are untouched.
+  - The brain note now says why nothing is being tested (e.g. "none of my 30 look-back ideas clears +0.5% per buy"), instead of always "I need 20+ recorded Decu buys".
+- **Holder rule: a stricter label you can judge (A2).** Your baseline accepted 1,594 of 1,594 coins. On pump.fun, the money held outside the curve grows with the market cap, and under $10k every coin passes, so it can't reject anything.
+  - The Holder rule experiment note now measures a stricter version: your steps scaled in proportion below $10k too, times k, with k set so it would reject about 30% of recent coins (`HOLDER_TIGHT_REJECT_PCT`). It shows what the coins it keeps and the coins it rejects went on to do, for FCAT and DIP with no filters.
+  - Measured only: no trader uses it. Your baseline and the relaxed label are unchanged.
+- **Speed report without the absurd numbers (A3).** A few bad fills used to drag the "5+ trades ahead" group's average entry premium to +1,741%, and with it the "100 ms faster is worth $2,513 a month" line.
+  - The groups now use medians. The per-trade-ahead cost is a line through the median at each place in line. Premiums beyond ±300% are counted and left out as bad price data.
+- **The brain stops re-suggesting a change it already undid (A4).** It undid "premium cap 20% + stop −25%" on Nov 3 (−0.0991 SOL on 303 trades, after undoing cap 25% on Nov 2), then suggested it, or its cap half alone, again on Nov 4, 5 and 6.
+  - A change that did worse is now blocked, whole or in part, until 200 more *bought* trades arrive after it was undone (it used to count from when it was made).
+  - With auto-tune off, a suggestion is sent once, not every 10 trades.
+- **SUPPORTED shows the real totals (A5).** Each paper test in `findings.md` now shows what the bot makes now on those trades and what it would make with the best version. A "SUPPORTED" test that still loses says so: "SUPPORTED: loses less, still −X SOL in total". The phone suggestion says the same.
+- **Latest rejections are the newest ones (A6).** The DIP and FCAT brain notes listed the oldest 25 of the last 600 rejected buys under "Latest rejections". That's why they looked stuck on Nov 5 at 15:08.
+- **The delay is worded by its direction (A7).**
+  - Notes, phone alerts, the dashboard and the mirror chart said "the delay cost +$1.95" on a day when the delay helped. Now it's "the delay cost you $0.40" or "the delay helped +$1.95".
+  - The `delay_cost_usd` front matter now holds the cost, so its sign matches its name: positive means it cost you, negative means it helped. Every note is rewritten with it on the next start.

@@ -28,7 +28,7 @@ test('$10 mirror: your entry vs Decu\'s perfect entry, the delay cost and the ne
   assert.ok(Number.isFinite(m.fcatUsd) && Number.isFinite(m.rulesUsd) && Number.isFinite(m.pcatUsd));
   assert.equal(mirror10({ ...rec(2), hisPrice: null }), null, 'no Decu price, no mirror');
   const url = mirrorChart(rec(1), m); assert.match(url, /^https:\/\/quickchart\.io\/chart\?/);
-  assert.match(decodeURIComponent(url), /Delay cost/);
+  assert.match(decodeURIComponent(url), /"The delay"/); assert.match(decodeURIComponent(url), /the delay cost you \$1\.06/);
   const t = mirrorTotals([rec(1), rec(2), rec(3, { taken: false })]);
   assert.equal(t.trades, 2, 'bought trades only');
 });
@@ -203,4 +203,21 @@ test('the version line says when a gap between versions is just luck', () => {
   assert.match(versionLine('2', rs(60, (i) => 0.1 + (i % 2) * 0.01), '1', rs(60, (i) => -0.1 - (i % 2) * 0.01)), /better by more than luck/);
   assert.equal(versionLine('2', []), null);
   assert.equal(versionLine('2', rs(3, () => 0.1)), 'Since v2: 3 trades, 3 won, avg FCAT +10.0%.');
+});
+
+test('a change that was undone is not suggested again until 200 more bought trades came in after it was UNDONE', () => {
+  const dir = tmp(), records = [...Array(450)].map((_, i) => rec(i));
+  const failed = { time: '2026-10-26T20:00:00Z', from: { maxPayPct: 15, stopLossPct: 20, gainGatePct: 15 }, to: { maxPayPct: 20, stopLossPct: 25, gainGatePct: 15 }, why: 'cap 15 → 20; stop −20 → −25', applied: true, judged: true, resultSol: -0.1887, fromRecord: 0 };
+  const undone = { time: '2026-11-02T16:34:00Z', from: failed.to, to: failed.from, why: 'revert: did worse after the change', applied: true, judged: true, fromRecord: 300 };
+  fs.writeFileSync(path.join(dir, 'mem.json'), JSON.stringify({ tuning: { rules: null, history: [failed, undone] } }));
+  const rules = { maxPayPct: 15, stopLossPct: 20, gainGatePct: 15 };
+  const b = createThinkingBrain({ file: path.join(dir, 'mem.json'), study: { records, brain: createBrain({ buySol: 0.1 }) }, mode: 'paper', autoTune: false, rules, defaults: { ...rules }, version: '4.10.0', now: () => day0 + 1e9 });
+  const { triedAndFailed } = b._test;
+  assert.equal(triedAndFailed({ ...rules, maxPayPct: 20, stopLossPct: 25 }), true, '450 records since the change, but only 150 bought since it was undone: still blocked');
+  assert.equal(triedAndFailed({ ...rules, maxPayPct: 20 }), true, 'half of the undone move (cap 15 → 20 alone) is blocked too');
+  assert.equal(triedAndFailed({ ...rules, stopLossPct: 25 }), true, 'so is the other half');
+  assert.equal(triedAndFailed({ ...rules, maxPayPct: 18 }), false, 'a different move is allowed');
+  for (let i = 450; i < 510; i++) records.push(rec(i));
+  assert.equal(triedAndFailed({ ...rules, maxPayPct: 20, stopLossPct: 25 }), false, '210 bought trades after it was undone: it may be tried again');
+  b.stop();
 });

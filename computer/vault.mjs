@@ -29,6 +29,10 @@ const frontMatter = (o) => ['---', ...Object.entries(o).filter(([, v]) => v !== 
 /** A file name Obsidian (and iPhone Files) accept. */
 export const safeName = (s) => String(s).replace(/[\\/:*?"<>|#^[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, 80) || 'untitled';
 const coin = (r) => (r.symbol ? `$${r.symbol}` : r.mint.slice(0, 6));
+/** The delay in words. d = your $10 result minus Decu's (negative: the delay cost you money; positive: it helped). */
+export const delayWords = (d) => (!fin(d) ? 'the delay —' : d < -0.005 ? `the delay cost you $${Math.abs(d).toFixed(2)}` : d > 0.005 ? `the delay helped +$${d.toFixed(2)}` : 'the delay cost nothing');
+/** Front matter: what the delay COST (positive = it cost you, negative = it helped), so the name matches the number. */
+const delayCost = (d) => (fin(d) ? -d : null);
 const bought = (records) => records.filter((r) => r.taken !== false && !r.skipReason && fin(r.fcat));
 export const tradeNoteName = (r) => safeName(`${String(r.time).slice(0, 10)} ${String(r.time).slice(11, 16).replace(':', '')} ${coin(r)}`);
 export const patternNoteName = (label) => safeName(label.replace(/\+/g, 'and'));
@@ -41,7 +45,7 @@ export function tradeNote(r, ctx = {}) {
     type: 'trade', coin: coin(r), mint: r.mint, time: r.time, day, mode: r.mode,
     fcat: r.fcat, won: r.fcat > 0, exit: r.fcatExit, entry_premium: r.entryGap, delay_s: r.delaySec, blocks_after: r.latency?.blocksAfter ?? null,
     place_in_line: r.crowd?.place ?? null, decu_sol: r.hisSol, shape: r.shape, predicted: p?.fcat ?? null, prediction_right: p ? p.right : null,
-    mirror_usd: m?.yourUsd ?? null, decu_perfect_usd: m?.perfectUsd ?? null, delay_cost_usd: m?.delayUsd ?? null, fees_usd: m?.feesUsd ?? null,
+    mirror_usd: m?.yourUsd ?? null, decu_perfect_usd: m?.perfectUsd ?? null, delay_cost_usd: delayCost(m?.delayUsd), fees_usd: m?.feesUsd ?? null,
     market_cap_usd: r.hisMcapUsd ?? r.coin?.marketCapUsd ?? null, patterns: matched,
   }) + [
     `# ${coin(r)} · FCAT ${pct(r.fcat)}`, '',
@@ -58,7 +62,7 @@ export function tradeNote(r, ctx = {}) {
     p ? `- My prediction was ${pct(p.fcat)}: ${p.right ? 'RIGHT' : 'WRONG'}.` : null,
     '',
     m ? '## The $10 mirror' : null,
-    m ? `- Decu perfect $10: ${usd(m.perfectUsd)} · mine: ${usd(m.yourUsd)} · the delay cost ${usd(m.delayUsd)} · fees ${usd(m.feesUsd == null ? null : -m.feesUsd)} → after fees ${usd(m.afterFeesUsd)}` : null,
+    m ? `- Decu perfect $10: ${usd(m.perfectUsd)} · mine: ${usd(m.yourUsd)} · ${delayWords(m.delayUsd)} · fees ${usd(m.feesUsd == null ? null : -m.feesUsd)} → after fees ${usd(m.afterFeesUsd)}` : null,
     m ? `- Same trade at $10: FCAT ${usd(m.fcatUsd)} · PCAT ${usd(m.pcatUsd)} · stop/gate rules ${usd(m.rulesUsd)}${m.rulesHow ? ` (${m.rulesHow})` : ''}` : null,
     m ? '' : null,
     matched.length ? '## Patterns it matched' : null,
@@ -76,7 +80,7 @@ export function dailyNote(day, records, { mirrorOf = () => null, decisions = [],
   const dec = decisions.filter((d) => String(d.time).slice(0, 10) === day);
   return frontMatter({
     type: 'daily', day, trades: rs.length, won: rs.filter((r) => r.fcat > 0).length, fcat_sol_at_0_1: rs.reduce((a, r) => a + r.fcat * 0.1, 0),
-    mirror_usd: ms.length ? sum('yourUsd') : null, decu_perfect_usd: ms.length ? sum('perfectUsd') : null, delay_cost_usd: ms.length ? sum('delayUsd') : null, fees_usd: ms.length ? sum('feesUsd') : null,
+    mirror_usd: ms.length ? sum('yourUsd') : null, decu_perfect_usd: ms.length ? sum('perfectUsd') : null, delay_cost_usd: ms.length ? delayCost(sum('delayUsd')) : null, fees_usd: ms.length ? sum('feesUsd') : null,
     rank, bankroll_usd: bankrollUsd, studied: records.filter((r) => String(r.time).slice(0, 10) === day).length,
   }) + [
     `# ${day}`, '', `[[Home]] · [[machine/analysis/Delays and missed profit|Delays and missed profit]]`, '',
@@ -84,7 +88,7 @@ export function dailyNote(day, records, { mirrorOf = () => null, decisions = [],
     `## Trades (${rs.length} bought, ${rs.filter((r) => r.fcat > 0).length} won)`,
     ...(rs.length ? rs.map((r) => `- ${String(r.time).slice(11, 16)} [[trades/${tradeNoteName(r)}|${coin(r)}]] FCAT ${pct(r.fcat)} · paid ${pct(r.entryGap)} over Decu${r.prediction ? ` · predicted ${pct(r.prediction.fcat)} (${r.prediction.right ? 'right' : 'wrong'})` : ''}`) : ['- none']),
     '',
-    ms.length ? `## At $10 a trade\n- Decu ${usd(sum('perfectUsd'))} · me ${usd(sum('yourUsd'))} · the delay cost ${usd(sum('delayUsd'))} · fees ${usd(-sum('feesUsd'))}\n` : null,
+    ms.length ? `## At $10 a trade\n- Decu ${usd(sum('perfectUsd'))} · me ${usd(sum('yourUsd'))} · ${delayWords(sum('delayUsd'))} · fees ${usd(-sum('feesUsd'))}\n` : null,
     dec.length ? '## What I decided' : null,
     ...dec.map((d) => `- ${String(d.time).slice(11, 16)} **${d.kind}**: ${d.text}`),
     '',

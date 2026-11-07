@@ -89,3 +89,33 @@ test('study: the price tail and the crowd count are saved with the trade and com
   assert.equal(back.crowd.place, 5); assert.ok(Math.abs(back.tail.hisSell.price - 1e-7) < 1e-15);
   assert.equal(again.records.length, 1, 'the tail line merges into its trade, not a new record');
 });
+
+test('the speed report ignores a few absurd fills: medians per place in line, premiums beyond ±300% left out', () => {
+  // 40 normal trades: +2% premium per trade ahead; 3 broken fills at +1,700% to +5,000% with 5+ ahead
+  const ok = Array.from({ length: 40 }, (_, i) => rec(i, { crowd: { trades: i % 8, seconds: 2 }, entryGap: 0.02 * (i % 8), fcat: 0.01 }));
+  const bad = [17, 30, 50].map((g, j) => rec(40 + j, { crowd: { trades: 6, seconds: 2 }, entryGap: g, fcat: -0.5 }));
+  const sp = speedReport([...ok, ...bad], { buySol: 0.1, fasterMs: 100, tradesPerDay: 10 });
+  assert.equal(sp.leftOut, 3); assert.equal(sp.trades, 40);
+  assert.ok(Math.abs(sp.premiumPerTradeAhead - 0.02) < 1e-9, `slope ${sp.premiumPerTradeAhead}`);
+  assert.ok(sp.groups.find((g) => g.label === '5+').medianPremium < 0.2, 'no +1,700% group');
+  // a wild fill that is NOT beyond the cutoff still cannot move the medians
+  const one = speedReport([...ok, rec(99, { crowd: { trades: 6, seconds: 2 }, entryGap: 2.9 })], { buySol: 0.1, tradesPerDay: 10 });
+  assert.ok(Math.abs(one.premiumPerTradeAhead - 0.02) < 0.005, `slope ${one.premiumPerTradeAhead}`);
+  const md = findingsMarkdown({ tests: [], speed: sp, mode: 'paper', updated: '2026-11-08T00:00:00Z', solUsd: 200 });
+  assert.match(md, /\| trades ahead of you \| trades \| median entry premium \|/);
+  assert.match(md, /3 trades left out: an entry premium beyond ±300% is bad price data/);
+  assert.match(md, /A rough estimate/);
+});
+
+test('SUPPORTED shows the real totals: "loses less, still −X SOL" when the better version still loses', () => {
+  // 60 losing trades; skipping the later buys (the worst ones) is better, but the total is still a loss
+  const rs = Array.from({ length: 60 }, (_, i) => rec(i, { fcat: i % 3 === 0 ? -0.3 : -0.05, copiedLaterBuy: i % 3 === 0 }));
+  const fb = runTests(rs, { minTrades: 50 }).find((t) => t.id === 'first-buy');
+  assert.equal(fb.supported, true);
+  assert.ok(Math.abs(fb.nowSol - (20 * -0.03 + 40 * -0.005)) < 1e-9, `now ${fb.nowSol}`);
+  assert.ok(Math.abs(fb.withSol - 40 * -0.005) < 1e-9, `with ${fb.withSol}`);
+  const md = findingsMarkdown({ tests: [fb], speed: { groups: [] }, updated: '2026-11-08T00:00:00Z' });
+  assert.match(md, /## First buy only · SUPPORTED: loses less, still -0\.2000 SOL in total/);
+  assert.match(md, /In SOL on these 60 trades: the bot now -0\.8000 SOL → with \*\*copy only his first buy of a coin\*\* -0\.2000 SOL \(still a loss\)/);
+  assert.match(md, /first-buy: SUPPORTED\n/, 'the front matter stays one word for Obsidian queries');
+});

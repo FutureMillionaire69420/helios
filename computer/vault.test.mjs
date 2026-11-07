@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { tradeNote, dailyNote, homeNote, patternNote, createVault, zipFiles, createGitSync, safeName, tradeNoteName } from './vault.mjs';
+import { tradeNote, dailyNote, homeNote, patternNote, createVault, zipFiles, createGitSync, safeName, tradeNoteName, delayWords } from './vault.mjs';
 import { createThinkingBrain } from './brain.mjs';
 import { createBrain } from './learn.mjs';
 
@@ -160,4 +160,16 @@ test('GitHub sync: when another writer moved the branch meanwhile (422), the com
   const g = createGitSync({ token: 'test-token-' + 'x'.repeat(30), repo: 'me/b', fetchImpl: fake });
   assert.equal(await g.push([{ name: 'Home.md', data: Buffer.from('a') }, { name: 'c.png', data: Buffer.from([1]) }]), 'pushed 2 files');
   assert.equal(patches, 2); assert.equal(blobs, 1, 'the picture is not uploaded twice');
+});
+
+test('the delay in words: a cost says "cost you", a gain says "helped", and the front matter number is the cost', () => {
+  assert.equal(delayWords(-0.4), 'the delay cost you $0.40');
+  assert.equal(delayWords(1.95), 'the delay helped +$1.95');
+  assert.equal(delayWords(0.001), 'the delay cost nothing');
+  const mirror = (d) => ({ perfectUsd: 2, yourUsd: 2 + d, delayUsd: d, feesUsd: 0.5, afterFeesUsd: 1.5 + d, fcatUsd: 2, pcatUsd: 2, rulesUsd: 2 });
+  const lost = tradeNote(rec(1), { mirror: mirror(-0.4) }), helped = tradeNote(rec(2), { mirror: mirror(1.95) });
+  assert.match(lost, /delay_cost_usd: 0\.4\n/); assert.match(lost, /the delay cost you \$0\.40/);
+  assert.match(helped, /delay_cost_usd: -1\.95\n/); assert.match(helped, /the delay helped \+\$1\.95/); assert.doesNotMatch(helped, /delay cost \+/);
+  const day = dailyNote('2026-10-25', [rec(1), rec(2)], { mirrorOf: (r) => mirror(r === undefined ? 0 : r.symbol === 'PRES1' ? -0.4 : 1.95) });
+  assert.match(day, /the delay helped \+\$1\.55/); assert.match(day, /delay_cost_usd: -1\.55/);
 });

@@ -19,7 +19,7 @@
 //     PAPER_LAND_MS after the decision, at the curve's price then.
 import fs from 'node:fs';
 import path from 'node:path';
-import { DEFAULTS, SETTINGS_REV, entryChecks, isMissing, dipTriggered, exitCheck, markPnl, buyRaw, sellSol, netPrice, buyPriceNow, sellPriceNow, mcapUsd, holderCheck, calibrateK, kFloor, summarize, headToHead, fin, CHECK_NAMES, evidence } from './duelmath.mjs';
+import { DEFAULTS, SETTINGS_REV, entryChecks, isMissing, dipTriggered, exitCheck, markPnl, buyRaw, sellSol, netPrice, buyPriceNow, sellPriceNow, mcapUsd, holderCheck, calibrateK, kFloor, calibrateTight, tightPass, summarize, headToHead, fin, CHECK_NAMES, evidence } from './duelmath.mjs';
 import { dayKey } from './dashcalc.mjs';
 import { createDuelBrain, notePaths, homeNote, brainNote, dayNote, holderNote, dipsNote, holdersNote, tradeNote, brainLogNote } from './duelbrain.mjs';
 
@@ -644,8 +644,16 @@ export function createDuel({
     const elig = all.filter((c) => c.holder0 && c.holder0.status !== 'pending');
     const withData = elig.filter((c) => c.holder0.status === 'done' && c.holder0.verdict), missing = elig.length - withData.length;
     const base = withData.filter((c) => c.holder0.verdict.safe), relaxed = withData.filter((c) => c.holder0.verdict.relaxedPass), added = relaxed.filter((c) => !c.holder0.verdict.safe);
-    const res = (list, vid) => { const r = list.map((c) => { const d = c.decisions?.[vid]; const t = d?.tradeId ? variants.get(vid)?.trades.find((x) => x.id === d.tradeId && !x.provisional) : null; return t?.ret; }).filter(fin); return { n: r.length, avg: r.length ? r.reduce((a, x) => a + x, 0) / r.length : null, wins: r.filter((x) => x > 0).length }; };
+    const byId = {}; // trade id -> trade, built once per variant (was a scan of every trade for every coin)
+    const tradeOf = (vid, id) => { if (!byId[vid]) byId[vid] = new Map((variants.get(vid)?.trades || []).filter((x) => !x.provisional).map((x) => [x.id, x])); return byId[vid].get(id); };
+    const res = (list, vid) => { const r = list.map((c) => { const d = c.decisions?.[vid]; const t = d?.tradeId ? tradeOf(vid, d.tradeId) : null; return t?.ret; }).filter(fin); return { n: r.length, avg: r.length ? r.reduce((a, x) => a + x, 0) / r.length : null, wins: r.filter((x) => x > 0).length }; };
+    // the stricter label, set on recent otherwise-eligible coins, measured on every coin with holder data
+    const tight = holderCal.samples.length >= (relax.minSamples || 20) ? calibrateTight(holderCal.samples.slice(-(relax.window || 200)), holderRules, { rejectShare: relax.tightShare ?? 0.3 }) : null;
+    const tKept = tight?.k ? withData.filter((c) => tightPass(c.holder0.heldUsd, c.holder0.mcapUsd, holderRules, tight.k) === true) : [];
+    const tRej = tight?.k ? withData.filter((c) => tightPass(c.holder0.heldUsd, c.holder0.mcapUsd, holderRules, tight.k) === false) : [];
+    const tightOut = { kept: res(tKept, 'fcat-all'), rejected: res(tRej, 'fcat-all'), keptDip: res(tKept, 'dip-all'), rejectedDip: res(tRej, 'dip-all') };
     return { on: relax.on, target: relax.target, floorUsd: relax.floorUsd ?? 500, rules: holderRules, k: holderCal.k, kMin, calibration: holderCal.last, history: holderCal.history.slice(-50), coins: elig.length, withData: withData.length, missing,
+      tight: tight ? { ...tight, kept: tKept.length, rejectedAll: tRej.length, outcomes: tightOut } : null,
       baselineSafe: base.length, relaxedPass: relaxed.length, added: added.length, increase: base.length ? relaxed.length / base.length - 1 : null,
       outcomes: { baselineSafe: res(base, 'fcat-all'), added: res(added, 'fcat-all'), rejected: res(withData.filter((c) => !c.holder0.verdict.relaxedPass), 'fcat-all'), missingData: res(elig.filter((c) => !(c.holder0.status === 'done' && c.holder0.verdict)), 'fcat-all'), baselineSafeDip: res(base, 'dip-all'), addedDip: res(added, 'dip-all') } };
   };
