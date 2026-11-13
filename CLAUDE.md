@@ -4,6 +4,8 @@ This repo is **PUBLIC**. `computer/` is a mirror of the bot: a Solana copy-tradi
 "Decu" on pump.fun, running on Render in **PAPER** mode from the private repo
 `FutureMillionaire69420/DECU-BOT-RENDER-`. Make bot changes there first (add it to the session if it's missing),
 then copy the changed files into `computer/`. `CHANGES-V3.md` lives at this repo's root.
+`computer/KNOWLEDGE.md` is the bot's memory beyond the code (evidence, graded outside advice, backlog, open
+decisions): read it before proposing a trading change.
 
 ## Always
 - **Ask the owner at least one question in every reply.**
