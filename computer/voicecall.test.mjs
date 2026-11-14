@@ -70,3 +70,14 @@ test('SignalWire: one request to the Space with the Project ID and token; the ca
   const no = createVoiceCaller({ cfg: voiceConfig(swEnv), fetchImpl: async () => ({ ok: false, status: 401, json: async () => ({ message: 'Unauthorized' }) }) });
   await assert.rejects(no.call(), /SignalWire said no \(HTTP 401\).*Voice scope/);
 });
+
+test('SignalWire: a second token (SIGNALWIRE_API_KEY_2) is tried once when the first is refused; placeholders are ignored', async () => {
+  const auths = [];
+  const cfg = voiceConfig({ ...swEnv, SIGNALWIRE_API_KEY_2: 'sw-second' });
+  const caller = createVoiceCaller({ cfg, fetchImpl: async (url, init) => { auths.push(init.headers.Authorization); return auths.length === 1 ? { ok: false, status: 401, json: async () => ({ message: 'Unauthorized' }) } : { ok: true, status: 201, json: async () => ({ sid: 'CA2', status: 'queued' }) }; } });
+  assert.equal((await caller.call()).sid, 'CA2');
+  assert.deepEqual(auths, ['Basic ' + Buffer.from(`${PROJ}:sw-secret`).toString('base64'), 'Basic ' + Buffer.from(`${PROJ}:sw-second`).toString('base64')]);
+  assert.equal(voiceConfig({ ...swEnv, SIGNALWIRE_API_TOKEN: 'REPLACE-with-token', SIGNALWIRE_API_KEY_2: 'sw-second' }).secret, 'sw-second', 'a placeholder first token: key 2 is used');
+  assert.equal(voiceConfig({ ...swEnv, SIGNALWIRE_API_KEY_2: 'REPLACE-me' }).secret2, '', 'a placeholder key 2 is never sent');
+  assert.equal(voiceConfig({ ...swEnv, SIGNALWIRE_API_TOKEN: 'REPLACE-x' }).ready, false);
+});

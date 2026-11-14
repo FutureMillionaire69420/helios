@@ -170,7 +170,7 @@ export async function startRuntime(k, {demo=false}={}) {
   try { if (fs.statSync(k.config.logFile).size > 50e6) fs.renameSync(k.config.logFile, k.config.logFile+'.1'); } catch {}
   const token = val('DASHBOARD_TOKEN','');
   if (!demo && !k.config.dryRun && token.length<24) throw new Error('LIVE requires DASHBOARD_TOKEN of at least 24 characters');
-  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey,k.config.pumpPortalKey,val('GITHUB_VAULT_TOKEN',''),val('GITHUB_BACKUP_TOKEN',''),val('PUMP_API_KEY',''),val('TWILIO_API_SECRET',''),val('TWILIO_AUTH_TOKEN',''),val('SIGNALWIRE_API_TOKEN','')].filter(Boolean);
+  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey,k.config.pumpPortalKey,val('GITHUB_VAULT_TOKEN',''),val('GITHUB_BACKUP_TOKEN',''),val('PUMP_API_KEY',''),val('TWILIO_API_SECRET',''),val('TWILIO_AUTH_TOKEN',''),val('SIGNALWIRE_API_TOKEN',''),val('SIGNALWIRE_API_KEY_2','')].filter(Boolean);
   const clean = v => { let s=JSON.stringify(v); for(const secret of secrets) s=s.split(secret).join('[REDACTED]'); return JSON.parse(k.redact(s)); };
   const log = e => {
     // Sell outcomes: was the position closed, and how did the fill compare with the exit trigger?

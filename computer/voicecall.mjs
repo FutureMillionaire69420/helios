@@ -6,6 +6,7 @@
 //   SIGNALWIRE_PROJECT_ID   xxxxxxxx-xxxx-...  (Dashboard → API: the Project ID)
 //   SIGNALWIRE_API_TOKEN    the project's API token, with the Voice scope (Dashboard → API → API Tokens)
 //   SIGNALWIRE_FROM_NUMBER  +1...              (a number bought in SignalWire)
+//   SIGNALWIRE_API_KEY_2    optional second token: tried once if SignalWire refuses the first (401/403)
 // Twilio:
 //   TWILIO_ACCOUNT_SID   AC...             (Twilio Console home page)
 //   TWILIO_API_KEY       SK...  + TWILIO_API_SECRET   (an API key), or TWILIO_AUTH_TOKEN instead of both
@@ -33,10 +34,11 @@ export function voiceConfig(env = process.env) {
   const baseUrl = (v('PUBLIC_URL') || v('RENDER_EXTERNAL_URL')).replace(/\/$/, ''), to = v('OWNER_PHONE'), missing = [];
   let cfg;
   if (provider === 'signalwire') {
-    cfg = { provider, host: signalwireHost(v('SIGNALWIRE_SPACE')), accountSid: v('SIGNALWIRE_PROJECT_ID'), keySid: v('SIGNALWIRE_PROJECT_ID'), secret: v('SIGNALWIRE_API_TOKEN'), from: v('SIGNALWIRE_FROM_NUMBER'), to, baseUrl };
+    const real = (x) => (x && !/^REPLACE-/i.test(x) ? x : '');
+    cfg = { provider, host: signalwireHost(v('SIGNALWIRE_SPACE')), accountSid: v('SIGNALWIRE_PROJECT_ID'), keySid: v('SIGNALWIRE_PROJECT_ID'), secret: real(v('SIGNALWIRE_API_TOKEN')) || real(v('SIGNALWIRE_API_KEY_2')), secret2: real(v('SIGNALWIRE_API_TOKEN')) ? real(v('SIGNALWIRE_API_KEY_2')) : '', from: v('SIGNALWIRE_FROM_NUMBER'), to, baseUrl };
     if (!cfg.host) missing.push('SIGNALWIRE_SPACE (yourspace.signalwire.com)');
     if (!UUID.test(cfg.accountSid)) missing.push('SIGNALWIRE_PROJECT_ID (Dashboard → API)');
-    if (!cfg.secret) missing.push('SIGNALWIRE_API_TOKEN');
+    if (!cfg.secret) missing.push('SIGNALWIRE_API_TOKEN (or SIGNALWIRE_API_KEY_2)');
     if (!E164.test(cfg.from)) missing.push('SIGNALWIRE_FROM_NUMBER (like +15551234567)');
   } else {
     cfg = { provider: 'twilio', accountSid: v('TWILIO_ACCOUNT_SID'), keySid: v('TWILIO_API_KEY'), secret: v('TWILIO_API_SECRET') || v('TWILIO_AUTH_TOKEN'), from: v('TWILIO_FROM_NUMBER'), to, baseUrl };
@@ -75,10 +77,13 @@ export function createVoiceCaller({ cfg, fetchImpl = globalThis.fetch, now = () 
       const body = sw ? new URLSearchParams({ To: cfg.to, From: cfg.from, Url: `${cfg.baseUrl}/voice/${file}.xml`, Method: 'GET' })
         : new URLSearchParams({ To: cfg.to, From: cfg.from, Twiml: `<Response><Play>${xml(audio)}</Play></Response>` });
       const endpoint = sw ? `https://${cfg.host}/api/laml/2010-04-01/Accounts/${cfg.accountSid}/Calls.json` : `https://api.twilio.com/2010-04-01/Accounts/${cfg.accountSid}/Calls.json`;
-      const r = await fetchImpl(endpoint, {
+      const send = (secret) => fetchImpl(endpoint, {
         method: 'POST', body, signal: AbortSignal.timeout(10_000),
-        headers: { Authorization: 'Basic ' + Buffer.from(`${cfg.keySid}:${cfg.secret}`).toString('base64'), 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+        headers: { Authorization: 'Basic ' + Buffer.from(`${cfg.keySid}:${secret}`).toString('base64'), 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
       });
+      let r = await send(cfg.secret);
+      // SignalWire: a refused first token -> try the second one once (the owner has two and isn't sure which works)
+      if (sw && cfg.secret2 && (r.status === 401 || r.status === 403)) r = await send(cfg.secret2);
       const j = await r.json().catch(() => ({}));
       if (!r.ok) {
         const hint = sw && (r.status === 401 || r.status === 403) ? ' (SignalWire needs the Project ID and a project API token with the Voice scope: Dashboard → API)' : '';
