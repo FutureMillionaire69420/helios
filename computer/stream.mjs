@@ -5,7 +5,7 @@
 // Reconnects by itself and re-subscribes everything. Callers always keep a polling fallback, so a
 // dead socket only makes things slower, never wrong.
 
-export function createStream({ url, WebSocketImpl = globalThis.WebSocket, log = () => {}, pingMs = 30_000, freshMs = 3000, staleMs = 10_000, paused: startPaused = false } = {}) {
+export function createStream({ url, WebSocketImpl = globalThis.WebSocket, log = () => {}, pingMs = 30_000, freshMs = 3000, staleMs = 10_000, paused: startPaused = false, onBytes = null, onConnect = null, blocked = () => 0 } = {}) {
   let ws = null, stopped = false, paused = startPaused, backoff = 500, nextId = 1, open = false, lastMsgAt = 0;
   // A new block arrives every ~0.4 s, so silence means the socket stalled: pushed data is trusted only
   // while messages are flowing (freshMs), and a socket silent for staleMs is closed and reconnected.
@@ -39,17 +39,22 @@ export function createStream({ url, WebSocketImpl = globalThis.WebSocket, log = 
   };
   const connect = () => {
     if (stopped || paused || !url || !WebSocketImpl) return;
+    // the provider is refusing us (e.g. out of credits): wait it out instead of reconnecting every few seconds
+    const wait = blocked?.() || 0;
+    if (wait > 0) { setTimeout(connect, Math.min(wait, 60_000) + 50).unref?.(); return; }
     let sock;
     try { sock = ws = new WebSocketImpl(url); } catch (e) { log(`stream: ${e.message}`); setTimeout(connect, backoff).unref?.(); return; }
     // every handler ignores a socket that was already replaced (a late close of a stalled one)
     sock.onopen = () => {
       if (ws !== sock) return;
       open = true; backoff = 500; lastMsgAt = Date.now(); log('stream: connected (blocks, confirmations and prices are pushed)');
+      try { onConnect?.(); } catch { /* metering never breaks the stream */ }
       for (const key of subs.keys()) subscribe(key);
     };
     sock.onmessage = (ev) => {
       if (ws !== sock) return;
       lastMsgAt = Date.now();
+      try { onBytes?.(typeof ev.data === 'string' ? Buffer.byteLength(ev.data) : ev.data?.byteLength || 0); } catch { /* metering never breaks the stream */ }
       let m;
       try { m = JSON.parse(typeof ev.data === 'string' ? ev.data : Buffer.from(ev.data).toString()); } catch { return; }
       if (m.id != null && pending.has(m.id)) {

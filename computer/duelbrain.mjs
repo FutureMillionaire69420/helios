@@ -235,7 +235,7 @@ export function createDuelBrain({ strategy, api, log = () => {}, minForward = 30
 // ---------- Obsidian notes (written by duel.mjs into the second-brain vault, machine/DIP vs FCAT/) ----------
 const fm = (o) => ['---', ...Object.entries(o).map(([k, v]) => `${k}: ${typeof v === 'string' ? JSON.stringify(v) : Array.isArray(v) ? `[${v.map((x) => JSON.stringify(x)).join(', ')}]` : v ?? ''}`), '---', ''].join('\n');
 const D = 'machine/DIP vs FCAT';
-export const notePaths = { home: `${D}/DIP vs FCAT.md`, brain: (s) => `${D}/${s.toUpperCase()}/${s.toUpperCase()} brain.md`, day: (s, d) => `${D}/${s.toUpperCase()}/days/${s.toUpperCase()} ${d}.md`, holder: `${D}/Holder rule experiment.md`, dips: `${D}/Dip triggers.md`, holders: `${D}/Holders.md`,
+export const notePaths = { home: `${D}/DIP vs FCAT.md`, brain: (s) => `${D}/${s.toUpperCase()}/${s.toUpperCase()} brain.md`, day: (s, d) => `${D}/${s.toUpperCase()}/days/${s.toUpperCase()} ${d}.md`, holder: `${D}/Holder rule experiment.md`, dips: `${D}/Dip triggers.md`, holders: `${D}/Holders.md`, signals: `${D}/Signals.md`,
   trade: (s, t) => `${D}/${s.toUpperCase()}/trades/${t.day} ${new Date(t.fillAt).toISOString().slice(11, 16).replace(':', '')} ${s.toUpperCase()} ${t.sym ? '$' + String(t.sym).replace(/[\\/:*?"<>|#^[\]]/g, '') : t.mint.slice(0, 6)}.md`,
   log: (d) => `${D}/Brain log/Brain log ${d}.md` };
 const link = (p, text) => `[[${p.replace(/\.md$/, '')}|${text}]]`;
@@ -309,7 +309,7 @@ export function dayNote(strategy, day, trades) {
 export function homeNote(a) {
   const A = a.traders.dip, B = a.traders.fcat, h = a.headToHead;
   return [fm({ type: 'duel-home', updated: new Date(a.now).toISOString(), dip_pnl_sol: Math.round(A.summary.pnlSol * 1e4) / 1e4, fcat_pnl_sol: Math.round(B.summary.pnlSol * 1e4) / 1e4, leader: a.leader }), '# DIP vs FCAT (paper)', '',
-    `${link(notePaths.brain('dip'), 'DIP brain')} · ${link(notePaths.brain('fcat'), 'FCAT brain')} · ${link(notePaths.holder, 'Holder rule experiment')} · ${link(notePaths.dips, 'Dip triggers')} · ${link(notePaths.holders, 'Holders')}`, '',
+    `${link(notePaths.brain('dip'), 'DIP brain')} · ${link(notePaths.brain('fcat'), 'FCAT brain')} · ${link(notePaths.holder, 'Holder rule experiment')} · ${link(notePaths.dips, 'Dip triggers')} · ${link(notePaths.holders, 'Holders')} · ${link(notePaths.signals, 'Signals')}`, '',
     '| | DIP | FCAT |', '|---|---|---|',
     `| Trades | ${A.summary.n} | ${B.summary.n} |`, `| Won | ${fin(A.summary.winRate) ? Math.round(A.summary.winRate * 100) + '%' : '—'} | ${fin(B.summary.winRate) ? Math.round(B.summary.winRate * 100) + '%' : '—'} |`,
     `| Profit | ${sol(A.summary.pnlSol, 4)} | ${sol(B.summary.pnlSol, 4)} |`, `| Average trade | ${pct(A.summary.avgRet)} | ${pct(B.summary.avgRet)} |`, `| Worst drop | ${sol(A.summary.maxDrawdownSol)} | ${sol(B.summary.maxDrawdownSol)} |`,
@@ -348,4 +348,26 @@ export function holdersNote(rows) {
     ...b('number of holders', (r) => r.holders, [[0, 20, 'under 20'], [20, 50, '20–49'], [50, 100, '50–99'], [100, 250, '100–249'], [250, Infinity, '250+']]),
     ...b('money held', (r) => r.heldUsd, [[0, 500, 'under $500'], [500, 1000, '$500–1k'], [1000, 2500, '$1k–2.5k'], [2500, 5000, '$2.5k–5k'], [5000, Infinity, '$5k+']]),
     ...b('top 10 share of supply', (r) => r.top10Pct, [[0, 0.15, 'under 15%'], [0.15, 0.25, '15–25%'], [0.25, 0.4, '25–40%'], [0.4, Infinity, '40%+']]), ''].join('\n');
+}
+
+/** SIGNALS (measured only): what copying every Decu buy did, split by each recorded signal. Nothing here filters
+ *  a trade; a signal earns a test only if its groups differ by more than the noise. */
+export function signalsNote(rows) {
+  const avg = (xs, k) => { const v = xs.map((r) => r[k]).filter(fin); return v.length ? `${pct(v.reduce((a, x) => a + x, 0) / v.length)} (${v.length})` : '—'; };
+  const table = (name, groups) => [`## ${name}`, '| Group | Coins | FCAT unfiltered avg | DIP unfiltered avg |', '|---|---|---|---|',
+    ...groups.map(([label, test]) => { const xs = rows.filter(test); return `| ${label} | ${xs.length} | ${avg(xs, 'fcatAll')} | ${avg(xs, 'dipAll')} |`; }), ''];
+  const range = (k, lo, hi) => (r) => fin(r[k]) && r[k] >= lo && r[k] < hi;
+  const is = (k, v) => (r) => r[k] === v;
+  const hours = [...new Set(rows.map((r) => r.hour).filter(Boolean))].sort();
+  const withLaunch = rows.filter((r) => fin(r.launches10m));
+  return [fm({ type: 'duel-signals', coins: rows.length }), '# Signals on every Decu buy (measured only)', '', link(notePaths.home, 'DIP vs FCAT'), '',
+    'Each table splits what copying every Decu buy did (no filters) by one fact recorded when the bot spotted his buy. Nothing here changes a trade: a signal is worth a test only when its groups differ by clearly more than the noise, on many coins.', '',
+    ...table('Largest holder other than Decu (share of supply)', [['under 2%', range('top1x', 0, 0.02)], ['2–4%', range('top1x', 0.02, 0.04)], ['4% or more', range('top1x', 0.04, 2)], ['no holder data', (r) => !fin(r.top1x)]]),
+    ...table("Decu's own buy", [['under 1 SOL', range('hisSol', 0, 1)], ['1–2.5 SOL', range('hisSol', 1, 2.5)], ['2.5–4 SOL', range('hisSol', 2.5, 4)], ['4 SOL or more', range('hisSol', 4, 1e9)]]),
+    ...table("The coin's X link", [['X community', is('link', 'community')], ['a single tweet', is('link', 'tweet')], ['an X account', is('link', 'profile')], ['another link only', is('link', 'other')], ['no link', is('link', 'none')], ['unknown', (r) => r.link == null]]),
+    ...table('DexScreener profile paid when spotted', [['paid', is('dexPaid', true)], ['not paid', is('dexPaid', false)], ['unknown', (r) => r.dexPaid == null]]),
+    ...table('Hour of his buy (UTC)', hours.length ? hours.map((h) => [h, is('hour', h)]) : [['no data', () => false]]),
+    ...(withLaunch.length ? table('pump.fun launches in the 10 min before his buy', [['under 100', range('launches10m', 0, 100)], ['100–200', range('launches10m', 100, 200)], ['200–300', range('launches10m', 200, 300)], ['300 or more', range('launches10m', 300, 1e9)]])
+      : ['## pump.fun launches in the 10 min before his buy', 'Not recorded: the launch counter is off (PUMP_LAUNCH_FEED=true turns it on; PumpPortal may bill new-coin messages like trades).', '']),
+  ].join('\n');
 }

@@ -48,6 +48,7 @@ export function morningBrief(f = {}) {
     `• v${f.version || '?'} · up ${fin(f.uptimeMs) ? span(f.uptimeMs) : '?'} · ${ready ? 'ready ✔' : `NOT READY: ${(f.ready?.blocking || []).join(', ')}`}${ready && problems.length ? ` · check: ${problems.join(', ')}` : ''}`,
     `• Decu feed: ${f.feed || '?'}${lastSig ? ` · his last trade ${lastSig}` : ''}${fin(f.errors) && f.errors ? ` · ${f.errors} errors since start` : ''}`,
     h ? `• Helius credits: ${kilo(h.credits)} of ${kilo(h.limit)} this month${fin(h.pace) ? ` (pace ${kilo(h.pace)}${h.limit && h.pace > h.limit ? ': OVER the plan' : ''})` : ''}` : null,
+    h?.out ? `• Helius OUT OF CREDITS since ${String(h.out.since).slice(0, 16).replace('T', ' ')} UTC: the bot is blind until the plan resets or is upgraded` : null,
     f.ntfy ? `• Phone alerts: ${f.ntfy.total} of ${f.ntfy.max} used today (UTC)` : null,
     '',
     `${live ? 'RESULTS' : 'PAPER RESULTS'} (last 24 h)`,

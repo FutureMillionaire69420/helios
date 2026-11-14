@@ -134,28 +134,34 @@ saying "this works" is a reason to **test** something, never a reason to **chang
 
 ## 6. Improvement backlog (ranked)
 
-1. **Restore sight** (blocker):
-   - Count websocket bytes in the Helius meter.
-   - Back off on "max usage reached".
-   - Subscribe to price streams only for coins we hold or test.
-2. **Fees** (biggest lever, needs the owner's OK):
-   - Paper what-if at lower fee levels and at larger sizes.
-   - Then a tiny real landing test before any live change.
-3. **Measured-only labels at zero extra credits:**
-   - Largest holder excluding Decu over 4%.
-   - Decu buy size (≥4 SOL) as a walk-forward test.
-4. **Free regime features:**
-   - pump.fun launch rate from the PumpPortal stream.
-   - DexScreener "dex paid" flag.
-   - Community vs tweet link in the coin's metadata.
-   - Hour of day.
-5. **Losing-streak pause side test** (5 losses in a row → pause 60 min), scored like the quick-flip guard.
-6. **Dip with confirmation:** the dip test's variant that buys on the first up-tick after the dip.
+Items 1–6 were built in v4.11 (2026-11-14, paper only). What is left is to wait for data and read it.
+
+1. **Restore sight** (built v4.11):
+   - The Helius meter counts websocket data (2 credits per 0.1 MB, 1 per connection) and follows the real billing day (`HELIUS_CYCLE_DAY`).
+   - On "max usage reached", Helius calls pause (2 min, doubling to 30 min) instead of ~190 refused calls a minute, with one phone alert when it starts and one when Helius answers again.
+   - Test-trader positions (analytics, unfiltered, challengers) stop being watched after 10 min (`DUEL_WATCH_MIN`); DIP's and FCAT's own trades are watched to the end.
+   - Still open: the real reset date from the Helius dashboard.
+2. **Fees and size** (built v4.11; the owner chose bigger trades over lower fees):
+   - `BUY_USD=25`: each paper trade is $25, converted with Decu's own trade price. `FEE_MODE=max` stays on.
+   - At $25 (~0.17 SOL) the same fixed fees are a smaller share of each trade than at 0.1 SOL.
+   - Still open: whether "max" should mean always paying the full caps (only adds cost in paper).
+3. **Measured-only signals** (built v4.11): the note `machine/DIP vs FCAT/Signals.md` splits what copying every Decu buy did by:
+   - the largest holder other than Decu (under 2%, 2–4%, 4% or more), and Decu's own share;
+   - Decu's buy size;
+   - the coin's X link (community, single tweet, account, other, none);
+   - a paid DexScreener profile when the bot spotted his buy (`DEX_PAID_CHECK`, at most `DEX_CHECKS_PER_MIN`=40);
+   - the hour (4-hour UTC blocks);
+   - pump.fun launches in the 10 minutes before (off until `PUMP_LAUNCH_FEED=true`: PumpPortal may bill new-coin messages).
+4. **Walk-forward tests** (built v4.11, in `findings.md`): Decu's buy size (skip ≥ 2.5 / 3 / 4 / 6 SOL) and hour of day (skip one 4-hour block).
+5. **Losing-streak pause side test** (built v4.11): 3 or 5 losses in a row → pause 60 or 120 min, scored like the quick-flip guard; never skips a trade.
+6. **Dip with confirmation** (built v4.11): every buy-the-dip version has an "uptick" twin that buys on the first price above the one before, after the dip.
+7. **Next:** read the Signals note and `findings.md` once 300+ new Decu buys are recorded. A signal earns a real paper rule only if its groups differ by clearly more than the noise and it passes walk-forward.
 
 ## 7. Open decisions waiting on the owner
 
-- Helius: check the dashboard for real usage and the reset date. Wait, upgrade, or use a new key?
-- Build backlog item 1 now?
+- Helius: check the dashboard for real usage and the reset date (set `HELIUS_CYCLE_DAY` to it). Wait, upgrade, or use a new key?
+- Fees: keep "max" as the top of the market up to the caps, or always pay the full caps?
+- Turn on the pump.fun launch counter (`PUMP_LAUNCH_FEED=true`)? It may cost PumpPortal credits.
 - B7 quick-flip guard as a real paper rule?
 - Zip: the bot code (no keys) or the Obsidian vault?
 - Turn off the 12-hour heartbeat? Delete the disabled Claude briefing for good?

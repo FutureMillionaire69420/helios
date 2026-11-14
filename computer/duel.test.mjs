@@ -303,3 +303,64 @@ test('a stricter holder rule (measured only): scaled below $10k, k set to reject
   assert.match(md, /the coins it rejects did 15\.0 points worse per trade than the ones it keeps, so it looks useful/);
   assert.match(md, /Nothing changes for the traders/);
 });
+
+test('data credits: a coin held only by test traders stops being watched after DUEL_WATCH_MIN; DIP/FCAT trades are never cut', async (t) => {
+  const dir = fs.mkdtempSync('duel-'), { k } = fakeChain({ ahead: ['buy', 'sell', 'buy', 'buy'] });
+  const duel = createDuel(opts(k, dir, { watchMin: 0.001 }));
+  t.after(() => duel.stop());
+  hisBuy(duel); await wait(400);
+  const all = duel.variants.get('fcat-all');
+  assert.equal(duel.variants.get('fcat').open.size, 0, 'FCAT itself skipped it (3 buyers ahead)');
+  assert.equal(all.open.size, 1, 'the unfiltered test trader holds it');
+  duel._test.sweepWatch(); await wait(120);
+  assert.equal(all.open.size, 0); assert.equal(all.trades.at(-1).exit, 'watch-limit');
+  // FCAT holds the coin: then nobody is cut, not even the test traders on the same coin
+  const dir2 = fs.mkdtempSync('duel-'), c2 = fakeChain();
+  const duel2 = createDuel(opts(c2.k, dir2, { watchMin: 0.001 }));
+  t.after(() => duel2.stop());
+  hisBuy(duel2); await wait(400);
+  assert.equal(duel2.variants.get('fcat').open.size, 1);
+  duel2._test.sweepWatch(); await wait(120);
+  assert.equal(duel2.variants.get('fcat').open.size, 1, 'FCAT is watched to the end');
+  assert.equal(duel2.variants.get('fcat-all').open.size, 1, 'the coin is watched anyway, so the test trader keeps it');
+});
+
+test('signals on each Decu buy: largest other holder, his share, link kind, DEX paid, launches; the Signals note', async (t) => {
+  const dir = fs.mkdtempSync('duel-'), { k } = fakeChain();
+  k.tokenMeta = async () => ({ symbol: 'ABC', metadata: { twitter: 'https://x.com/i/communities/123' } });
+  k.dexPaid = async () => ({ paid: true, at: 1700000000000 });
+  const vault = createVault(dir + '/vault'), logs = [];
+  const duel = createDuel(opts(k, dir, { notes: { vault }, launchRate: () => 240, log: (m) => logs.push(m) }));
+  t.after(() => duel.stop());
+  hisBuy(duel);
+  await wait(150);
+  const c = [...duel._test.cands.values()][0];
+  assert.equal(c.holder0.status, 'done');
+  assert.ok(Math.abs(c.holder0.top1xPct - 0.02) < 1e-12, 'h1 (2%) is the largest holder other than Decu');
+  assert.ok(Math.abs(c.holder0.leaderPct - hisRaw / 1e15) < 1e-12);
+  assert.ok(c.holder0.top1Pct >= c.holder0.top1xPct);
+  assert.equal(c.link, 'community'); assert.deepEqual(c.dex, { paid: true, at: 1700000000000 }); assert.equal(c.launches10m, 240);
+  assert.ok(logs.some((l) => /DexScreener "dex paid" check working/.test(l)), 'the first answer is logged so Render shows the check works');
+  const row = duel._test.signalRows()[0];
+  assert.equal(row.link, 'community'); assert.equal(row.dexPaid, true); assert.equal(row.launches10m, 240); assert.equal(row.hisSol, 0.9875);
+  assert.ok(Math.abs(row.top1x - 0.02) < 1e-12); assert.match(row.hour, /UTC$/);
+  duel.writeNotes();
+  const note = fs.readFileSync(dir + '/vault/machine/DIP vs FCAT/Signals.md', 'utf8');
+  assert.match(note, /\| X community \| 1 \|/); assert.match(note, /\| 200–300 \| 1 \|/);
+  assert.match(fs.readFileSync(dir + '/vault/machine/DIP vs FCAT/DIP vs FCAT.md', 'utf8'), /\[\[machine\/DIP vs FCAT\/Signals\|Signals\]\]/);
+});
+
+test('signals: a failing DEX check is logged once and changes nothing', async (t) => {
+  const dir = fs.mkdtempSync('duel-'), { k } = fakeChain();
+  k.dexPaid = async () => { throw new Error('HTTP 403'); };
+  const logs = [];
+  const duel = createDuel(opts(k, dir, { log: (m) => logs.push(m) }));
+  t.after(() => duel.stop());
+  hisBuy(duel);
+  await wait(150);
+  const c = [...duel._test.cands.values()][0];
+  assert.equal(c.dex, undefined); assert.equal(c.link, undefined, 'no metadata reader: unknown');
+  assert.equal(logs.filter((l) => /DexScreener check failed/.test(l)).length, 1);
+  assert.equal(duel._test.signalRows()[0].dexPaid, null);
+  assert.equal(duel.variants.get('fcat').open.size + duel.variants.get('fcat').trades.length, 1, 'FCAT still traded');
+});

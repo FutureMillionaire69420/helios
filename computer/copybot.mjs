@@ -15,6 +15,7 @@ import {spawn,spawnSync} from 'node:child_process';
 import {startRuntime,normalize} from './runtime.mjs';
 import {createStream} from './stream.mjs';
 import {createPumpPortalFeed} from './pumpportal.mjs';
+import {dexPaidFrom} from './signals.mjs';
 import {decodeBondingCurve,compileLegacy} from './pumpbuild.mjs';
 import {solscanClient,startSolscanWatcher,swapsFromActivities,leaderProfile,compareDetection} from './solscan.mjs';
 
@@ -381,6 +382,15 @@ async function http(url, { method = 'GET', headers = {}, body, timeoutMs = 10000
   return raw ? Buffer.from(await res.arrayBuffer()) : res.json();
 }
 
+// DEXSCREENER "DEX PAID" CHECK (free, no key, about 60 requests a minute allowed: capped at DEX_CHECKS_PER_MIN,
+// 40): has the coin's DexScreener profile been paid for? -> {paid, at} or null. Measured only (signals.mjs).
+let dexWindow = { at: 0, n: 0 };
+export async function dexPaid(mint) {
+  const t = Date.now(); if (t - dexWindow.at > 60_000) dexWindow = { at: t, n: 0 };
+  if (++dexWindow.n > num('DEX_CHECKS_PER_MIN', 40)) return null;
+  return dexPaidFrom(await http(`https://api.dexscreener.com/orders/v1/solana/${encodeURIComponent(mint)}`, { timeoutMs: 6000 }));
+}
+
 let id = 1;
 /** JSON-RPC read. Rate limits (HTTP 429) and server errors are retried 3 times with backoff. */
 // RPC HEALTH: every Helius call counted per minute (refused = HTTP 429 "too many requests", timed out, other
@@ -392,24 +402,41 @@ const rpcHealth = { calls: 0, refused: 0, timedOut: 0, errors: 0, byMethod: {}, 
 const heliusUsageFile = path.join(path.dirname(config.stateFile), 'helius-usage.json');
 const HELIUS_COST = { getTokenAccounts: 10, getAsset: 10, getAssetBatch: 10, getAssetsByOwner: 10, getProgramAccounts: 10 };
 let heliusUsage = (() => { try { return JSON.parse(fs.readFileSync(heliusUsageFile, 'utf8')); } catch { return {}; } })(), heliusDirty = false;
-function heliusCount(method) {
-  if (!config.heliusKey || !/helius/i.test(config.rpcUrl)) return;
-  const now = new Date().toISOString(), month = now.slice(0, 7), day = now.slice(0, 10), c = HELIUS_COST[method] ?? 1;
-  if (heliusUsage.month !== month) heliusUsage = { month, credits: 0, calls: 0, days: {}, alerted: false };
-  heliusUsage.credits += c; heliusUsage.calls++; heliusUsage.days[day] = (heliusUsage.days[day] || 0) + c; heliusDirty = true;
+// The plan's month starts on HELIUS_CYCLE_DAY (1 = the calendar month): set it to the day Helius resets your
+// credits (Helius dashboard -> Usage) so the meter's month is Helius's month.
+export function heliusCycle(ms, day = 1) {
+  const d = new Date(ms), cd = Math.min(28, Math.max(1, Math.floor(Number(day)) || 1)), y = d.getUTCFullYear(), m = d.getUTCMonth();
+  const start = d.getUTCDate() >= cd ? Date.UTC(y, m, cd) : Date.UTC(y, m - 1, cd), s0 = new Date(start);
+  const end = Date.UTC(s0.getUTCFullYear(), s0.getUTCMonth() + 1, cd);
+  return { key: cd === 1 ? s0.toISOString().slice(0, 7) : s0.toISOString().slice(0, 10), start, end };
+}
+function heliusAdd(c, kind = 'calls') {
+  if (!config.heliusKey || !(c > 0)) return;
+  const nowMs = Date.now(), month = heliusCycle(nowMs, num('HELIUS_CYCLE_DAY', 1)).key, day = new Date(nowMs).toISOString().slice(0, 10);
+  if (heliusUsage.month !== month) heliusUsage = { month, credits: 0, calls: 0, wsCredits: 0, wsBytes: 0, wsConnects: 0, days: {}, alerted: false };
+  heliusUsage.credits += c; heliusUsage.days[day] = (heliusUsage.days[day] || 0) + c; heliusDirty = true;
+  if (kind === 'calls') heliusUsage.calls++; else heliusUsage.wsCredits = (heliusUsage.wsCredits || 0) + c;
   const limit = num('HELIUS_MONTHLY_CREDITS', 1_000_000), at = num('HELIUS_ALERT_PCT', 80) / 100;
   if (!heliusUsage.alerted && heliusUsage.credits >= limit * at) {
     heliusUsage.alerted = true;
-    notify({ title: `Helius credits: ${Math.round(at * 100)}% of the month used`, body: `${heliusUsage.credits.toLocaleString('en-US')} of ${limit.toLocaleString('en-US')} credits used in ${month}. When they run out the bot can't see Decu's trades or price coins. Upgrade the plan, or turn Power OFF until the reset.`, priority: 4, tags: ['warning'] }).catch(() => {});
+    notify({ title: `Helius credits: ${Math.round(at * 100)}% of the month used`, body: `${Math.round(heliusUsage.credits).toLocaleString('en-US')} of ${limit.toLocaleString('en-US')} credits used in ${month}. When they run out the bot can't see Decu's trades or price coins. Upgrade the plan, or turn Power OFF until the reset.`, priority: 4, tags: ['warning'] }).catch(() => {});
   }
 }
+function heliusCount(method) { if (/helius/i.test(config.rpcUrl)) heliusAdd(HELIUS_COST[method] ?? 1); }
+// WEBSOCKET DATA is billed too (since 2026-05-01): 2 credits per 0.1 MB of messages received, 1 per connection.
+export function heliusWsBytes(n) { if (!(n > 0) || !/helius/i.test(config.wsUrl || '')) return; heliusAdd((n * 2) / 100_000, 'ws'); heliusUsage.wsBytes = (heliusUsage.wsBytes || 0) + n; }
+export function heliusWsConnect() { if (!/helius/i.test(config.wsUrl || '')) return; heliusAdd(1, 'ws'); heliusUsage.wsConnects = (heliusUsage.wsConnects || 0) + 1; }
+const msgBytes = (data) => (typeof data === 'string' ? Buffer.byteLength(data) : data?.byteLength || 0);
 setInterval(() => { if (!heliusDirty) return; heliusDirty = false; try { fs.writeFileSync(heliusUsageFile, JSON.stringify(heliusUsage), { mode: 0o600 }); } catch { /* best effort */ } }, 60_000).unref();
-/** This month's Helius use: credits, today, and the month's pace at today's rate. */
+/** This month's Helius use (the plan's month, HELIUS_CYCLE_DAY): credits (plain calls + websocket data), today,
+ *  the month's pace at today's rate, and whether Helius has refused us for being out of credits. */
 function heliusUsageNow() {
-  const now = new Date(), month = now.toISOString().slice(0, 7), u = heliusUsage.month === month ? heliusUsage : { credits: 0, days: {} };
-  const dayOfMonth = now.getUTCDate() - 1 + (now.getUTCHours() * 3600 + now.getUTCMinutes() * 60) / 86400, daysIn = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();
-  const history = Array.from({ length: Math.min(14, now.getUTCDate()) }, (_, i) => { const d = new Date(now.getTime() - (Math.min(14, now.getUTCDate()) - 1 - i) * 86_400_000).toISOString().slice(0, 10); return { day: d, credits: u.days?.[d] || 0 }; });
-  return { month, credits: u.credits || 0, today: u.days?.[now.toISOString().slice(0, 10)] || 0, limit: num('HELIUS_MONTHLY_CREDITS', 1_000_000), pace: dayOfMonth > 0.25 ? Math.round((u.credits || 0) / dayOfMonth * daysIn) : null, daysIn, resetsInDays: Math.max(0, Math.ceil(daysIn - dayOfMonth)), history };
+  const nowMs = Date.now(), cyc = heliusCycle(nowMs, num('HELIUS_CYCLE_DAY', 1)), month = cyc.key, u = heliusUsage.month === month ? heliusUsage : { credits: 0, days: {} };
+  const elapsed = (nowMs - cyc.start) / 86_400_000, daysIn = Math.round((cyc.end - cyc.start) / 86_400_000), shown = Math.min(14, Math.ceil(elapsed) || 1);
+  const history = Array.from({ length: shown }, (_, i) => { const d = new Date(nowMs - (shown - 1 - i) * 86_400_000).toISOString().slice(0, 10); return { day: d, credits: Math.round(u.days?.[d] || 0) }; });
+  return { month, credits: Math.round(u.credits || 0), today: Math.round(u.days?.[new Date(nowMs).toISOString().slice(0, 10)] || 0), limit: num('HELIUS_MONTHLY_CREDITS', 1_000_000),
+    pace: elapsed > 0.25 ? Math.round((u.credits || 0) / elapsed * daysIn) : null, daysIn, resetsInDays: Math.max(0, Math.ceil((cyc.end - nowMs) / 86_400_000)), history,
+    websocket: { credits: Math.round(u.wsCredits || 0), mb: Math.round((u.wsBytes || 0) / 1e5) / 10, connects: u.wsConnects || 0 }, out: heliusCreditsOut() };
 }
 function rpcCount(method, kind) {
   rpcHealth[kind]++; const b = kind === 'calls' ? rpcHealth.byMethod : kind === 'refused' ? rpcHealth.refusedBy : null;
@@ -424,15 +451,44 @@ setInterval(() => {
   for (const k of Object.keys(ps)) ps[k] = 0; ps.jupiterWhy = {}; ps.jupiterCoins = [];
   Object.assign(h, { calls: 0, refused: 0, timedOut: 0, errors: 0, byMethod: {}, refusedBy: {}, since: Date.now() });
 }, 60_000).unref();
+// OUT OF CREDITS: Helius answers "HTTP 429 max usage reached" once the plan's credits are used up. Nothing works
+// until the plan resets or is upgraded and every retry is wasted, so all Helius calls (and websocket reconnects)
+// stop for a pause (HELIUS_OUT_PAUSE_SEC, 120 s, doubling to 30 min) and then one call checks again.
+// One phone alert when it starts and one when Helius answers again.
+const heliusOut = { since: 0, until: 0, pauseMs: 0, skipped: 0 };
+export function heliusCreditsOut() { return heliusOut.since ? { since: new Date(heliusOut.since).toISOString(), nextTry: new Date(heliusOut.until).toISOString(), skipped: heliusOut.skipped } : null; }
+export const heliusBlockedMs = () => Math.max(0, heliusOut.until - Date.now());
+export function resetHeliusOut() { Object.assign(heliusOut, { since: 0, until: 0, pauseMs: 0, skipped: 0 }); }
+export const isOutOfCredits = (msg) => /HTTP 429/.test(String(msg)) && /max usage/i.test(String(msg));
+function heliusRefusedForCredits() {
+  const first = !heliusOut.since;
+  heliusOut.pauseMs = Math.min(heliusOut.pauseMs ? heliusOut.pauseMs * 2 : num('HELIUS_OUT_PAUSE_SEC', 120) * 1000, 30 * 60_000);
+  heliusOut.until = Date.now() + heliusOut.pauseMs;
+  console.log(`Helius: out of credits ("max usage reached"); Helius calls paused for ${Math.round(heliusOut.pauseMs / 60_000)} min, then one call checks again`);
+  if (!first) return;
+  heliusOut.since = Date.now();
+  notify({ title: 'Helius credits used up: the bot is blind', body: 'Helius refuses every call ("max usage reached"), so the bot cannot see Decu\'s trades or price coins until the plan resets or is upgraded. It has stopped calling and checks again every few minutes (at most every 30). Check the Helius dashboard -> Usage for the reset date.', priority: 5, tags: ['rotating_light'] }).catch(() => {});
+}
+function heliusAnswered() {
+  if (!heliusOut.since) return;
+  const h = (Date.now() - heliusOut.since) / 3600e3;
+  console.log(`Helius: answering again after ${h.toFixed(1)} h without credits (${heliusOut.skipped} calls skipped meanwhile)`);
+  notify({ title: 'Helius is answering again', body: `After ${h >= 1 ? h.toFixed(1) + ' h' : Math.max(1, Math.round(h * 60)) + ' min'} without credits Helius works again: the bot can see Decu's trades and price coins.`, priority: 4, tags: ['white_check_mark'] }).catch(() => {});
+  resetHeliusOut();
+}
 async function rpc(method, params, timeoutMs = 10000) {
+  const viaHelius = /helius/i.test(config.rpcUrl);
   for (let attempt = 0; ; attempt++) {
+    if (viaHelius && heliusOut.until > Date.now()) { heliusOut.skipped++; throw new Error(`RPC ${method}: Helius out of credits, calls paused until ${new Date(heliusOut.until).toISOString().slice(11, 16)} UTC`); }
     try {
       rpcCount(method, 'calls');
       const r = await http(config.rpcUrl, { method: 'POST', body: { jsonrpc: '2.0', id: id++, method, params }, timeoutMs });
       heliusCount(method);
+      if (viaHelius) heliusAnswered();
       if (r.error) throw new Error(`RPC ${method}: ${r.error.message || JSON.stringify(r.error)}`.slice(0, 240));
       return r.result;
     } catch (e) {
+      if (viaHelius && isOutOfCredits(e.message)) { rpcCount(method, 'refused'); heliusRefusedForCredits(); throw e; }
       rpcCount(method, /HTTP 429/.test(e.message) ? 'refused' : /timed out/.test(e.message) ? 'timedOut' : 'errors');
       if (attempt >= 3 || !/HTTP (429|5\d\d)/.test(e.message)) throw e;
       await new Promise((res) => setTimeout(res, 300 * 2 ** attempt));
@@ -2051,6 +2107,7 @@ function startWatcher(onSignature, { log = console.log, status = {} } = {}) {
 
   const connect = () => {
     if (stopped) return;
+    if (heliusBlockedMs() > 0) return setTimeout(connect, Math.min(heliusBlockedMs(), 60_000) + 50); // out of credits: no reconnect storm
     try {
       ws = new WebSocket(config.wsUrl);
     } catch (e) {
@@ -2059,13 +2116,13 @@ function startWatcher(onSignature, { log = console.log, status = {} } = {}) {
     }
     ws.onopen = () => {
       backoff = 1000;
-      lastMsg = Date.now();
+      lastMsg = Date.now(); heliusWsConnect();
       // FAST_PATH: 'processed' delivers his trade ~0.4 s after it lands instead of ~1 s later.
       ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'logsSubscribe', params: [{ mentions: [config.leader] }, { commitment: config.fastPath ? 'processed' : 'confirmed' }] }));
       status.websocket='subscribing';
     };
     ws.onmessage = (ev) => {
-      lastMsg = Date.now();
+      lastMsg = Date.now(); heliusWsBytes(msgBytes(ev.data));
       let m;
       try {
         m = JSON.parse(typeof ev.data === 'string' ? ev.data : Buffer.from(ev.data).toString());
@@ -2162,6 +2219,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function heliusTxs(addr, qs) {
   for (let i = 0; ; i++) {
+    if (heliusBlockedMs() > 0) throw new Error('Helius out of credits: calls paused');
     try {
       const r = await http(txUrl(addr, { limit: '100', ...qs }), { timeoutMs: 20000 });
       return Array.isArray(r) ? r : [];
@@ -2765,10 +2823,10 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
   const solscanWatch = solscan.enabled && config.solscanPollMs > 0 ? (onSignature, opts) => startSolscanWatcher({ client: solscan, leader: config.leader, intervalMs: config.solscanPollMs, horizonSec: Math.max(config.maxSignalAgeSec, num('MAX_SELL_SIGNAL_AGE_SEC', 300)), onSignature, ...opts }) : null;
   // PumpPortal live trade feed (PUMPPORTAL_API_KEY; PUMPPORTAL_FEED=false turns it off): one socket, his wallet only
   const pumpPortalWatch = !demo && config.pumpPortalKey && env('PUMPPORTAL_FEED', 'true') !== 'false'
-    ? (onTrade, { log } = {}) => createPumpPortalFeed({ apiKey: config.pumpPortalKey, accounts: [config.leader], onTrade, log: (m) => log?.(redact(m)) }) : null;
+    ? (onTrade, { log } = {}) => createPumpPortalFeed({ apiKey: config.pumpPortalKey, accounts: [config.leader], onTrade, log: (m) => log?.(redact(m)), newTokens: env('PUMP_LAUNCH_FEED', 'false') === 'true' }) : null;
   const tokenLabel = solscan.enabled ? async (mint) => { const m = await solscan.tokenMeta(mint); return m?.symbol ? `$${m.symbol}` : null; } : null;
   // Created paused: the runtime turns every data source on (or leaves them off) with the power switch.
-  stream = !demo && config.wsUrl && env('PUSH_STREAM', 'true') !== 'false' ? createStream({ url: config.wsUrl, log: (m) => console.error(redact(m)), paused: true }) : null;
+  stream = !demo && config.wsUrl && env('PUSH_STREAM', 'true') !== 'false' ? createStream({ url: config.wsUrl, log: (m) => console.error(redact(m)), paused: true, onBytes: heliusWsBytes, onConnect: heliusWsConnect, blocked: heliusBlockedMs }) : null;
   let stopSol = () => {}, stopFees = () => {}, stopWarm = () => {};
   // POWER: the background loops that use Helius / Solscan / Jito (the runtime also stops its own watchers).
   const power = demo ? null : {
@@ -2777,10 +2835,10 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
     idle: () => {},
   };
   if (power) stopSol = stopFees = stopWarm = power.idle;
-  const r = await startRuntime({config,kp,notify,rpcHealth:()=>rpcHealth.last,heliusUsage:heliusUsageNow,graduatedPool,ntfyUsage:()=>ntfyToday(),ntfyHealth:()=>({...ntfyHealth,topic:!!config.ntfyTopic,token:!!env('NTFY_TOKEN')}),solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,readPool,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,startPumpPortalWatcher:pumpPortalWatch,checkPumpPortalBuild,venueOf,venuesOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,solscanActivities:solscan.enabled?(a,o)=>solscan.defiActivities(a,o):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
+  const r = await startRuntime({config,kp,notify,rpcHealth:()=>rpcHealth.last,heliusUsage:heliusUsageNow,graduatedPool,ntfyUsage:()=>ntfyToday(),ntfyHealth:()=>({...ntfyHealth,topic:!!config.ntfyTopic,token:!!env('NTFY_TOKEN')}),solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,readPool,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,startPumpPortalWatcher:pumpPortalWatch,checkPumpPortalBuild,venueOf,venuesOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,dexPaid:env('DEX_PAID_CHECK','true')!=='false'?dexPaid:null,solscanActivities:solscan.enabled?(a,o)=>solscan.defiActivities(a,o):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();stopWarm();solscan.flush();process.exit(0);});
   // The settings that decide speed and filtering, as the bot actually uses them (no keys).
-  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'false')} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.001)} + ${num('TIP_MAX_SOL', 0.002)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · PumpPortal feed ${pumpPortalWatch ? 'on' : 'off (no PUMPPORTAL_API_KEY)'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);
+  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'false')} · trade size ${num('BUY_USD', 0) > 0 ? `$${num('BUY_USD', 0)} (fallback ${env('BUY_SOL', '0.1')} SOL, max ${env('MAX_BUY_SOL', 'auto')} SOL)` : `${env('BUY_SOL', '0.1')} SOL`} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.001)} + ${num('TIP_MAX_SOL', 0.002)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · PumpPortal feed ${pumpPortalWatch ? 'on' : 'off (no PUMPPORTAL_API_KEY)'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);
 }
 
 /** Backtest one day of the leader's trades with an imaginary wallet. */

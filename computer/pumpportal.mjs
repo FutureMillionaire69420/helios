@@ -5,7 +5,10 @@
 // streamed, so that is a fraction of a cent a day.
 // PumpPortal blacklists clients that open many connections: ONE socket, reconnecting slowly (2 s doubling
 // to 60 s). The key is never logged.
+// Optional (PUMP_LAUNCH_FEED=true): subscribeNewToken on the same socket, only to count pump.fun launches (how
+// busy pump.fun is). PumpPortal may bill those messages like trades (~30,000 launches a day), so it is off by default.
 // Nothing here signs or sends a transaction.
+import { createLaunchCounter } from './signals.mjs';
 
 export const PUMPPORTAL_DATA_URL = 'wss://pumpportal.fun/api/data';
 
@@ -23,9 +26,10 @@ export function tradeFromPumpPortal(m) {
   };
 }
 
-export function createPumpPortalFeed({ apiKey, accounts, onTrade, WebSocketImpl = globalThis.WebSocket, url = PUMPPORTAL_DATA_URL, log = () => {}, minBackoffMs = 2000, maxBackoffMs = 60_000, now = () => Date.now() } = {}) {
+export function createPumpPortalFeed({ apiKey, accounts, onTrade, WebSocketImpl = globalThis.WebSocket, url = PUMPPORTAL_DATA_URL, log = () => {}, minBackoffMs = 2000, maxBackoffMs = 60_000, now = () => Date.now(), newTokens = false } = {}) {
   const state = { connected: false, subscribed: false, connects: 0, messages: 0, trades: 0, lastMsgAt: null, lastTradeAt: null, lastError: null };
   let ws = null, stopped = false, timer = null, backoff = minBackoffMs, openedAt = 0;
+  const launches = newTokens ? createLaunchCounter({ now }) : null;
   // every text that leaves the feed (log lines, errors, even a server message echoing the key) is scrubbed
   const hide = (t) => (apiKey ? String(t).split(apiKey).join('***').split(encodeURIComponent(apiKey)).join('***') : String(t));
   const say = (t) => log(hide(t));
@@ -39,7 +43,7 @@ export function createPumpPortalFeed({ apiKey, accounts, onTrade, WebSocketImpl 
     sock.onopen = () => {
       if (ws !== sock) return;
       state.connected = true; openedAt = now();
-      try { sock.send(JSON.stringify({ method: 'subscribeAccountTrade', keys: accounts })); } catch { /* the close handler reconnects */ }
+      try { sock.send(JSON.stringify({ method: 'subscribeAccountTrade', keys: accounts })); if (launches) sock.send(JSON.stringify({ method: 'subscribeNewToken' })); } catch { /* the close handler reconnects */ }
       say('PumpPortal: connected, watching ' + accounts.length + ' wallet' + (accounts.length === 1 ? '' : 's'));
     };
     sock.onmessage = (ev) => {
@@ -48,6 +52,7 @@ export function createPumpPortalFeed({ apiKey, accounts, onTrade, WebSocketImpl 
       state.messages++; state.lastMsgAt = at;
       let m;
       try { m = JSON.parse(typeof ev.data === 'string' ? ev.data : Buffer.from(ev.data).toString()); } catch { return; }
+      if (launches && m?.txType === 'create' && typeof m.mint === 'string') { launches.add(at); return; }
       const t = tradeFromPumpPortal(m);
       if (t) { state.trades++; state.lastTradeAt = at; try { onTrade(t, at); } catch { /* a callback error never breaks the feed */ } return; }
       // non-trade messages: the subscription answer, or an error (bad key, no balance on its wallet)
@@ -74,7 +79,8 @@ export function createPumpPortalFeed({ apiKey, accounts, onTrade, WebSocketImpl 
   };
   connect();
   return {
-    status: () => ({ ...state }),
+    status: () => ({ ...state, launches10m: launches ? launches.count() : null }),
+    launchRate: () => (launches ? launches.count() : null),
     stop() { stopped = true; clearTimeout(timer); const w = ws; ws = null; state.connected = false; state.subscribed = false; try { w?.close(); } catch {} },
   };
 }

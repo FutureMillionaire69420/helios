@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dipSim, walkForward, runTests, flipSkips, marketCapGroups, speedReport, findingsMarkdown, mcapAtHisBuy, pricePath, hisExit } from './tests.mjs';
+import { dipSim, walkForward, runTests, flipSkips, streakSkips, hourOf, marketCapGroups, speedReport, findingsMarkdown, mcapAtHisBuy, pricePath, hisExit } from './tests.mjs';
 import { exitSim } from './learn.mjs';
 
 const t0 = Date.parse('2026-10-01T00:00:00Z');
@@ -46,7 +46,7 @@ test('walk-forward: SUPPORTED needs enough trades and a gain on older AND newer 
 test('the pack: first buy only, market cap ceiling and the quick-flip guard (scored only)', () => {
   const list = Array.from({ length: 60 }, (_, i) => rec(i, { fcat: i % 4 === 0 ? -0.3 : 0.05, hisMcapUsd: i % 4 === 0 ? 150e3 : 8e3, copiedLaterBuy: false, hisSoldAtSec: i % 10 === 0 ? 2 : 6 }));
   const tests = runTests(list, { buySol: 0.1 });
-  assert.deepEqual(tests.map((t) => t.id), ['buy-the-dip', 'break-even', 'first-buy', 'mcap-cap', 'quick-flip']);
+  assert.deepEqual(tests.map((t) => t.id), ['buy-the-dip', 'break-even', 'first-buy', 'mcap-cap', 'quick-flip', 'loss-streak', 'decu-size', 'hour']);
   const mc = tests.find((t) => t.id === 'mcap-cap');
   assert.equal(mc.supported, true); assert.match(mc.best.label, /skip above \$/);
   assert.deepEqual(mc.groups.map((g) => g.label), ['under $10k', '$100k+']);
@@ -118,4 +118,44 @@ test('SUPPORTED shows the real totals: "loses less, still −X SOL" when the bet
   assert.match(md, /## First buy only · SUPPORTED: loses less, still -0\.2000 SOL in total/);
   assert.match(md, /In SOL on these 60 trades: the bot now -0\.8000 SOL → with \*\*copy only his first buy of a coin\*\* -0\.2000 SOL \(still a loss\)/);
   assert.match(md, /first-buy: SUPPORTED\n/, 'the front matter stays one word for Obsidian queries');
+});
+
+test('dip with the first uptick: after the dip, buys at the first price above the one before it', () => {
+  // px: 1.1, 1.0, 0.88 (the dip), 0.95 (the uptick), 1.2, 1.3; he sold at 5 s
+  const up = dipSim(rec(1), { dipPct: 10, giveUpSec: 60, buySol: 0.1, poolFee: 0, uptick: true });
+  assert.equal(up.bought, true); assert.equal(up.at, 3); assert.equal(up.dipEntry, 0.95e-7);
+  assert.ok(Math.abs(up.dipSol - ((1.3 / 0.95 - 1) * 0.1 - 0.006)) < 1e-9);
+  const falling = rec(2, { px: [1.1e-7, 0.85e-7, 0.8e-7, 0.7e-7, 0.6e-7, 0.5e-7], exitPrice: 0.5e-7 });
+  assert.equal(dipSim(falling, { dipPct: 10, poolFee: 0 }).bought, true, 'the plain dip catches the falling knife');
+  assert.equal(dipSim(falling, { dipPct: 10, poolFee: 0, uptick: true }).bought, false, 'the uptick version never buys a coin that only falls');
+  assert.equal(dipSim(rec(1), { dipPct: 10, giveUpSec: 3, poolFee: 0, uptick: true }).bought, false, 'the uptick (3 s + 1 s delay) came after the deadline');
+  const tests = runTests(Array.from({ length: 10 }, (_, i) => rec(i)));
+  assert.ok(tests[0].variants.some((v) => v.key === '10/60/up' && /then the first uptick/.test(v.label)));
+});
+
+test('loss-streak pause: after N losses in a row, skips his buys for a while; skipped trades never count', () => {
+  const rs = [-0.1, -0.2, -0.05, 0.3, 0.2, -0.1, 0.1].map((f, i) => rec(i, { fcat: f })); // 10 min apart
+  const s3 = streakSkips(rs, { losses: 3, pauseMin: 25 });
+  assert.deepEqual([...s3].map((r) => r.mint), ['m3', 'm4'], 'paused 25 min after the 3rd loss in a row (the next two trades)');
+  assert.equal(streakSkips(rs, { losses: 5, pauseMin: 60 }).size, 0, 'never 5 in a row');
+  const tie = [-0.1, 0, -0.1, -0.1].map((f, i) => rec(i, { fcat: f }));
+  assert.deepEqual([...streakSkips(tie, { losses: 2, pauseMin: 5 })], [], 'a 5-min pause is over before the next trade 10 min later');
+  assert.equal(streakSkips(tie, { losses: 2, pauseMin: 15 }).size, 1, 'flat (0) counts as a loss; after a pause the count starts again');
+  const list = Array.from({ length: 60 }, (_, i) => rec(i, { fcat: i % 12 < 5 ? -0.2 : i % 12 === 5 ? -0.3 : 0.05 }));
+  const t = runTests(list, { buySol: 0.1 }).find((x) => x.id === 'loss-streak');
+  assert.equal(t.sideOnly, true); assert.equal(t.variants.length, 3); assert.ok(t.best.sol > 0, 'skipping the losing runs would have helped here');
+});
+
+test("Decu's buy size and hour of day: skip groups, with a table of each group", () => {
+  const list = Array.from({ length: 60 }, (_, i) => rec(i, { hisSol: i % 5 === 0 ? 5 : 1.2, fcat: i % 5 === 0 ? -0.25 : 0.04 }));
+  const tests = runTests(list, { buySol: 0.1 });
+  const sz = tests.find((t) => t.id === 'decu-size');
+  assert.equal(sz.supported, true); assert.match(sz.best.label, /skip his buys of (2\.5|3|4) SOL or more/);
+  assert.deepEqual(sz.groups.map((g) => [g.label, g.n]), [['1–2.5 SOL', 48], ['4 SOL or more', 12]]);
+  const hr = tests.find((t) => t.id === 'hour');
+  assert.equal(hr.variants.length, 6); assert.deepEqual(hr.groups.map((g) => g.label), ['00–04 UTC', '04–08 UTC', '08–12 UTC']);
+  assert.equal(hourOf(rec(0)), 0); assert.equal(hourOf(rec(25)), 4);
+  assert.equal(runTests([rec(1, { hisSol: null })]).find((t) => t.id === 'decu-size').trades, 0, 'no SOL size: left out');
+  const md = findingsMarkdown({ tests, speed: { groups: [] }, updated: '2026-11-14T00:00:00Z' });
+  assert.match(md, /## Loss-streak pause \(side test only\)/); assert.match(md, /## Decu's buy size/); assert.match(md, /\| 4 SOL or more \| 12 \|/);
 });

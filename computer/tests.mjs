@@ -4,11 +4,15 @@
 // trades the choice never saw (walk-forward: chosen on the oldest 70%, proven on the newest 30%).
 //
 //   buy-the-dip       wait for the price to fall 5 / 10 / 15% below Decu's price before buying, give up after
-//                     30 or 60 s (or at his sell); vs buying now. Both sell when Decu sells.
+//                     30 or 60 s (or at his sell); vs buying now. Both sell when Decu sells. Each also has an
+//                     "uptick" version: after the dip, wait for the first price higher than the one before.
 //   break-even stop   once a trade is up +10% / +20%, the stop moves to break-even on your money; vs your rules.
 //   first buy only    copy only his first buy of a coin, never his later buys of it.
 //   market cap cap    skip coins whose market cap at his buy is above $X.
 //   quick-flip guard  after Decu sells within 10 s of buying, skip his next buys for a while (scored only).
+//   loss-streak pause after 3 or 5 losing trades in a row, skip his buys for 60 or 120 min (scored only).
+//   Decu's buy size   skip his buys of 2.5 / 3 / 4 / 6 SOL or more.
+//   hour of day       skip his buys in one 4-hour block of the day (UTC).
 //   crowd / speed     how many other trades landed between Decu's buy and yours (your place in line), what each
 //                     one cost you, and what a faster feed (e.g. Helius LaserStream) would be worth.
 // Everything is plain data, so the second brain (Obsidian notes) can be written from it as is.
@@ -45,9 +49,10 @@ export function hisExit(rec) {
 /**
  * Buy the dip on one recorded trade: the first price at or below Decu's price × (1 − dip), within giveUpSec of
  * HIS buy and before he sold. Sold at his sell (or the last recorded price, marked). Returns SOL for a buySol
- * trade after network fees (fees only when it traded), next to buying now with the same exit.
+ * trade after network fees (fees only when it traded), next to buying now with the same exit. uptick: after the
+ * dip, wait for the first price higher than the one before it.
  */
-export function dipSim(rec, { dipPct = 10, giveUpSec = 60, buySol = 0.1, poolFee = 0.0125 } = {}) {
+export function dipSim(rec, { dipPct = 10, giveUpSec = 60, buySol = 0.1, poolFee = 0.0125, uptick = false } = {}) {
   const path = pricePath(rec), his = rec.hisPrice, now = rec.entryPrice;
   if (!(his > 0) || !(now > 0) || path.length < 3) return null;
   const delay = Math.max(0, rec.delaySec ?? 0), ex = hisExit(rec), last = path.at(-1);
@@ -55,7 +60,11 @@ export function dipSim(rec, { dipPct = 10, giveUpSec = 60, buySol = 0.1, poolFee
   const keep = (1 - poolFee) ** 2, fees = (rec.buyFeeSol ?? rec.sellFeeSol ?? 0) + (rec.sellFeeSol ?? 0);
   const res = (entry) => (keep * (exit.price / entry) - 1) * buySol - fees;
   const trigger = his * (1 - dipPct / 100);
-  const hit = path.find(([s, p]) => s + delay <= giveUpSec && s < exit.at && p <= trigger);
+  const inTime = ([s]) => s + delay <= giveUpSec && s < exit.at;
+  const i = path.findIndex((pt) => inTime(pt) && pt[1] <= trigger);
+  // uptick: after the dip, buy at the first price above the one before it (the fall has stopped), same deadline
+  let hit = i < 0 ? null : path[i];
+  if (hit && uptick) { hit = null; for (let j = i + 1; j < path.length && inTime(path[j]); j++) if (path[j][1] > path[j - 1][1]) { hit = path[j]; break; } }
   return { nowSol: res(now), dipSol: hit ? res(hit[1]) : 0, bought: !!hit, at: hit ? hit[0] : null, dipEntry: hit ? hit[1] : null, open: !exit.his };
 }
 
@@ -75,9 +84,14 @@ export function walkForward(list, variants, { minTrades = 50, minTrainGain = 0.0
 }
 
 // ---------- the tests ----------
-const DIP_VARIANTS = [5, 10, 15].flatMap((d) => [30, 60].map((g) => ({ dipPct: d, giveUpSec: g })));
+const DIP_VARIANTS = [5, 10, 15].flatMap((d) => [30, 60].flatMap((g) => [false, true].map((uptick) => ({ dipPct: d, giveUpSec: g, uptick }))));
 const MCAP_CAPS = [10e3, 20e3, 30e3, 50e3, 100e3];
 const FLIP = [{ withinSec: 10, pauseMin: 60 }, { withinSec: 10, pauseMin: 30 }, { withinSec: 5, pauseMin: 60 }];
+const STREAK = [{ losses: 3, pauseMin: 60 }, { losses: 5, pauseMin: 60 }, { losses: 5, pauseMin: 120 }];
+const SIZE_CAPS = [2.5, 3, 4, 6];
+export const SIZE_GROUPS = [['under 1 SOL', 0, 1], ['1–2.5 SOL', 1, 2.5], ['2.5–4 SOL', 2.5, 4], ['4 SOL or more', 4, Infinity]];
+export const hourOf = (r) => new Date(Date.parse(r.time)).getUTCHours();
+export const HOUR_BLOCKS = [0, 4, 8, 12, 16, 20].map((h) => [`${String(h).padStart(2, '0')}–${String(h + 4).padStart(2, '0')} UTC`, h, h + 4]);
 
 /** Quick-flip guard on the trades in order: which ones it would have skipped. */
 export function flipSkips(records, { withinSec = 10, pauseMin = 60 } = {}) {
@@ -91,6 +105,22 @@ export function flipSkips(records, { withinSec = 10, pauseMin = 60 } = {}) {
   return skip;
 }
 
+/** Loss-streak pause on the trades in order: after `losses` losing trades in a row (FCAT result at or below 0),
+ *  skip his buys for pauseMin minutes, then start counting again. Skipped trades are not traded, so they never
+ *  count. (A trade's result is known about 15 s after it, so this is a close approximation.) */
+export function streakSkips(records, { losses = 5, pauseMin = 60 } = {}) {
+  const skip = new Set(); let until = 0, run = 0;
+  for (const r of byTime(records)) {
+    const t = Date.parse(r.time);
+    if (t < until) { skip.add(r); continue; }
+    if (!fin(r.fcat)) continue;
+    run = r.fcat <= 0 ? run + 1 : 0;
+    if (run >= losses) { until = t + pauseMin * 60e3; run = 0; }
+  }
+  return skip;
+}
+const groupsOf = (records, defs, valueOf) => defs.map(([label, lo, hi]) => { const xs = records.filter((r) => fin(valueOf(r)) && valueOf(r) >= lo && valueOf(r) < hi); return { label, n: xs.length, wins: xs.filter((r) => r.fcat > 0).length, avgFcat: mean(xs.map((r) => r.fcat)) }; }).filter((g) => g.n);
+
 export function runTests(records, { buySol = 0.1, stopLossPct = 20, gainGatePct = 15, gateSec = 15, minTrades = 50, poolFee = 0.0125 } = {}) {
   const studied = records.filter((r) => fin(r.fcat));
   const skipGain = (list, skips) => ({ sol: -list.filter(skips).reduce((a, r) => a + r.fcat * buySol, 0), n: list.length, skipped: list.filter(skips).length });
@@ -99,7 +129,7 @@ export function runTests(records, { buySol = 0.1, stopLossPct = 20, gainGatePct 
 
   // 1. buy the dip (trades with a recorded price path and Decu's price)
   const dipList = studied.filter((r) => dipSim(r) != null);
-  const dip = walkForward(dipList, DIP_VARIANTS.map((v) => ({ key: `${v.dipPct}/${v.giveUpSec}`, label: `${v.dipPct}% dip, give up after ${v.giveUpSec} s`,
+  const dip = walkForward(dipList, DIP_VARIANTS.map((v) => ({ key: `${v.dipPct}/${v.giveUpSec}${v.uptick ? '/up' : ''}`, label: `${v.dipPct}% dip${v.uptick ? ', then the first uptick' : ''}, give up after ${v.giveUpSec} s`,
     gain: (list) => { let g = 0, n = 0, b = 0; for (const r of list) { const s = dipSim(r, { ...v, buySol, poolFee }); if (!s) continue; g += s.dipSol - s.nowSol; n++; if (s.bought) b++; } return { sol: g, n, bought: b }; } })), { minTrades, base: (list) => list.reduce((a, r) => a + (dipSim(r, { buySol, poolFee })?.nowSol ?? 0), 0) });
   out.push({ id: 'buy-the-dip', name: 'Buy the dip', what: 'Wait for the price to fall below Decu\'s price before buying (vs buying now; both sell when he sells).', ...dip });
 
@@ -124,6 +154,20 @@ export function runTests(records, { buySol = 0.1, stopLossPct = 20, gainGatePct 
   const fl = walkForward(studied, FLIP.map((f) => ({ key: `flip${f.withinSec}/${f.pauseMin}`, label: `sold within ${f.withinSec} s → skip his buys for ${f.pauseMin} min`,
     gain: (list) => { const s = flipSkips(list, f); return skipGain(list, (r) => s.has(r)); } })), { minTrades, base: fcatSol });
   out.push({ id: 'quick-flip', name: 'Quick-flip guard (side test only)', what: 'After Decu sells within seconds, pause copying him. Scored on paper; it never skips a trade.', sideOnly: true, ...fl });
+
+  // 6. loss-streak pause: scored only, never skips a paper trade
+  const ls = walkForward(studied, STREAK.map((x) => ({ key: `streak${x.losses}/${x.pauseMin}`, label: `${x.losses} losses in a row → skip his buys for ${x.pauseMin} min`,
+    gain: (list) => { const s = streakSkips(list, x); return skipGain(list, (r) => s.has(r)); } })), { minTrades, base: fcatSol });
+  out.push({ id: 'loss-streak', name: 'Loss-streak pause (side test only)', what: 'After several losing trades in a row, pause copying Decu for a while. Scored on paper; it never skips a trade.', sideOnly: true, ...ls });
+
+  // 7. Decu's buy size (trades with his SOL)
+  const szList = studied.filter((r) => fin(r.hisSol) && r.hisSol > 0);
+  const sz = walkForward(szList, SIZE_CAPS.map((cap) => ({ key: `size${cap}`, label: `skip his buys of ${cap} SOL or more`, gain: (list) => skipGain(list, (r) => r.hisSol >= cap) })), { minTrades, base: fcatSol });
+  out.push({ id: 'decu-size', name: "Decu's buy size", what: 'Skip Decu\'s biggest buys (a big buy can be the top: others sell into it).', ...sz, groups: groupsOf(szList, SIZE_GROUPS, (r) => r.hisSol) });
+
+  // 8. hour of day (UTC)
+  const hr = walkForward(studied, HOUR_BLOCKS.map(([label, lo, hi]) => ({ key: `hour${lo}`, label: `skip ${label}`, gain: (list) => skipGain(list, (r) => hourOf(r) >= lo && hourOf(r) < hi) })), { minTrades, base: fcatSol });
+  out.push({ id: 'hour', name: 'Hour of day', what: 'Skip Decu\'s buys in one 4-hour block of the day (UTC).', ...hr, groups: groupsOf(studied, HOUR_BLOCKS, hourOf) });
   return out;
 }
 

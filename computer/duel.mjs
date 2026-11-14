@@ -21,7 +21,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DEFAULTS, SETTINGS_REV, entryChecks, isMissing, dipTriggered, exitCheck, markPnl, buyRaw, sellSol, netPrice, buyPriceNow, sellPriceNow, mcapUsd, holderCheck, calibrateK, kFloor, calibrateTight, tightPass, summarize, headToHead, fin, CHECK_NAMES, evidence } from './duelmath.mjs';
 import { dayKey } from './dashcalc.mjs';
-import { createDuelBrain, notePaths, homeNote, brainNote, dayNote, holderNote, dipsNote, holdersNote, tradeNote, brainLogNote } from './duelbrain.mjs';
+import { createDuelBrain, notePaths, homeNote, brainNote, dayNote, holderNote, dipsNote, holdersNote, tradeNote, brainLogNote, signalsNote } from './duelbrain.mjs';
+import { linkKind, hourBlock } from './signals.mjs';
 
 const PUMP = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
 const TRADE_EVENT_DISC = Buffer.from([189, 219, 127, 211, 78, 230, 97, 238]); // sha256("event:TradeEvent")[0..8]
@@ -60,6 +61,7 @@ export function createDuel({
   startBalanceSol = 3, settings = {}, holderWaitMs = 2500, holderSnapSec = [0, 60], crowdDelayMs = 3000, crowdMaxTx = 8,
   relax = { on: true, target: 1.7, floorUsd: 500, window: 200, minSamples: 20, every: 5 }, autoTune = true, brainEveryMin = 10,
   notes = null, notify = null, log = () => {}, now = () => Date.now(), maxCands = 3000, minUsd = 20, powered: startPowered = true, graceMs = 5000, padMs = 2000,
+  watchMin = 10, launchRate = () => null,
 } = {}) {
   const swapFee = pumpSwapFee ?? poolFee;
   const feeOf = (st) => (st?.pumpswap ? swapFee : poolFee);
@@ -67,7 +69,7 @@ export function createDuel({
   const timers = new Set();
   let stopped = false, powered = startPowered, dirty = false, saving = false;
   const later = (ms, f) => { const t = setTimeout(() => { timers.delete(t); if (!stopped) { try { const r = f(); if (r?.catch) r.catch((e) => fault('timer', e)); } catch (e) { fault('timer', e); } } }, Math.max(0, ms)); t.unref?.(); timers.add(t); return t; };
-  const status = { started: new Date(now()).toISOString(), candidates: 0, errors: 0, lastError: null, rpc: { calls: 0, failed: 0, byMethod: {} }, voided: 0, feeds: 0 };
+  const status = { started: new Date(now()).toISOString(), candidates: 0, errors: 0, lastError: null, rpc: { calls: 0, failed: 0, byMethod: {} }, voided: 0, feeds: 0, dexOk: 0, dexFailed: 0 };
   const fault = (where, e) => { status.errors++; status.lastError = `${where}: ${String(e?.message || e).slice(0, 160)}`; };
   const call = async (method, params, ms = 4000) => {
     status.rpc.calls++; status.rpc.byMethod[method] = (status.rpc.byMethod[method] || 0) + 1;
@@ -216,6 +218,7 @@ export function createDuel({
       status: 'done', at: now(), ms: now() - t0, sec: Math.round((now() - c.hisMs) / 100) / 10, venue: st.pumpswap ? 'pumpswap' : 'curve', partial,
       holders: by.size, heldUsd: othersRaw * usdPerRaw, devUsd: devRaw * usdPerRaw, devPct: devRaw / 1e15, devKnown: !!dev, mcapUsd: mcap,
       top1Pct: top(1) / 1e15, top10Pct: top(10) / 1e15, top10Share: othersRaw > 0 ? top(10) / othersRaw : null,
+      top1xPct: [...by].reduce((m, [o, x]) => (o !== leader && x > m ? x : m), 0) / 1e15, leaderPct: leader ? (by.get(leader) || 0) / 1e15 : null,
       n10: usd.filter((x) => x >= 10).length, n100: usd.filter((x) => x >= 100).length, n1000: usd.filter((x) => x >= 1000).length, medianUsd: mid,
     };
   };
@@ -401,6 +404,19 @@ export function createDuel({
     brains[v.strategy]?.onTrade(t);
   };
   const maybeRelease = (mint) => { const f = feeds.get(mint); if (f && !f.cands.size && f.holders <= 0) releaseFeed(mint); };
+  // DATA CREDITS: a coin is watched (pushed prices plus reads) only while a trade on it still matters. DIP's and
+  // FCAT's own trades are watched to the end. A position held only by a test trader (analytics, unfiltered,
+  // challenger) is closed at the current price after watchMin minutes ('watch-limit'); without this, those
+  // positions kept coins watched for up to 6 hours. DUEL_WATCH_MIN=0 turns the limit off.
+  const sweepWatch = () => {
+    if (!(watchMin > 0)) return;
+    const t = now(), mainHeld = new Set();
+    for (const v of variants.values()) if (v.role === 'main') for (const m of v.open.keys()) mainHeld.add(m);
+    for (const v of variants.values()) {
+      if (v.role === 'main') continue;
+      for (const pos of [...v.open.values()]) if (!pos.exiting && !pos.provisional && !mainHeld.has(pos.mint) && t - pos.fillAt > watchMin * 60e3) exitNow(v, pos, 'watch-limit');
+    }
+  };
 
   // ---------- his sells ----------
   const onLeaderSell = (s, ctx = {}) => {
@@ -470,7 +486,10 @@ export function createDuel({
       cands.set(id, c); status.candidates++;
       const f = feedFor(c.mint); f.cands.add(c);
       if (f.state?.pumpswap) c.venue = 'pumpswap';
-      if (k.tokenMeta) k.tokenMeta(c.mint).then((m) => { c.sym = m?.symbol || m?.metadata?.symbol || c.sym; }).catch(() => {});
+      if (k.tokenMeta) k.tokenMeta(c.mint).then((m) => { c.sym = m?.symbol || m?.metadata?.symbol || c.sym; c.link = linkKind(m); }).catch(() => {});
+      c.launches10m = launchRate();
+      if (k.dexPaid) k.dexPaid(c.mint).then((r) => { c.dex = r; if (r && !status.dexOk++) log(`duel: DexScreener "dex paid" check working (${c.sym || c.mint.slice(0, 6)}: ${r.paid ? 'paid' : 'not paid'})`); })
+        .catch((e) => { status.dexFailed = (status.dexFailed || 0) + 1; if (status.dexFailed === 1 || status.dexFailed % 100 === 0) log(`duel: DexScreener check failed (${status.dexFailed}x): ${String(e?.message || e).slice(0, 120)}`); });
       for (const sec of holderSnapSec) takeHolders(c, sec);
       verifyCrowd(c);
       for (const v of variants.values()) decide(v, c);
@@ -501,6 +520,7 @@ export function createDuel({
     crowd: c.crowd, holder0: c.holder0, holder60: c.holder60, hisSell: c.hisSell, high: c.high, low: c.low, firstPx: c.firstPx, path: c.path,
     decisions: Object.fromEntries(Object.entries(c.decisions).map(([vid, d]) => [vid, { status: d.status, fails: d.fails || [], missing: !!d.missing, tradeId: d.tradeId || null, premium: d.premium ?? null, triggeredSec: d.triggeredAt ? Math.round((d.triggeredAt - c.hisMs) / 100) / 10 : null, sentSec: d.sentAt ? Math.round((d.sentAt - c.hisMs) / 100) / 10 : null, voided: !!d.voided }])),
     k: c.holder0?.verdict?.k ?? null, day: dayKey(c.hisMs, timezone),
+    link: c.link ?? null, dexPaid: c.dex ? c.dex.paid : null, dexPaidAt: c.dex?.at ?? null, launches10m: c.launches10m ?? null,
   });
   const addCalibrationSample = (c) => {
     c.calibrated = true;
@@ -528,6 +548,7 @@ export function createDuel({
   brains.dip = createDuelBrain({ strategy: 'dip', api: brainApi, notes, log });
   brains.fcat = createDuelBrain({ strategy: 'fcat', api: brainApi, notes, log });
   const brainTimer = setInterval(() => { for (const b of Object.values(brains)) { try { b.cycle(); } catch (e) { fault('brain', e); } } save(); }, Math.max(1, brainEveryMin) * 60e3); brainTimer.unref?.();
+  const watchTimer = setInterval(() => { try { sweepWatch(); } catch (e) { fault('watch', e); } }, 30_000); watchTimer.unref?.();
 
   // ---------- startup: the journal (results, candidates, calibration) and the saved state ----------
   try {
@@ -558,9 +579,18 @@ export function createDuel({
 
   // ---------- Obsidian notes (machine/DIP vs FCAT/ in the second-brain vault; pushed with its own GitHub sync) ----------
   const unsynced = new Set(); let syncing = false, notesWritten = false;
+  /** Every recorded Decu buy with the signals and what the unfiltered FCAT and DIP did on it (one Map per trader). */
+  const signalRows = () => {
+    const all = [...done, ...[...cands.values()].map(candRecord)].slice(-3000);
+    const out = (vid) => new Map((variants.get(vid)?.trades || []).filter((t) => !t.provisional).map((t) => [t.candId, t.ret]));
+    const fa = out('fcat-all'), da = out('dip-all');
+    return all.map((c) => ({ hour: hourBlock(c.hisTime), hisSol: c.hisSol, top1x: c.holder0?.status === 'done' ? c.holder0.top1xPct ?? null : null, leaderPct: c.holder0?.leaderPct ?? null,
+      link: c.link ?? null, dexPaid: c.dexPaid ?? null, launches10m: c.launches10m ?? null, fcatAll: fa.get(c.id) ?? null, dipAll: da.get(c.id) ?? null }));
+  };
   const writeNotes = () => {
     if (!notes?.vault || stopped) return;
     const a = api(), files = {
+      [notePaths.signals]: signalsNote(signalRows()),
       [notePaths.home]: homeNote(a), [notePaths.brain('dip')]: brainNote(a.brains.dip), [notePaths.brain('fcat')]: brainNote(a.brains.fcat),
       [notePaths.holder]: holderNote(a.holderRule), [notePaths.dips]: dipsNote(a.variants.filter((v) => v.strategy === 'dip' && (v.role === 'main' || v.role === 'analytics'))), [notePaths.holders]: holdersNote(a.holders),
     };
@@ -601,7 +631,7 @@ export function createDuel({
   };
   const stop = () => {
     if (stopped) return; stopped = true;
-    clearInterval(balanceTimer); clearInterval(brainTimer); if (notesTimer) clearInterval(notesTimer);
+    clearInterval(balanceTimer); clearInterval(brainTimer); clearInterval(watchTimer); if (notesTimer) clearInterval(notesTimer);
     for (const t of timers) clearTimeout(t); timers.clear();
     for (const f of feeds.values()) { try { f.unwatch?.(); } catch {} }
     saveNow();
@@ -661,6 +691,6 @@ export function createDuel({
   log(`duel: DIP vs FCAT paper traders on (${variants.size} variants, paper balance ${startBalanceSol} SOL each, land ${landMs} ms, holder rule k=${holderCal.k})`);
   return {
     onLeaderBuy, onLeaderSell, power, stop, api, status: () => ({ ...status, feeds: feeds.size, active: cands.size }),
-    openMints: () => new Set([...variants.values()].flatMap((v) => [...v.open.keys()])), brains, variants, writeNotes, pushNotes, notesStatus: () => ({ unsynced: unsynced.size, sync: notes?.gitSync?.status?.() ?? null }), _test: { cands, done, feeds, holderCal, recalibrate },
+    openMints: () => new Set([...variants.values()].flatMap((v) => [...v.open.keys()])), brains, variants, writeNotes, pushNotes, notesStatus: () => ({ unsynced: unsynced.size, sync: notes?.gitSync?.status?.() ?? null }), _test: { cands, done, feeds, holderCal, recalibrate, sweepWatch, signalRows },
   };
 }

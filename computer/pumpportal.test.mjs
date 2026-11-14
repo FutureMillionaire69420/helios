@@ -67,3 +67,28 @@ test('PumpPortal feed: no key, no connection', async () => {
   assert.equal(FakeWS.all.length, 0); assert.match(feed.status().lastError, /PUMPPORTAL_API_KEY/);
   feed.stop();
 });
+
+test('PumpPortal launch counter (opt-in): subscribes to new coins, counts them, never treats one as a trade', async (t) => {
+  FakeWS.all = [];
+  let clock = 1_000_000;
+  const trades = [];
+  const off = createPumpPortalFeed({apiKey: KEY, accounts: [LEADER], onTrade: (x) => trades.push(x), WebSocketImpl: FakeWS, minBackoffMs: 10});
+  t.after(() => off.stop());
+  await sleep(5);
+  assert.deepEqual(FakeWS.all[0].sent, [{method: 'subscribeAccountTrade', keys: [LEADER]}], 'off by default: no new-coin messages (they may be billed)');
+  assert.equal(off.launchRate(), null);
+  off.stop();
+  const feed = createPumpPortalFeed({apiKey: KEY, accounts: [LEADER], onTrade: (x) => trades.push(x), WebSocketImpl: FakeWS, minBackoffMs: 10, newTokens: true, now: () => clock});
+  t.after(() => feed.stop());
+  await sleep(5);
+  const ws = FakeWS.all[1];
+  assert.deepEqual(ws.sent, [{method: 'subscribeAccountTrade', keys: [LEADER]}, {method: 'subscribeNewToken'}]);
+  for (let i = 0; i < 5; i++) ws.emit(msg({txType: 'create', traderPublicKey: 'someone', mint: `M${i}`}));
+  assert.equal(trades.length, 0, 'a launch is not a trade');
+  assert.equal(feed.launchRate(), null, 'no full 10-minute window yet');
+  clock += 600_001; ws.emit(msg({txType: 'create', mint: 'M5'}));
+  assert.equal(feed.launchRate(), 1, 'only the launch inside the last 10 minutes');
+  ws.emit(msg());
+  assert.equal(trades.length, 1, 'his trades still come through');
+  assert.equal(feed.status().launches10m, 1);
+});

@@ -3,7 +3,9 @@ import fs from 'node:fs';
 export function sizeBuy(c, signal, balance, reserved, spent) {
   const spendable = Math.max(0, balance - reserved - c.reserve - c.feeBudget);
   if (c.sizing === 'proportional' && !(signal.leaderBalanceSol > 0)) throw new Error('leader pre-trade SOL balance unavailable');
-  const desired = c.sizing === 'proportional' ? spendable * Math.min(1, signal.sol / signal.leaderBalanceSol) * c.multiplier : c.buySol;
+  // BUY_USD: dollars a trade, converted with Decu's own trade (his $ / his SOL, no extra API call); else BUY_SOL
+  const fixedSol = c.buyUsd > 0 && signal.usd > 0 && signal.sol > 0 ? c.buyUsd / (signal.usd / signal.sol) : c.buySol;
+  const desired = c.sizing === 'proportional' ? spendable * Math.min(1, signal.sol / signal.leaderBalanceSol) * c.multiplier : fixedSol;
   const sol = Math.floor(Math.max(0, Math.min(desired, c.maxBuy, spendable / (1 + c.slippage / 100), c.dailyCap - spent)) * 1e9) / 1e9;
   if (sol < c.minBuy) throw new Error(c.dailyCap - spent < c.minBuy ? `daily spending cap reached (${spent.toFixed(2)} of ${c.dailyCap.toFixed(2)} SOL today${c.dailyCapUsd ? `, $${c.dailyCapUsd}` : ''})` : 'trade too small or wallet balance too low');
   return sol;

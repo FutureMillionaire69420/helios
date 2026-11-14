@@ -24,7 +24,7 @@ const number = (key, fallback) => Number(val(key,String(fallback)));
 export function runtimeConfig(c, demo=false) {
   const out = {mode:demo?'demo':c.dryRun?'paper':'live', timezone:c.timezone,
     sizing:val('SIZING_MODE','fixed'), multiplier:number('COPY_MULTIPLIER',1),
-    buySol:c.buySol, maxBuy:number('MAX_BUY_SOL',c.buySol), minBuy:number('MIN_BUY_SOL',0.005),
+    buySol:c.buySol, buyUsd:number('BUY_USD',0), maxBuy:number('MAX_BUY_SOL',number('BUY_USD',0)>0?Math.max(c.buySol,1):c.buySol), minBuy:number('MIN_BUY_SOL',0.005),
     reserve:c.minSolReserve, feeBudget:(val('FEE_MODE','max')==='max'?number('TIP_MAX_SOL',0.002)+number('PRIORITY_FEE_MAX_SOL',0.001):c.tipSol+c.priorityFeeSol)+0.005,
     slippage:c.slippagePct, dailyCap:c.dailyCapSol>0?c.dailyCapSol:0, minLeaderUsd:c.minLeaderBuyUsd,
     maxAge:c.maxSignalAgeSec, maxSellAge:number('MAX_SELL_SIGNAL_AGE_SEC',300), pumpOnly:c.pumpOnly,
@@ -327,7 +327,7 @@ export async function startRuntime(k, {demo=false}={}) {
       holderRules:holderRuleCfg, creatorOf:m=>creators.get(m), leader:k.config.leader, timezone:c.timezone||'America/New_York', startBalanceSol:number('DUEL_BALANCE_SOL',3), holderWaitMs:number('DUEL_HOLDER_WAIT_MS',2500),
       holderSnapSec:String(val('DUEL_HOLDER_SNAP_SEC','0,60')).split(',').map(Number).filter(x=>x>=0), minUsd:number('DUEL_MIN_USD',20), powered:false,
       relax:{on:val('HOLDER_RELAX','on')!=='off', target:1+number('HOLDER_RELAX_MORE_PCT',70)/100, floorUsd:number('HOLDER_RELAX_FLOOR_USD',500), tightShare:number('HOLDER_TIGHT_REJECT_PCT',30)/100, window:200, minSamples:20, every:5},
-      autoTune:val('DUEL_AUTOTUNE','true')!=='false', brainEveryMin:number('DUEL_BRAIN_EVERY_MIN',10),
+      autoTune:val('DUEL_AUTOTUNE','true')!=='false', brainEveryMin:number('DUEL_BRAIN_EVERY_MIN',10), watchMin:number('DUEL_WATCH_MIN',10), launchRate:()=>ppFeed?.launchRate?.() ?? null,
       notes:{vault:createVault(vdir,{log:m=>console.log(m)}), gitSync:createGitSync({token:val('GITHUB_VAULT_TOKEN',''),repo:val('GITHUB_VAULT_REPO',''),branch:val('GITHUB_VAULT_BRANCH','main'),log:m=>console.log(m)}), everyMin:number('DUEL_NOTES_EVERY_MIN',5)},
       log:m=>console.log(m)});
   } catch(e) { console.log('duel: not started: '+e.message); return null; } })();

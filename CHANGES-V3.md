@@ -618,3 +618,28 @@ No trade setting changed.
 - **The delay is worded by its direction (A7).**
   - Notes, phone alerts, the dashboard and the mirror chart said "the delay cost +$1.95" on a day when the delay helped. Now it's "the delay cost you $0.40" or "the delay helped +$1.95".
   - The `delay_cost_usd` front matter now holds the cost, so its sign matches its name: positive means it cost you, negative means it helped. Every note is rewritten with it on the next start.
+
+## v4.11: sight back, $25 trades, new signals and tests (paper only)
+
+- **The bot stops going blind on Helius credits.** It ran out of free-plan credits on Nov 10 and has been blind since, while the meter showed about 304k of 1M. The meter didn't count websocket data, which Helius has billed since May.
+  - The meter now counts websocket data (2 credits per 0.1 MB, 1 per connection) and follows your billing day (`HELIUS_CYCLE_DAY`, default the 1st).
+  - On "max usage reached" the bot pauses Helius calls for 2 minutes, doubling up to 30, instead of about 190 refused calls a minute. You get one phone alert when it starts and one when Helius answers again. The morning push says so too.
+  - Test-trader positions (analytics, unfiltered, challengers) are closed at the current price after 10 minutes (`DUEL_WATCH_MIN`), so their coins stop being watched. DIP's and FCAT's own trades are watched to the end. Before, those positions could keep a coin watched for 6 hours.
+- **$25 a trade (`BUY_USD`).** Set to 25, each paper copy is $25, converted with Decu's own trade price (no extra lookup). `BUY_SOL` is the fallback. Fees stay on `FEE_MODE=max`: the top of the market, up to the caps.
+- **New signals on every Decu buy, measured only.** The new note `DIP vs FCAT/Signals.md` splits what copying every buy did by:
+  - the largest holder other than Decu (4% or more vs less) and Decu's own share;
+  - Decu's buy size;
+  - the coin's X link (community, single tweet, account, other, none);
+  - a paid DexScreener profile (`DEX_PAID_CHECK`, at most 40 checks a minute);
+  - the hour of day (4-hour UTC blocks);
+  - how many coins launched on pump.fun in the 10 minutes before. This one is off until `PUMP_LAUNCH_FEED=true`, because PumpPortal may bill those messages.
+
+  None of these changes a trade.
+- **New paper tests in `findings.md`:**
+  - Loss-streak pause (3 or 5 losses in a row → skip 60 or 120 min). A side test like the quick-flip guard; it never skips a trade.
+  - Decu's buy size (skip his buys of 2.5 / 3 / 4 / 6 SOL or more).
+  - Hour of day (skip one 4-hour block).
+  - Every buy-the-dip version gets an "uptick" twin, which waits for the first price above the one before it after the dip.
+
+  All are walk-forward: chosen on older trades, proven on newer ones.
+

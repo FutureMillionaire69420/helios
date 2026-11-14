@@ -215,3 +215,12 @@ test('buy path: ONE state write before the send, and it already holds the signed
   await new Promise(r => setImmediate(r));
   assert.equal(JSON.parse(fs.readFileSync(e.file, 'utf8')).positions.coin.raw, '1000');
 });
+
+test('BUY_USD: a fixed dollar size, converted with Decu\'s own trade price; BUY_SOL when his price is unknown', () => {
+  const fixed = { ...cfg, sizing: 'fixed', buySol: 0.3, buyUsd: 25, maxBuy: 1, dailyCap: 10 };
+  // his trade: $300 for 2 SOL = $150 a SOL, so $25 = 0.1666 SOL
+  assert.equal(sizeBuy(fixed, buy(), 5, 0, 0), 0.166666666);
+  assert.equal(sizeBuy(fixed, { ...buy(), usd: 0 }, 5, 0, 0), 0.3, 'no $ on his trade: BUY_SOL');
+  assert.equal(sizeBuy({ ...fixed, buyUsd: 0 }, buy(), 5, 0, 0), 0.3, 'BUY_USD unset: BUY_SOL as before');
+  assert.equal(sizeBuy({ ...fixed, maxBuy: 0.1 }, buy(), 5, 0, 0), 0.1, 'never above MAX_BUY_SOL');
+});

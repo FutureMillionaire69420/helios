@@ -34,3 +34,9 @@ test('the morning message: health, paper results and the SOL price, read-only', 
   assert.ok(Buffer.byteLength(m.body) < 3900, 'fits in one ntfy message');
   assert.equal(morningBrief({mode: 'live', trades: [], now}).title.startsWith('Good morning'), true, 'no tag when live');
 });
+
+test('morning push: says plainly when Helius is out of credits', () => {
+  const m = morningBrief({ mode: 'paper', version: '4.11.0', helius: { credits: 1_000_000, limit: 1_000_000, pace: 1_200_000, out: { since: '2026-11-10T09:50:00.000Z' } }, now: Date.parse('2026-11-14T12:00:00Z') });
+  assert.match(m.body, /Helius OUT OF CREDITS since 2026-11-10 09:50 UTC: the bot is blind/);
+  assert.doesNotMatch(morningBrief({ mode: 'paper', helius: { credits: 5, limit: 10 } }).body, /OUT OF CREDITS/);
+});

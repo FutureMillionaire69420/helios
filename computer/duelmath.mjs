@@ -125,7 +125,7 @@ export function exitCheck(p, pos, { now, pnl, sellPx }) {
   if (fin(p.stopFromHisPct) && fin(sellPx) && fin(pos.P) && sellPx <= pos.P * (1 - p.stopFromHisPct / 100)) return { rule: 'stop', pnl };
   return null;
 }
-export const EXIT_NAMES = { 'tp-early': `take-profit in the first seconds`, 'tp-late': 'take-profit later', stop: "stop (20% under Decu's price)", 'his-sell': 'Decu sold', 'his-sell-late': 'Decu sold (found late)' };
+export const EXIT_NAMES = { 'tp-early': `take-profit in the first seconds`, 'tp-late': 'take-profit later', stop: "stop (20% under Decu's price)", 'his-sell': 'Decu sold', 'his-sell-late': 'Decu sold (found late)', 'watch-limit': 'stopped watching after 10 min (data credits)' };
 
 // ===== THE HOLDER MONEY RULE: YOUR BASELINE AND A RELAXED EXPERIMENT =====
 // BASELINE (unchanged, learn.mjs holderVerdict): holders other than the dev and the curve must hold at least

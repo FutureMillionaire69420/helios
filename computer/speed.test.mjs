@@ -7,7 +7,7 @@ import {createStream} from './stream.mjs';
 import {holderVerdict, exitSim} from './learn.mjs';
 import {createStudy, research, latencyLine, toCsv} from './study.mjs';
 import crypto from 'node:crypto';
-import {heliusUsageNow, rpc, setFetch, setStream, refreshFees, currentFees, solUsdNow, confirm, holderStats, findProgramAddress, b58decode, b58encode, PROGRAMS, startSenderWarm, senderUrl, config, landTest, checkLandTestTx, parseTransaction, TIP_ACCOUNTS} from './copybot.mjs';
+import {dexPaid, heliusUsageNow, heliusWsBytes, heliusWsConnect, heliusCycle, heliusCreditsOut, resetHeliusOut, heliusBlockedMs, rpc, setFetch, setStream, refreshFees, currentFees, solUsdNow, confirm, holderStats, findProgramAddress, b58decode, b58encode, PROGRAMS, startSenderWarm, senderUrl, config, landTest, checkLandTestTx, parseTransaction, TIP_ACCOUNTS} from './copybot.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const tmp = (t) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-speed-')); t.after(() => fs.rmSync(d, {recursive: true, force: true})); return path.join(d, 'study.jsonl'); };
@@ -263,7 +263,7 @@ test('landing-speed test: shows the cost and sends nothing without --yes; then o
 test('Helius credits are counted: DAS reads 10, other calls 1, refused calls not at all', async (t) => {
   const saved = {heliusKey: config.heliusKey, rpcUrl: config.rpcUrl};
   Object.assign(config, {heliusKey: 'k', rpcUrl: 'https://mainnet.helius-rpc.com/?api-key=k'});
-  t.after(() => { setFetch(null); Object.assign(config, saved); });
+  t.after(() => { setFetch(null); Object.assign(config, saved); resetHeliusOut(); });
   let refuse = false;
   setFetch(async () => refuse ? {ok: false, status: 429, text: async () => 'max usage reached'} : {ok: true, json: async () => ({jsonrpc: '2.0', id: 1, result: {value: null}})});
   const before = heliusUsageNow();
@@ -271,4 +271,70 @@ test('Helius credits are counted: DAS reads 10, other calls 1, refused calls not
   refuse = true; await rpc('getSlot', []).catch(() => {});
   const after = heliusUsageNow();
   assert.equal(after.credits - before.credits, 11); assert.equal(after.today - before.today, 11); assert.equal(after.limit, 1_000_000);
+});
+
+// ---------- Helius credits: the plan's month, websocket data, and the out-of-credits pause ----------
+test('the Helius month follows HELIUS_CYCLE_DAY; websocket data and connections are counted', (t) => {
+  const d = Date.UTC(2026, 10, 9, 12); // Nov 9
+  assert.equal(heliusCycle(d, 1).key, '2026-11', 'day 1: the calendar month (same key as before)');
+  const c = heliusCycle(d, 10);
+  assert.equal(c.key, '2026-10-10'); assert.equal(new Date(c.end).toISOString().slice(0, 10), '2026-11-10', 'Nov 9 is still in the cycle that began Oct 10');
+  assert.equal(heliusCycle(Date.UTC(2026, 10, 10), 10).key, '2026-11-10');
+  const saved = {heliusKey: config.heliusKey, wsUrl: config.wsUrl};
+  Object.assign(config, {heliusKey: 'k', wsUrl: 'wss://mainnet.helius-rpc.com/?api-key=k'});
+  t.after(() => Object.assign(config, saved));
+  const before = heliusUsageNow();
+  heliusWsBytes(250_000); heliusWsConnect(); // 0.25 MB = 5 credits, plus 1 per connection
+  const after = heliusUsageNow();
+  assert.equal(after.credits - before.credits, 6);
+  assert.equal(after.websocket.connects - before.websocket.connects, 1); assert.ok(after.websocket.mb - before.websocket.mb >= 0.2);
+  Object.assign(config, {wsUrl: 'wss://other-rpc.example'}); heliusWsBytes(1e6);
+  assert.equal(heliusUsageNow().credits, after.credits, 'another provider is not counted');
+});
+
+test('out of Helius credits: calls stop for a pause instead of retrying, then one call checks again', async (t) => {
+  const saved = {heliusKey: config.heliusKey, rpcUrl: config.rpcUrl}, pause = process.env.HELIUS_OUT_PAUSE_SEC;
+  Object.assign(config, {heliusKey: 'k', rpcUrl: 'https://mainnet.helius-rpc.com/?api-key=k'}); process.env.HELIUS_OUT_PAUSE_SEC = '0.06';
+  t.after(() => { setFetch(null); Object.assign(config, saved); resetHeliusOut(); if (pause === undefined) delete process.env.HELIUS_OUT_PAUSE_SEC; else process.env.HELIUS_OUT_PAUSE_SEC = pause; });
+  let out = true, fetches = 0;
+  setFetch(async () => { fetches++; return out ? {ok: false, status: 429, text: async () => '{"jsonrpc":"2.0","error":{"code":-32429,"message":"max usage reached"}}'} : {ok: true, json: async () => ({jsonrpc: '2.0', id: 1, result: 7})}; });
+  await assert.rejects(rpc('getSlot', []), /max usage/);
+  assert.equal(fetches, 1, 'no retries: out of credits is not a busy minute');
+  assert.ok(heliusCreditsOut()?.since); assert.ok(heliusBlockedMs() > 0); assert.ok(heliusUsageNow().out);
+  await assert.rejects(rpc('getSlot', []), /out of credits, calls paused/);
+  assert.equal(fetches, 1, 'paused: no call at all');
+  await sleep(90);
+  await assert.rejects(rpc('getSlot', []), /max usage/); // still out: one check, then a longer pause
+  assert.equal(fetches, 2); assert.ok(heliusBlockedMs() > 60, 'the pause doubled');
+  await sleep(150); out = false;
+  assert.equal(await rpc('getSlot', []), 7);
+  assert.equal(heliusCreditsOut(), null, 'answering again: back to normal');
+  setFetch(async () => ({ok: false, status: 429, text: async () => 'Too many requests'}));
+  await assert.rejects(rpc('getSlot', []), /429/);
+  assert.equal(heliusCreditsOut(), null, 'a plain 429 (busy) is retried as before, not a credits pause');
+});
+
+test('the push stream waits out a credits pause instead of reconnecting, and reports the data it receives', async (t) => {
+  FakeWS.all = [];
+  let blockedFor = 40, bytes = 0, connects = 0;
+  const s = createStream({url: 'wss://x', WebSocketImpl: FakeWS, pingMs: 60_000, blocked: () => blockedFor, onBytes: (n) => { bytes += n; }, onConnect: () => { connects++; }});
+  t.after(() => s.stop());
+  await sleep(10);
+  assert.equal(FakeWS.all.length, 0, 'no connection while the provider refuses us');
+  blockedFor = 0; await sleep(120);
+  assert.equal(FakeWS.all.length, 1); assert.equal(connects, 1);
+  FakeWS.all[0].ack('slotSubscribe', 5); FakeWS.all[0].push('slotNotification', 5, {slot: 9});
+  assert.ok(bytes > 50, `bytes ${bytes}`);
+});
+
+test('DEX paid check: DexScreener orders for the coin, at most DEX_CHECKS_PER_MIN a minute', async (t) => {
+  const saved = process.env.DEX_CHECKS_PER_MIN; process.env.DEX_CHECKS_PER_MIN = '2';
+  t.after(() => { setFetch(null); if (saved == null) delete process.env.DEX_CHECKS_PER_MIN; else process.env.DEX_CHECKS_PER_MIN = saved; });
+  const urls = [];
+  setFetch(async (url) => { urls.push(url); return {ok: true, json: async () => [{type: 'tokenProfile', status: 'approved', paymentTimestamp: 1700000000000}]}; });
+  assert.deepEqual(await dexPaid('MintPump1'), {paid: true, at: 1700000000000});
+  assert.equal(urls[0], 'https://api.dexscreener.com/orders/v1/solana/MintPump1');
+  await dexPaid('MintPump2');
+  assert.equal(await dexPaid('MintPump3'), null, 'over the per-minute cap: skipped, no request');
+  assert.equal(urls.length, 2);
 });
