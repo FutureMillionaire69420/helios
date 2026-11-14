@@ -159,6 +159,7 @@ Items 1–6 were built in v4.11 (2026-11-14, paper only). What is left is to wai
 
 ## 7. Open decisions waiting on the owner
 
+- **Render suspended the service for billing on 2026-11-13 18:56 UTC**: the bot is off and nothing deploys. Fix billing in Render, resume, then deploy the latest commit (v4.11) and set `BUY_USD=25`, `BUY_SOL=0.33`, `MAX_BUY_SOL=1` (Render refuses env changes while suspended).
 - Helius: check the dashboard for real usage and the reset date (set `HELIUS_CYCLE_DAY` to it). Wait, upgrade, or use a new key?
 - Fees: keep "max" as the top of the market up to the caps, or always pay the full caps?
 - Turn on the pump.fun launch counter (`PUMP_LAUNCH_FEED=true`)? It may cost PumpPortal credits.
