@@ -21,6 +21,8 @@ test('the secret guard spots keys, keypairs and tokens, but not test values or p
   assert.equal(findSecrets([L("DASHBOARD_TOKEN: 'dashboard-test-token-24-characters'")]).length, 0, 'test value');
   assert.equal(findSecrets([L("export const TOKEN = 'Token" + "kegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';")]).length, 0, 'the public token program address');
   assert.equal(findSecrets([L(`const t = '${fakePat}'; // guard:allow`)]).length, 0, 'opt-out comment');
+  assert.equal(findSecrets([L('const t = "' + 'sw' + 'pat_' + 'Zx9Q'.repeat(9) + '";')])[0].what, 'a SignalWire token');
+  assert.equal(findSecrets([L('x = ' + 'P' + 'T' + 'ab12'.repeat(12))])[0].what, 'a SignalWire token');
   // phone numbers only matter in the public repo, and 555 numbers are examples
   const phone = '+1' + '863' + '4' + '120' + '987';
   assert.equal(findSecrets([L(`OWNER_PHONE=${phone}`)]).length, 0);

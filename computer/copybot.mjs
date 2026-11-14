@@ -1228,8 +1228,9 @@ async function holderStats(mint, { creator = null, upTo = 4000 } = {}) {
 }
 
 // ===== fees =====
-// FEE_MODE=max (default): every buy and every sell pays the top of the market at that moment so it
-// lands as early as possible: priority fee = Helius getPriorityFeeEstimate at PRIORITY_LEVEL (VeryHigh)
+// FEE_MODE=max (default, the owner's rule since v4.12): every buy and every sell pays the highest fee allowed,
+// the caps PRIORITY_FEE_MAX_SOL + TIP_MAX_SOL, every time. No lookups (saves a Helius call every 30 s).
+// FEE_MODE=market: the top of the market at that moment: priority fee = Helius getPriorityFeeEstimate at PRIORITY_LEVEL (VeryHigh)
 // for the pump.fun program, tip = Jito's TIP_PERCENTILE (99th) of recently landed tips. Refreshed in the
 // background every FEE_REFRESH_SEC (10 s), never looked up on the trading path. Capped at
 // PRIORITY_FEE_MAX_SOL (0.001) and TIP_MAX_SOL (0.002), so a side costs at most 0.003 SOL (the paper data:
@@ -1237,8 +1238,11 @@ async function holderStats(mint, { creator = null, upTo = 4000 } = {}) {
 // when an estimate is unavailable the cap is used.
 // Paying above the top of the market does not land faster. FEE_MODE=fixed: PRIORITY_FEE_SOL / TIP_SOL.
 const fees = { priorityFeeSol: config.priorityFeeSol, tipSol: config.tipSol, at: 0, source: 'fixed' };
+const feeCaps = () => ({ priorityFeeSol: num('PRIORITY_FEE_MAX_SOL', 0.001), tipSol: num('TIP_MAX_SOL', 0.002) });
 async function refreshFees() {
-  if (env('FEE_MODE', 'max') !== 'max') return fees;
+  const mode = env('FEE_MODE', 'max');
+  if (mode === 'max') { Object.assign(fees, feeCaps(), { at: Date.now(), source: 'max (always the caps)' }); return fees; }
+  if (mode !== 'market') return fees;
   const pMax = num('PRIORITY_FEE_MAX_SOL', 0.001), tMax = num('TIP_MAX_SOL', 0.002), cu = num('CU_LIMIT', 120_000);
   const [p, t] = await Promise.all([
     config.rpcIsPublic ? null : rpc('getPriorityFeeEstimate', [{ accountKeys: [PROGRAMS.PUMP], options: { priorityLevel: env('PRIORITY_LEVEL', 'VeryHigh') } }], 3000).then((r) => Number(r?.priorityFeeEstimate)).catch(() => null),
@@ -1246,7 +1250,7 @@ async function refreshFees() {
   ]);
   fees.priorityFeeSol = Number.isFinite(p) && p > 0 ? Math.min(pMax, Math.max(config.priorityFeeSol, (p * cu) / 1e6 / 1e9)) : pMax;
   fees.tipSol = Number.isFinite(t) && t > 0 ? Math.min(tMax, Math.max(config.tipSol, t)) : tMax;
-  fees.at = Date.now(); fees.source = `max (priority ${Number.isFinite(p) ? 'estimate' : 'cap'}, tip ${Number.isFinite(t) ? 'Jito 99th pct' : 'cap'})`;
+  fees.at = Date.now(); fees.source = `market (priority ${Number.isFinite(p) ? 'estimate' : 'cap'}, tip ${Number.isFinite(t) ? 'Jito 99th pct' : 'cap'})`;
   return fees;
 }
 /** LIVE: keep the connection to Helius Sender open between buys (GET /ping, free, every SENDER_PING_SEC),
@@ -1260,8 +1264,8 @@ function startSenderWarm({ intervalMs = num('SENDER_PING_SEC', 3) * 1000 } = {})
   const t = setInterval(hit, intervalMs); t.unref?.();
   return () => clearInterval(t);
 }
-function startFeeRefresh() { if (env('FEE_MODE', 'max') !== 'max') return () => {}; refreshFees().then((f) => console.log(`fees now: priority ${f.priorityFeeSol.toFixed(6)} + tip ${f.tipSol.toFixed(6)} SOL per trade (${f.source}); refreshed every ${num('FEE_REFRESH_SEC', 30)} s`)).catch(() => {}); const t = setInterval(refreshFees, num('FEE_REFRESH_SEC', 30) * 1000); t.unref?.(); return () => clearInterval(t); }
-const currentFees = () => ({ priorityFeeSol: fees.priorityFeeSol, tipSol: fees.tipSol, at: fees.at, source: fees.source });
+function startFeeRefresh() { const mode = env('FEE_MODE', 'max'); if (mode !== 'max' && mode !== 'market') return () => {}; refreshFees().then((f) => console.log(`fees now: priority ${f.priorityFeeSol.toFixed(6)} + tip ${f.tipSol.toFixed(6)} SOL per trade (${f.source})${mode === 'market' ? `; refreshed every ${num('FEE_REFRESH_SEC', 30)} s` : ''}`)).catch(() => {}); if (mode === 'max') return () => {}; const t = setInterval(refreshFees, num('FEE_REFRESH_SEC', 30) * 1000); t.unref?.(); return () => clearInterval(t); }
+const currentFees = () => (env('FEE_MODE', 'max') === 'max' ? { ...feeCaps(), at: fees.at, source: 'max (always the caps)' } : { priorityFeeSol: fees.priorityFeeSol, tipSol: fees.tipSol, at: fees.at, source: fees.source });
 
 async function jupQuote(inputMint, outputMint, amount) {
   const base = config.jupiterApiKey ? 'https://api.jup.ag' : 'https://lite-api.jup.ag';
@@ -1524,7 +1528,7 @@ async function validateTrade(bytes,job,balanceSol,feeSol=0) {
   const outflow=(before.value[0].lamports-v.accounts[0].lamports)/1e9;
   // Fees allowed: the priority fee + tip actually put in this transaction, never above the FEE_MODE=max
   // caps (PRIORITY_FEE_MAX_SOL + TIP_MAX_SOL), never below the fixed PRIORITY_FEE_SOL + TIP_SOL.
-  const fixedFee=config.tipSol+config.priorityFeeSol, feeCap=env('FEE_MODE','max')==='max'?num('PRIORITY_FEE_MAX_SOL',0.001)+num('TIP_MAX_SOL',0.002):fixedFee;
+  const fixedFee=config.tipSol+config.priorityFeeSol, feeCap=['max','market'].includes(env('FEE_MODE','max'))?num('PRIORITY_FEE_MAX_SOL',0.001)+num('TIP_MAX_SOL',0.002):fixedFee;
   const limit=(job.side==='buy'?job.sol*(1+config.slippagePct/100):0)+Math.max(fixedFee,Math.min(feeCap,Number(feeSol)||0))+0.005;
   if(outflow>limit || v.accounts[0].lamports/1e9<config.minSolReserve) throw new Error('simulation exceeds spend/reserve limit');
   // A token account closed by this transaction (CloseAccount after a full sell) comes back from the
@@ -2838,7 +2842,7 @@ async function runBot({ check: checkOnly = false, demo = false } = {}) {
   const r = await startRuntime({config,kp,notify,rpcHealth:()=>rpcHealth.last,heliusUsage:heliusUsageNow,graduatedPool,ntfyUsage:()=>ntfyToday(),ntfyHealth:()=>({...ntfyHealth,topic:!!config.ntfyTopic,token:!!env('NTFY_TOKEN')}),solUsdNow,fees:currentFees,power,solscanUsage:solscan.enabled?()=>solscan.usage():null,get stream(){ return stream; },watchCurve,curveSell,curveMcapSol,holderStats,readCurve,readPool,redact,rpc,http,getBalanceSol,getTransaction,getSolUsd,detectBuy,detectSell,startWatcher,startSolscanWatcher:solscanWatch,startPumpPortalWatcher:pumpPortalWatch,checkPumpPortalBuild,venueOf,venuesOf,tokenLabel,leaderPumpBuys,leaderPumpSells,findProgramAddress,ata:associatedTokenAddress,b58decode,b58encode,tokenMeta:solscan.enabled?(m)=>solscan.tokenMeta(m):null,dexPaid:env('DEX_PAID_CHECK','true')!=='false'?dexPaid:null,solscanActivities:solscan.enabled?(a,o)=>solscan.defiActivities(a,o):null,quoteBuy,quoteSell,addTransferInstruction,signTransaction,TIP_ACCOUNTS,senderUrl,sendRaw,confirm,validateTrade,transactionBlockhash},{demo});
   for(const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{r.stop();stream?.stop();stopSol();stopFees();stopWarm();solscan.flush();process.exit(0);});
   // The settings that decide speed and filtering, as the bot actually uses them (no keys).
-  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'false')} · trade size ${num('BUY_USD', 0) > 0 ? `$${num('BUY_USD', 0)} (fallback ${env('BUY_SOL', '0.1')} SOL, max ${env('MAX_BUY_SOL', 'auto')} SOL)` : `${env('BUY_SOL', '0.1')} SOL`} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (caps ${num('PRIORITY_FEE_MAX_SOL', 0.001)} + ${num('TIP_MAX_SOL', 0.002)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · PumpPortal feed ${pumpPortalWatch ? 'on' : 'off (no PUMPPORTAL_API_KEY)'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);
+  if (!demo) console.log(`settings: ${config.dryRun ? 'PAPER' : 'LIVE'} · entry-premium filter ${env('MAX_PAY_ABOVE_DECU_PCT', '15')}% price vs price${config.dryRun ? ` (paper: ${env('PAPER_MAX_PAY_PCT') || 'same'})` : ''} · reported ${env('FILTER_REPORT_PCTS', '10,25')} · skipped alerts ${env('SKIPPED_ALERTS', 'false')} · trade size ${num('BUY_USD', 0) > 0 ? `$${num('BUY_USD', 0)} (fallback ${env('BUY_SOL', '0.1')} SOL, max ${env('MAX_BUY_SOL', 'auto')} SOL)` : `${env('BUY_SOL', '0.1')} SOL`} · fees ${env('FEE_MODE', 'max')}${env('FEE_MODE', 'max') === 'max' ? ` (always the caps: ${num('PRIORITY_FEE_MAX_SOL', 0.001)} + ${num('TIP_MAX_SOL', 0.002)} SOL a side)` : env('FEE_MODE', 'max') === 'market' ? ` (market, caps ${num('PRIORITY_FEE_MAX_SOL', 0.001)} + ${num('TIP_MAX_SOL', 0.002)} SOL)` : ''} · push stream ${stream ? 'on' : 'off'} · PumpPortal feed ${pumpPortalWatch ? 'on' : 'off (no PUMPPORTAL_API_KEY)'} · holder money rule (dev excluded, mcap:$) ${env('HOLDER_RULES', '10000:1000,20000:2500,30000:4000')} · ${config.dryRun ? `paper land ${config.paperLandMs} ms` : `sender ${new URL(config.senderUrl || 'http://none').host} kept warm`}`);
 }
 
 /** Backtest one day of the leader's trades with an imaginary wallet. */
@@ -3095,7 +3099,7 @@ async function landTest({ count = 10, yes = false, log = console.log, pollMs = n
   if (!Number.isInteger(count) || count < 1 || count > 20) throw new Error('--count must be a whole number from 1 to 20');
   if (!config.privateKey) throw new Error('no wallet key set (PHANTOM_PRIVATE_KEY): there is nothing to send from');
   if (config.rpcIsPublic) throw new Error('set HELIUS_API_KEY first: the test uses the same RPC and Sender as live buys');
-  const kp = loadKeypair(config.privateKey), maxMode = env('FEE_MODE', 'max') === 'max';
+  const kp = loadKeypair(config.privateKey), maxMode = ['max', 'market'].includes(env('FEE_MODE', 'max'));
   if (maxMode) await refreshFees().catch(() => {});
   const f = currentFees(), cuLimit = num('CU_LIMIT', 120_000);
   const priorityLamports = Math.round(f.priorityFeeSol * 1e9), tipLamports = Math.round(f.tipSol * 1e9);

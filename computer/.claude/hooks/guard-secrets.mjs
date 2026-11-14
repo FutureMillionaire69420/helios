@@ -17,6 +17,7 @@ export const PATTERNS = [
   ['a Solana keypair (64-number array)', /\[\s*(?:\d{1,3}\s*,\s*){63}\d{1,3}\s*\]/],
   ['an API key in a URL', /api[-_]?key=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i],
   ['a Twilio API key', /\bSK[0-9a-f]{32}\b/],
+  ['a SignalWire token', /\b(?:swpat_[A-Za-z0-9]{20,}|PT[0-9a-f]{48})\b/],
   ['a secret setting with a value', /\b[A-Z0-9_]*(?:PRIVATE_KEY|SECRET|TOKEN|API_KEY|AUTH|PASSWORD|SEED|MNEMONIC)[A-Z0-9_]*\s*[=:]\s*['"]?([A-Za-z0-9_\-+/]{20,})/, (v) =>
     // not secrets: test/example values, and public Solana addresses such as the token program (base58, 32-44 chars)
     /test|example|dummy|fake|placeholder|your[-_]/i.test(v) || isAddress(v)],

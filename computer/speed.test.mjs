@@ -155,10 +155,10 @@ test('latency line shows detection in exact blocks', () => {
   assert.equal(research([{time: new Date().toISOString(), mint: 'a', fcat: 0.1, latency: {detectBlocks: 3}}]).latency.detectBlocksMedian, 3);
 });
 
-test('fees: max mode follows Jito\'s 99th percentile tip, falls back to the caps when unknown', async (t) => {
+test('fees: market mode follows Jito\'s 99th percentile tip, falls back to the caps when unknown', async (t) => {
   const saved = {...process.env}; t.after(() => { setFetch(null); for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]; Object.assign(process.env, saved); });
   for (const k of ['TIP_MAX_SOL', 'PRIORITY_FEE_MAX_SOL']) delete process.env[k]; // the defaults: 0.002 + 0.001 = 0.003 per side
-  process.env.FEE_MODE = 'max';
+  process.env.FEE_MODE = 'market';
   setFetch(async (url) => ({ok: true, json: async () => (/tip_floor/.test(url) ? [{landed_tips_99th_percentile: 0.0015}] : {result: {priorityFeeEstimate: 1_000_000}})}));
   await refreshFees();
   assert.equal(currentFees().tipSol, 0.0015, '99th percentile of landed tips (under the 0.002 cap)');
@@ -217,7 +217,7 @@ test('landing-speed test: shows the cost and sends nothing without --yes; then o
   const seed = privateKey.export({format: 'der', type: 'pkcs8'}).subarray(-32), pub = publicKey.export({format: 'der', type: 'spki'}).subarray(-32), payer = b58encode(pub);
   const saved = {privateKey: config.privateKey, rpcIsPublic: config.rpcIsPublic, rebroadcast: config.rebroadcast, senderUrl: config.senderUrl}, savedEnv = {...process.env};
   Object.assign(config, {privateKey: b58encode(Buffer.concat([seed, pub])), rpcIsPublic: false, rebroadcast: false, senderUrl: 'https://sender.test/fast'});
-  Object.assign(process.env, {FEE_MODE: 'max', LANDTEST_POLL_MS: '5', LANDTEST_GAP_MS: '0', LANDTEST_TIMEOUT_MS: '2000'});
+  Object.assign(process.env, {FEE_MODE: 'market', LANDTEST_POLL_MS: '5', LANDTEST_GAP_MS: '0', LANDTEST_TIMEOUT_MS: '2000'});
   t.after(() => { setFetch(null); Object.assign(config, saved); for (const k of Object.keys(process.env)) if (!(k in savedEnv)) delete process.env[k]; Object.assign(process.env, savedEnv); });
   const sent = [], polls = new Map(); let lamports = 1e9;
   setFetch(async (url, init) => {
@@ -337,4 +337,17 @@ test('DEX paid check: DexScreener orders for the coin, at most DEX_CHECKS_PER_MI
   await dexPaid('MintPump2');
   assert.equal(await dexPaid('MintPump3'), null, 'over the per-minute cap: skipped, no request');
   assert.equal(urls.length, 2);
+});
+
+test('fees: max mode always pays the caps (the highest fee allowed), with no lookups', async (t) => {
+  const saved = {...process.env}; t.after(() => { setFetch(null); for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]; Object.assign(process.env, saved); });
+  Object.assign(process.env, {FEE_MODE: 'max', PRIORITY_FEE_MAX_SOL: '0.003', TIP_MAX_SOL: '0.01'});
+  const urls = []; setFetch(async (url) => { urls.push(url); return {ok: true, json: async () => [{landed_tips_99th_percentile: 0.0001}]}; });
+  assert.equal(currentFees().priorityFeeSol, 0.003); assert.equal(currentFees().tipSol, 0.01, 'the caps even before the first refresh');
+  await refreshFees();
+  assert.deepEqual([currentFees().priorityFeeSol, currentFees().tipSol], [0.003, 0.01], 'a low market tip does not lower it');
+  assert.equal(urls.length, 0, 'no Helius or Jito lookups');
+  assert.match(currentFees().source, /always the caps/);
+  delete process.env.PRIORITY_FEE_MAX_SOL; delete process.env.TIP_MAX_SOL;
+  assert.ok(Math.abs(currentFees().priorityFeeSol + currentFees().tipSol - 0.003) < 1e-12, 'default caps: 0.001 + 0.002 SOL a side');
 });

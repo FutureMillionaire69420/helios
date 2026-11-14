@@ -155,3 +155,17 @@ test('PAPER_BALANCE_SOL on the server wins once when it is changed; after that p
   assert.equal(r.engine.d.paperBalance, 5, 'a new value is applied once');
   r.stop();
 });
+
+test('voice: the call script and the audio are public (SignalWire and Twilio fetch them); nothing else is', async (t) => {
+  const voiceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'decu-voice-')); fs.writeFileSync(path.join(voiceDir, 'ultron-test.mp3'), Buffer.from('ID3 test audio'));
+  t.after(() => fs.rmSync(voiceDir, {recursive: true, force: true}));
+  const {base} = await bot(t, {PUBLIC_URL: 'https://bot.example.com', VOICE_DIR: voiceDir});
+  for (const method of ['GET', 'POST']) {
+    const x = await fetch(base + '/voice/ultron-test.xml', {method});
+    assert.equal(x.status, 200, method); assert.match(x.headers.get('content-type'), /xml/);
+    assert.equal(await x.text(), '<?xml version="1.0" encoding="UTF-8"?><Response><Play>https://bot.example.com/voice/ultron-test.mp3</Play></Response>');
+  }
+  const mp3 = await fetch(base + '/voice/ultron-test.mp3'); assert.equal(mp3.status, 200); assert.equal(await mp3.text(), 'ID3 test audio');
+  assert.equal((await fetch(base + '/voice/no-such-message.xml')).status, 404, 'only a message that exists');
+  assert.notEqual((await fetch(base + '/voice/..%2Fpackage.xml')).status, 200, 'no path tricks');
+});

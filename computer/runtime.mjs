@@ -13,7 +13,7 @@ import {createGitSync,createVault} from './vault.mjs';
 import {createDuel} from './duel.mjs';
 import {createPumpApi} from './pumpapi.mjs';
 import {createPumpProfile,parseProfile} from './pumpprofile.mjs';
-import {voiceConfig,voiceStatus,createVoiceCaller} from './voicecall.mjs';
+import {voiceConfig,voiceStatus,createVoiceCaller,voiceXml} from './voicecall.mjs';
 import {morningDue,morningBrief} from './morning.mjs';
 import {tradeRows} from './dashcalc.mjs';
 import {createGoal} from './goal.mjs';
@@ -25,7 +25,7 @@ export function runtimeConfig(c, demo=false) {
   const out = {mode:demo?'demo':c.dryRun?'paper':'live', timezone:c.timezone,
     sizing:val('SIZING_MODE','fixed'), multiplier:number('COPY_MULTIPLIER',1),
     buySol:c.buySol, buyUsd:number('BUY_USD',0), maxBuy:number('MAX_BUY_SOL',number('BUY_USD',0)>0?Math.max(c.buySol,1):c.buySol), minBuy:number('MIN_BUY_SOL',0.005),
-    reserve:c.minSolReserve, feeBudget:(val('FEE_MODE','max')==='max'?number('TIP_MAX_SOL',0.002)+number('PRIORITY_FEE_MAX_SOL',0.001):c.tipSol+c.priorityFeeSol)+0.005,
+    reserve:c.minSolReserve, feeBudget:(['max','market'].includes(val('FEE_MODE','max'))?number('TIP_MAX_SOL',0.002)+number('PRIORITY_FEE_MAX_SOL',0.001):c.tipSol+c.priorityFeeSol)+0.005,
     slippage:c.slippagePct, dailyCap:c.dailyCapSol>0?c.dailyCapSol:0, minLeaderUsd:c.minLeaderBuyUsd,
     maxAge:c.maxSignalAgeSec, maxSellAge:number('MAX_SELL_SIGNAL_AGE_SEC',300), pumpOnly:c.pumpOnly,
     oneBuy:c.oneBuyPerMint, autoSell:val('AUTO_SELL',demo?'true':'false')==='true', autoCopy:val('AUTO_COPY','true') === 'true', paperBalance:number('PAPER_BALANCE_SOL',1.65), dailyLossLimit:number('DAILY_LOSS_LIMIT_SOL',0),
@@ -170,7 +170,7 @@ export async function startRuntime(k, {demo=false}={}) {
   try { if (fs.statSync(k.config.logFile).size > 50e6) fs.renameSync(k.config.logFile, k.config.logFile+'.1'); } catch {}
   const token = val('DASHBOARD_TOKEN','');
   if (!demo && !k.config.dryRun && token.length<24) throw new Error('LIVE requires DASHBOARD_TOKEN of at least 24 characters');
-  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey,k.config.pumpPortalKey,val('GITHUB_VAULT_TOKEN',''),val('GITHUB_BACKUP_TOKEN',''),val('PUMP_API_KEY',''),val('TWILIO_API_SECRET',''),val('TWILIO_AUTH_TOKEN','')].filter(Boolean);
+  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey,k.config.pumpPortalKey,val('GITHUB_VAULT_TOKEN',''),val('GITHUB_BACKUP_TOKEN',''),val('PUMP_API_KEY',''),val('TWILIO_API_SECRET',''),val('TWILIO_AUTH_TOKEN',''),val('SIGNALWIRE_API_TOKEN','')].filter(Boolean);
   const clean = v => { let s=JSON.stringify(v); for(const secret of secrets) s=s.split(secret).join('[REDACTED]'); return JSON.parse(k.redact(s)); };
   const log = e => {
     // Sell outcomes: was the position closed, and how did the fill compare with the exit trigger?
@@ -995,8 +995,8 @@ export async function startRuntime(k, {demo=false}={}) {
     else { notReadySince??=Date.now(); if(!readyAlerted && Date.now()-notReadySince>=number('READY_ALERT_SEC',120)*1000) { readyAlerted=true; engine.event('not-ready',{message:`not ready to trade: ${r.blocking.join(', ')}`}); if(k.notify&&!engine.d.alertsOff) Promise.resolve(k.notify({title:`${tag}Bot NOT READY to trade`,body:r.checks.filter(x=>!x.ok).map(x=>`${x.warn?'⚠':'✕'} ${x.name}: ${x.detail}`).join('\n'),priority:4,tags:['warning']})).catch(()=>{}); } }
   },number('READY_CHECK_MS',15000)); readyTimer?.unref?.();
   const balanceCache=new Map();
-  // Ultron voice calls (Twilio): off until all settings are present; only the owner's own phone, rate-limited
-  const voiceCfg=voiceConfig(), voiceCaller=demo?null:createVoiceCaller({cfg:voiceCfg});
+  // Ultron voice calls (SignalWire or Twilio): off until all settings are present; only the owner's own phone, rate-limited
+  const voiceCfg=voiceConfig(), voiceCaller=demo?null:createVoiceCaller({cfg:voiceCfg}), voiceDir=val('VOICE_DIR','')||path.join(path.dirname(fileURLToPath(import.meta.url)),'voice');
   // your pump.fun profile's trades, READ-ONLY (Solscan history of that public wallet; never trades)
   const pumpProfile=demo?null:createPumpProfile({activities:k.solscanActivities||null,tokenMeta:k.tokenMeta||null,solUsd});
   const profileAddr=()=>engine.d.pumpfunProfile||parseProfile(val('PUMPFUN_PROFILE',''))||null;
@@ -1009,8 +1009,13 @@ export async function startRuntime(k, {demo=false}={}) {
     res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"); // data: = wallet icons (Solflare, Phantom...)
     const url=new URL(req.url,'http://localhost');
     const authorized=()=> {const supplied=(req.headers.authorization||'').replace(/^Bearer /,'');return token && Buffer.byteLength(supplied)===Buffer.byteLength(token) && crypto.timingSafeEqual(Buffer.from(supplied),Buffer.from(token));};
+    if((req.method==='GET'||req.method==='POST') && /^\/voice\/[a-z0-9-]+\.xml$/.test(url.pathname)) { // public: the call script SignalWire fetches; it only plays the audio below
+      const name=path.basename(url.pathname,'.xml'), f=path.join(voiceDir,name+'.mp3');
+      if(!fs.existsSync(f)) { res.writeHead(404,{'Content-Type':'text/plain'}); return res.end('not found'); }
+      res.writeHead(200,{'Content-Type':'text/xml','Cache-Control':'no-store'}); return res.end(voiceXml(voiceCfg.baseUrl,name));
+    }
     if(req.method==='GET' && /^\/voice\/[a-z0-9-]+\.mp3$/.test(url.pathname)) { // public so Twilio can fetch it; robot-voice audio only
-      const f=path.join(path.dirname(fileURLToPath(import.meta.url)),'voice',path.basename(url.pathname));
+      const f=path.join(voiceDir,path.basename(url.pathname));
       try { const b=fs.readFileSync(f); res.writeHead(200,{'Content-Type':'audio/mpeg','Content-Length':b.length}); return res.end(b); } catch { res.writeHead(404); return res.end('Not found'); }
     }
     if(url.pathname==='/health') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({running:true,mode:c.mode}));}

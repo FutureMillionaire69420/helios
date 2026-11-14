@@ -23,7 +23,7 @@ saying "this works" is a reason to **test** something, never a reason to **chang
   - Across his last 600 buys, copying every one would have averaged −10% to −17% a trade.
 - **Fees are bigger than the edge.**
   - November: 63 trades, +$43.11 before fees on the $10 mirror, $51.24 in fees ($0.81 a trade, about 8%).
-  - Current fees: FEE_MODE=max, priority up to 0.001 SOL plus tip up to 0.002 SOL, so up to 0.003 SOL per side.
+  - Fees until v4.11: the market, which sat at the minimums, 0.001 + 0.002 SOL per side. Since v4.12 (owner's rule): always the caps, 0.003 + 0.01 SOL per side.
   - A fixed fee hurts most at small sizes: about 6% of a 0.1 SOL trade, about 1.2% of a 0.5 SOL trade.
 - **Speed is not the problem.**
   - 627 of 816 trades had nobody buying ahead, yet paid a median +43% over Decu's price.
@@ -142,9 +142,9 @@ Items 1–6 were built in v4.11 (2026-11-14, paper only). What is left is to wai
    - Test-trader positions (analytics, unfiltered, challengers) stop being watched after 10 min (`DUEL_WATCH_MIN`); DIP's and FCAT's own trades are watched to the end.
    - Still open: the real reset date from the Helius dashboard.
 2. **Fees and size** (built v4.11; the owner chose bigger trades over lower fees):
-   - `BUY_USD=25`: each paper trade is $25, converted with Decu's own trade price. `FEE_MODE=max` stays on.
+   - `BUY_USD=25`: each paper trade is $25, converted with Decu's own trade price.
+   - `FEE_MODE=max` now means always the caps (owner, 2026-11-14): 0.013 SOL per side, about 8% of a $25 trade round trip. The old behaviour is `FEE_MODE=market`.
    - At $25 (~0.17 SOL) the same fixed fees are a smaller share of each trade than at 0.1 SOL.
-   - Still open: whether "max" should mean always paying the full caps (only adds cost in paper).
 3. **Measured-only signals** (built v4.11): the note `machine/DIP vs FCAT/Signals.md` splits what copying every Decu buy did by:
    - the largest holder other than Decu (under 2%, 2–4%, 4% or more), and Decu's own share;
    - Decu's buy size;
@@ -161,7 +161,7 @@ Items 1–6 were built in v4.11 (2026-11-14, paper only). What is left is to wai
 
 - **Render suspended the service for billing on 2026-11-13 18:56 UTC**: the bot is off and nothing deploys. Fix billing in Render, resume, then deploy the latest commit (v4.11) and set `BUY_USD=25`, `BUY_SOL=0.33`, `MAX_BUY_SOL=1` (Render refuses env changes while suspended).
 - Helius: check the dashboard for real usage and the reset date (set `HELIUS_CYCLE_DAY` to it). Wait, upgrade, or use a new key?
-- Fees: keep "max" as the top of the market up to the caps, or always pay the full caps?
+- Voice calls: SignalWire is built in (v4.12). It needs the Space, Project ID, a project API token with the Voice scope and a SignalWire number in Render → Environment. The pasted token must be rotated first.
 - Turn on the pump.fun launch counter (`PUMP_LAUNCH_FEED=true`)? It may cost PumpPortal credits.
 - B7 quick-flip guard as a real paper rule?
 - Zip: the bot code (no keys) or the Obsidian vault?

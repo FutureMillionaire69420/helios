@@ -643,3 +643,14 @@ No trade setting changed.
 
   All are walk-forward: chosen on older trades, proven on newer ones.
 
+## v4.12: max fees, and SignalWire calls
+
+- **`FEE_MODE=max` now pays the highest fee allowed, every time.** That's the full caps, `PRIORITY_FEE_MAX_SOL` + `TIP_MAX_SOL`: 0.003 + 0.01 SOL a side on the paper bot, about 8% of a $25 trade round trip.
+  - It no longer looks the market up, which saves a Helius call every 30 s.
+  - The old behaviour (the top of the market, up to the caps) is now `FEE_MODE=market`.
+- **Ultron voice calls through SignalWire**, a cheaper Twilio-compatible service.
+  - Set `SIGNALWIRE_SPACE`, `SIGNALWIRE_PROJECT_ID`, `SIGNALWIRE_API_TOKEN` (a project token with the Voice scope) and `SIGNALWIRE_FROM_NUMBER`, plus `OWNER_PHONE`.
+  - The call plays the same robot-voice message through a small public call script at `/voice/<name>.xml`.
+  - Twilio still works when no SignalWire Project ID is set.
+  - The SignalWire token is scrubbed from logs like every other key.
+
