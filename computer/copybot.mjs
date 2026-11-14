@@ -455,12 +455,15 @@ setInterval(() => {
 // until the plan resets or is upgraded and every retry is wasted, so all Helius calls (and websocket reconnects)
 // stop for a pause (HELIUS_OUT_PAUSE_SEC, 120 s, doubling to 30 min) and then one call checks again.
 // One phone alert when it starts and one when Helius answers again.
-const heliusOut = { since: 0, until: 0, pauseMs: 0, skipped: 0 };
+const heliusOut = { since: 0, until: 0, pauseMs: 0, skipped: 0, probing: false };
 export function heliusCreditsOut() { return heliusOut.since ? { since: new Date(heliusOut.since).toISOString(), nextTry: new Date(heliusOut.until).toISOString(), skipped: heliusOut.skipped } : null; }
 export const heliusBlockedMs = () => Math.max(0, heliusOut.until - Date.now());
-export function resetHeliusOut() { Object.assign(heliusOut, { since: 0, until: 0, pauseMs: 0, skipped: 0 }); }
+export function resetHeliusOut() { Object.assign(heliusOut, { since: 0, until: 0, pauseMs: 0, skipped: 0, probing: false }); }
 export const isOutOfCredits = (msg) => /HTTP 429/.test(String(msg)) && /max usage/i.test(String(msg));
 function heliusRefusedForCredits() {
+  // a call sent before the pause began, coming back refused: the pause already covers it (calls in flight
+  // used to double it once each, 2 min to 30 min in a millisecond)
+  if (heliusOut.until > Date.now()) return;
   const first = !heliusOut.since;
   heliusOut.pauseMs = Math.min(heliusOut.pauseMs ? heliusOut.pauseMs * 2 : num('HELIUS_OUT_PAUSE_SEC', 120) * 1000, 30 * 60_000);
   heliusOut.until = Date.now() + heliusOut.pauseMs;
@@ -479,7 +482,12 @@ function heliusAnswered() {
 async function rpc(method, params, timeoutMs = 10000) {
   const viaHelius = /helius/i.test(config.rpcUrl);
   for (let attempt = 0; ; attempt++) {
-    if (viaHelius && heliusOut.until > Date.now()) { heliusOut.skipped++; throw new Error(`RPC ${method}: Helius out of credits, calls paused until ${new Date(heliusOut.until).toISOString().slice(11, 16)} UTC`); }
+    // out of credits: nothing until the pause is over, then ONE call checks (the others wait for its answer)
+    let probe = false;
+    if (viaHelius && heliusOut.since) {
+      if (heliusOut.until > Date.now() || heliusOut.probing) { heliusOut.skipped++; throw new Error(`RPC ${method}: Helius out of credits, calls paused until ${new Date(heliusOut.until).toISOString().slice(11, 16)} UTC`); }
+      heliusOut.probing = probe = true;
+    }
     try {
       rpcCount(method, 'calls');
       const r = await http(config.rpcUrl, { method: 'POST', body: { jsonrpc: '2.0', id: id++, method, params }, timeoutMs });
@@ -492,7 +500,7 @@ async function rpc(method, params, timeoutMs = 10000) {
       rpcCount(method, /HTTP 429/.test(e.message) ? 'refused' : /timed out/.test(e.message) ? 'timedOut' : 'errors');
       if (attempt >= 3 || !/HTTP (429|5\d\d)/.test(e.message)) throw e;
       await new Promise((res) => setTimeout(res, 300 * 2 ** attempt));
-    }
+    } finally { if (probe) heliusOut.probing = false; }
   }
 }
 

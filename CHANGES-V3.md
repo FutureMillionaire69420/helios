@@ -653,4 +653,4 @@ No trade setting changed.
   - The call plays the same robot-voice message through a small public call script at `/voice/<name>.xml`.
   - Twilio still works when no SignalWire Project ID is set.
   - The SignalWire token is scrubbed from logs like every other key.
-
+- **Fix: the out-of-credits pause no longer stretches itself.** On the first start, 15 calls already on their way were refused at once and each one doubled the pause, from 2 minutes to 30 in a millisecond. Now a refusal during a pause doesn't extend it, and after a pause only one call checks while the rest wait.

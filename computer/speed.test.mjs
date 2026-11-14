@@ -314,6 +314,29 @@ test('out of Helius credits: calls stop for a pause instead of retrying, then on
   assert.equal(heliusCreditsOut(), null, 'a plain 429 (busy) is retried as before, not a credits pause');
 });
 
+test('out of credits: calls already in flight do not stretch the pause, and after it ONE call checks', async (t) => {
+  const saved = {heliusKey: config.heliusKey, rpcUrl: config.rpcUrl}, pause = process.env.HELIUS_OUT_PAUSE_SEC;
+  Object.assign(config, {heliusKey: 'k', rpcUrl: 'https://mainnet.helius-rpc.com/?api-key=k'}); process.env.HELIUS_OUT_PAUSE_SEC = '0.08';
+  t.after(() => { setFetch(null); Object.assign(config, saved); resetHeliusOut(); if (pause === undefined) delete process.env.HELIUS_OUT_PAUSE_SEC; else process.env.HELIUS_OUT_PAUSE_SEC = pause; });
+  let fetches = 0, release;
+  const gate = new Promise((r) => { release = r; });
+  setFetch(async () => { fetches++; await gate; return {ok: false, status: 429, text: async () => 'max usage reached'}; });
+  const inFlight = Array.from({length: 15}, () => rpc('getSlot', []).catch((e) => e.message));
+  await sleep(5); release();
+  const msgs = await Promise.all(inFlight);
+  assert.equal(fetches, 15); assert.ok(msgs.every((m) => /max usage/.test(m)));
+  assert.ok(heliusBlockedMs() <= 80 && heliusBlockedMs() > 40, `one pause of 80 ms, not doubled 15 times (${heliusBlockedMs()} ms)`);
+  await sleep(100);
+  let answer; const slow = new Promise((r) => { answer = r; });
+  setFetch(async () => { fetches++; await slow; return {ok: true, json: async () => ({jsonrpc: '2.0', id: 1, result: 7})}; });
+  const probe = rpc('getSlot', []);
+  await sleep(5);
+  await assert.rejects(rpc('getSlot', []), /calls paused/, 'while one call checks, the rest wait');
+  assert.equal(fetches, 16, 'one check');
+  answer(); assert.equal(await probe, 7);
+  assert.equal(heliusCreditsOut(), null);
+});
+
 test('the push stream waits out a credits pause instead of reconnecting, and reports the data it receives', async (t) => {
   FakeWS.all = [];
   let blockedFor = 40, bytes = 0, connects = 0;
