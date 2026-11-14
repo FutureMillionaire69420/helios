@@ -169,3 +169,10 @@ test('voice: the call script and the audio are public (SignalWire and Twilio fet
   assert.equal((await fetch(base + '/voice/no-such-message.xml')).status, 404, 'only a message that exists');
   assert.notEqual((await fetch(base + '/voice/..%2Fpackage.xml')).status, 200, 'no path tricks');
 });
+
+test('voice: a refused test call is written to the log, not only shown on the dashboard', async (t) => {
+  const {r, base} = await bot(t, {SIGNALWIRE_PROJECT_ID: 'REPLACE-me', OWNER_PHONE: '+15559998888'});
+  const res = await fetch(base + '/api/call/test', {method: 'POST', headers: auth});
+  assert.equal(res.status, 400); assert.match(await res.text(), /not set up: SIGNALWIRE_SPACE/);
+  assert.ok(r.engine.d.events.some((e) => e.type === 'connection' && /Ultron test call failed: Voice calls are not set up/.test(e.message)));
+});

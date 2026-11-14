@@ -1091,8 +1091,8 @@ export async function startRuntime(k, {demo=false}={}) {
       }
       if(url.pathname==='/api/call/test' && req.method==='POST') {
         if(!voiceCaller) { res.writeHead(503,{'Content-Type':'text/plain'}); return res.end('Voice calls are off in demo mode.'); }
-        try { const r=await voiceCaller.call('ultron-test'); engine.event('connection',{message:`Ultron test call placed to ${r.to} (${r.status})`}); return sendJson(req,res,r); }
-        catch(e) { res.writeHead(400,{'Content-Type':'text/plain'}); return res.end(String(e.message).slice(0,300)); }
+        try { const r=await voiceCaller.call('ultron-test'); engine.event('connection',{message:`Ultron test call placed to ${r.to} via ${r.provider} (${r.status})`}); return sendJson(req,res,r); }
+        catch(e) { const why=String(e.message).slice(0,300); engine.event('connection',{message:`Ultron test call failed: ${why}`}); res.writeHead(400,{'Content-Type':'text/plain'}); return res.end(why); }
       }
       if(url.pathname==='/api/pumpfun' && req.method==='GET') {
         const address=profileAddr(), base={address,on:!!pumpProfile,profileUrl:address?'https://pump.fun/profile/'+address:null};
