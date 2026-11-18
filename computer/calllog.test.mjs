@@ -70,7 +70,7 @@ test('ultron log: a whole call, step by step (heard, request, response with toke
   await u.turn({base: BASE, key: KEY, id, callSid: 'CA1', speech: 'thanks, goodbye', confidence: '0.91', voice: 'Polly.Matthew', params: {CallStatus: 'in-progress'}});
   u.stop();
   const names = steps.map((e) => e.step);
-  assert.deepEqual(names, ['session-open', 'connected', 'claude-request', 'claude-response', 'tool', 'claude-request', 'claude-response', 'answer', 'respond', 'heard', 'respond', 'call-summary']);
+  assert.deepEqual(names, ['session-open', 'connected', 'claude-request', 'claude-response', 'tool', 'claude-request', 'claude-response', 'answer', 'respond', 'heard', 'mood', 'respond', 'call-summary']);
   assert.ok(steps.every((e) => e.call === id.slice(0, 8)), 'every step carries the call id');
   const by = (s) => steps.filter((e) => e.step === s);
   assert.equal(by('connected')[0].To, '•••1234'); assert.equal(by('connected')[0].CallStatus, 'in-progress');

@@ -8,6 +8,7 @@
 // ULTRON_MODEL (default claude-sonnet-5-5), ULTRON_EFFORT (default low: shorter pauses on the phone).
 
 import crypto from 'node:crypto';
+import {hearMood, replyMood, expressiveSsml} from './expressive.mjs';
 
 export const ULTRON_VOICES = [
   {id: 'man', label: 'Classic robot (male)'},
@@ -25,12 +26,12 @@ const ULTRON_LINE = 'Good evening, sir. Ultron online. All systems are clear, an
 const JARVIS_LINE = 'Good evening, sir. At your service. All systems are running smoothly, and I am ready whenever you are.';
 export const STYLES = [
   {id: 'deep2', label: 'Ultron: deep American, faster', voice: 'Polly.Matthew', rate: 118, pitch: -10, tract: 10, line: ULTRON_LINE},
-  {id: 'butler2', label: 'Jarvis: clear butler, faster (default)', voice: 'Polly.Brian', rate: 118, pitch: -5, tract: 5, line: JARVIS_LINE},
-  {id: 'jarvis-pure', label: 'Jarvis: pure butler, no effects', voice: 'Polly.Brian', rate: 112, pitch: 0, tract: 0, line: JARVIS_LINE},
-  {id: 'jarvis-calm', label: 'Jarvis: calm and measured', voice: 'Polly.Brian', rate: 106, pitch: -2, tract: 0, line: JARVIS_LINE},
-  {id: 'jarvis-crisp', label: 'Jarvis: crisp and quick', voice: 'Polly.Brian', rate: 118, pitch: -2, tract: 0, line: JARVIS_LINE},
-  {id: 'jarvis-natural', label: 'Jarvis: natural British (neural)', voice: 'Polly.Brian-Neural', rate: 108, pitch: 0, tract: 0, line: JARVIS_LINE},
-  {id: 'jarvis-arthur', label: 'Jarvis: refined British (neural)', voice: 'Polly.Arthur-Neural', rate: 106, pitch: 0, tract: 0, line: JARVIS_LINE},
+  {id: 'butler2', label: 'Jarvis: clear butler, faster (default)', voice: 'Polly.Brian', rate: 118, pitch: -5, tract: 5, line: JARVIS_LINE, expressive: true},
+  {id: 'jarvis-pure', label: 'Jarvis: pure butler, no effects', voice: 'Polly.Brian', rate: 112, pitch: 0, tract: 0, line: JARVIS_LINE, expressive: true},
+  {id: 'jarvis-calm', label: 'Jarvis: calm and measured', voice: 'Polly.Brian', rate: 106, pitch: -2, tract: 0, line: JARVIS_LINE, expressive: true},
+  {id: 'jarvis-crisp', label: 'Jarvis: crisp and quick', voice: 'Polly.Brian', rate: 118, pitch: -2, tract: 0, line: JARVIS_LINE, expressive: true},
+  {id: 'jarvis-natural', label: 'Jarvis: natural British (neural)', voice: 'Polly.Brian-Neural', rate: 108, pitch: 0, tract: 0, line: JARVIS_LINE, expressive: true},
+  {id: 'jarvis-arthur', label: 'Jarvis: refined British (neural)', voice: 'Polly.Arthur-Neural', rate: 106, pitch: 0, tract: 0, line: JARVIS_LINE, expressive: true},
 ];
 export const DEFAULT_STYLE = 'butler2';
 const SAMPLE_NUMBERS = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
@@ -637,7 +638,10 @@ export function createUltron({apiKey, model = 'claude-sonnet-5-5', effort = 'low
   const effect = (x) => `<amazon:effect name="drc">${tractPct ? `<amazon:effect vocal-tract-length="+${tractPct}%">${x}</amazon:effect>` : x}</amazon:effect>`; // drc: evens the volume, so every word carries
   const clear = (x, r = 100) => x.replace(/([.?!,;:])\s+(?=\S)/g, (m, p) => `${p} <break time="${/[.?!]/.test(p) ? (r >= 115 ? 180 : r >= 110 ? 240 : 350) : (r >= 110 ? 60 : 150)}ms"/>`); // a beat after each sentence and comma, shorter when faster
   const styled = (v) => (v && typeof v === 'object' ? {voice: v.voice, rate: Math.min(120, Math.max(60, v.rate ?? 100)), pitch: Math.min(0, Math.max(-30, v.pitch ?? 0)), tract: Math.min(40, Math.max(0, v.tract ?? 0))} : {voice: v, rate: pace, pitch: tone, tract: tractPct});
-  const sayPart = (text, v) => { const st = styled(v), voice = st.voice;
+  const sayPart = (text, v, owner = 'neutral') => {
+    // the Jarvis-style voices speak expressively: the mood of the words and of the owner (expressive.mjs)
+    if (v && typeof v === 'object' && v.expressive && /^Polly\./.test(v.voice || '')) return `<Say voice="${xml(v.voice)}">${expressiveSsml(speakable(text), v, replyMood(text, owner))}</Say>`;
+    const st = styled(v), voice = st.voice;
     const fx = (x) => `<amazon:effect name="drc">${st.tract ? `<amazon:effect vocal-tract-length="+${st.tract}%">${x}</amazon:effect>` : x}</amazon:effect>`;
     const neural = /-Neural$/.test(voice); // natural voices: speed only (no pitch, no effects)
     return /^Polly\./.test(voice)
@@ -647,7 +651,7 @@ export function createUltron({apiKey, model = 'claude-sonnet-5-5', effort = 'low
     ? `<Say voice="${xml(voice)}"><prosody rate="${pace}%"${tone ? ` pitch="${tone}%"` : ''}>${effect(clear(xml(speakable(text))))}</prosody></Say>`
     : speakable(text).split(/(?<=[.?!])\s+/).filter(Boolean).map((x) => `<Say voice="${xml(voice)}">${xml(x)}</Say>`).join(pace < 100 ? '<Pause length="1"/>' : '');
   // "[pause]" in a line = a 2-second silence there (the unlock phrase, then the welcome)
-  const say = (text, voice) => String(text).split(PAUSE).map((x) => x.trim()).filter(Boolean).map((x) => sayPart(x, voice)).join('<Pause length="2"/>');
+  const say = (text, voice, s = null) => String(text).split(PAUSE).map((x) => x.trim()).filter(Boolean).map((x) => sayPart(x, voice, s?.ownerMood)).join('<Pause length="2"/>');
   const hello = () => greeting(now(), timezone);
   const pick = (a) => a[Math.min(a.length - 1, Math.floor(random() * a.length))];
   const localTime = () => { try { return new Intl.DateTimeFormat('en-US', {timeZone: timezone, weekday: 'long', hour: 'numeric', minute: '2-digit'}).format(new Date(now())); } catch { return new Date(now()).toISOString(); } };
@@ -656,9 +660,9 @@ export function createUltron({apiKey, model = 'claude-sonnet-5-5', effort = 'low
     t(s, 'respond', {action, text: text != null ? speakable(text) : undefined, voice: voice && typeof voice === 'object' ? (voice.id || voice.voice) : voice, ...extra, xml: hide(s, out)});
     return out;
   };
-  const listen = (base, key, s, text, voice, extra) => doc(s, 'speak-and-listen', text, voice, `<Response><Gather input="${s?.mode === 'free' ? 'dtmf speech' : 'speech'}"${s?.mode === 'free' ? ' numDigits="1"' : ''} speechTimeout="auto" timeout="10" language="en-US" action="${xml(`${base}/voice/agent/turn?k=${key}&s=${s.id}`)}" method="POST">${say(text, voice)}</Gather><Redirect method="POST">${xml(`${base}/voice/agent/turn?k=${key}&s=${s.id}&silence=1`)}</Redirect></Response>`, extra);
-  const bye = (s, text, voice) => doc(s, 'speak-and-hang-up', text, voice, `<Response>${say(text, voice)}<Hangup/></Response>`);
-  const hold = (base, key, s, voice, extra) => { s.holds++; return doc(s, 'hold-the-line', s.holdLine = pick(LINES.hold), voice, `<Response>${say(s.holdLine, voice)}<Redirect method="POST">${xml(`${base}/voice/agent/wait?k=${key}&s=${s.id}`)}</Redirect></Response>`, extra); };
+  const listen = (base, key, s, text, voice, extra) => doc(s, 'speak-and-listen', text, voice, `<Response><Gather input="${s?.mode === 'free' ? 'dtmf speech' : 'speech'}"${s?.mode === 'free' ? ' numDigits="1"' : ''} speechTimeout="auto" timeout="10" language="en-US" action="${xml(`${base}/voice/agent/turn?k=${key}&s=${s.id}`)}" method="POST">${say(text, voice, s)}</Gather><Redirect method="POST">${xml(`${base}/voice/agent/turn?k=${key}&s=${s.id}&silence=1`)}</Redirect></Response>`, extra);
+  const bye = (s, text, voice) => doc(s, 'speak-and-hang-up', text, voice, `<Response>${say(text, voice, s)}<Hangup/></Response>`);
+  const hold = (base, key, s, voice, extra) => { s.holds++; return doc(s, 'hold-the-line', s.holdLine = pick(LINES.hold), voice, `<Response>${say(s.holdLine, voice, s)}<Redirect method="POST">${xml(`${base}/voice/agent/wait?k=${key}&s=${s.id}`)}</Redirect></Response>`, extra); };
 
   // ---------- orders ----------
   const pol = () => ({mode: 'paper', liveActions: false, inboundActions: false, passphrase: '', ...(policy() || {})});
@@ -787,6 +791,7 @@ export function createUltron({apiKey, model = 'claude-sonnet-5-5', effort = 'low
         return listen(base, key, s, silence ? pick(LINES.still) : 'I did not catch that, sir.', voice);
       }
       s.silent = 0;
+      s.ownerMood = hearMood(said); if (s.ownerMood !== 'neutral') t(s, 'mood', {owner: s.ownerMood}); // how he sounds: the Jarvis voices answer in kind
       if (VOICEMAIL.test(text)) { // a voicemail greeting: leave a short message and hang up (no AI, no menu)
         t(s, 'voicemail', {why: 'the words heard are a voicemail greeting'});
         const out = bye(s, 'Sir, this is Ultron. Please call me back, or press Ultron, call me now, on the dashboard.', voice); end(s, 'voicemail answered: left a short message'); return out;

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import {hearMood, replyMood, expressiveSsml} from './expressive.mjs';
 import {STYLES, styleOf, styleFromWords, VOICEMAIL, addressedTo, greeting, parseOrder, passwordMatch, ORDERS_MENU, createUltron, TOOLS, runTool, cleanSettings, bigWinDue, hookKey, phoneDigits, results, freeIntent, freeAnswer, FREE_MENU, DEFAULT_SETTINGS} from './ultron.mjs';
 import {voiceConfig, createVoiceCaller} from './voicecall.mjs';
 
@@ -360,11 +361,11 @@ test('voice samples: Ultron first, then six Jarvis-style butler voices; "two" pi
   assert.deepEqual(STYLES.map((x) => x.id), ['deep2', 'butler2', 'jarvis-pure', 'jarvis-calm', 'jarvis-crisp', 'jarvis-natural', 'jarvis-arthur']);
   assert.match(spoken(first), /^Sample one\. Good evening, sir\. Ultron online\..*Sample two\. Good evening, sir\. At your service\..*Sample seven\..*Which do you prefer, sir\? Say a number from one to seven\./);
   assert.match(first, /<Say voice="Polly.Matthew"><prosody rate="118%" pitch="-10%"><amazon:effect name="drc"><amazon:effect vocal-tract-length="\+10%">Good evening/, '1: the Ultron voice (old sample 6)');
-  assert.match(first, /<Say voice="Polly.Brian"><prosody rate="112%"><amazon:effect name="drc">Good evening/, '3: pure, no pitch drop, no big-voice effect');
-  for (const v of ['Polly.Brian-Neural', 'Polly.Arthur-Neural']) assert.match(first, new RegExp(`<Say voice="${v}"><prosody rate="10\\d%">Good evening`), `${v}: speed only, no effects`);
+  assert.match(first, /<Say voice="Polly.Brian"><amazon:effect name="drc"><prosody rate="1\d\d%" pitch="\+\d+%"[^>]*>Good evening/, '3: pure: no deepening, no big-voice effect, and brighter (good news)');
+  for (const v of ['Polly.Brian-Neural', 'Polly.Arthur-Neural']) assert.match(first, new RegExp(`<Say voice="${v}"><prosody rate="1\\d\\d%"( volume="[^"]+")?>Good evening`), `${v}: speed and volume only, no pitch or effects`);
   const pick = await u.turn({base: BASE, key: KEY, id, callSid: 'S', speech: 'number two', voice: styleOf({})});
   assert.deepEqual(picked, ['butler2']); assert.match(spoken(pick), /^Sample two it is, sir\./);
-  assert.match(pick, /rate="118%" pitch="-5%">.*vocal-tract-length="\+5%"/, 'said in the new style');
+  assert.match(pick, /<Say voice="Polly.Brian"><amazon:effect name="drc"><amazon:effect vocal-tract-length="\+5%">/, 'said in the new style');
   // samples can be asked for in any call; "again" replays them; a voice order picks by name
   assert.match(spoken(await u.turn({base: BASE, key: KEY, id, callSid: 'S', speech: 'play the voice samples', voice: styleOf({})})), /Sample five\./);
   assert.match(spoken(await u.turn({base: BASE, key: KEY, id, callSid: 'S', speech: 'again', voice: styleOf({})})), /Sample one\./);
@@ -381,4 +382,37 @@ test('voice list: everyone starts on the default butler voice once; later picks 
   const picked = cleanSettings({style: 'dark'}, {style: 'jarvis-calm'});
   assert.equal(picked.style, 'jarvis-calm'); assert.equal(picked.voiceList, 2);
   assert.equal(cleanSettings(picked).style, 'jarvis-calm', 'after that, his choice stays');
+});
+
+test('expressive Jarvis voice: hears the owner\'s mood, answers in kind, shapes each sentence', () => {
+  assert.equal(hearMood('I am so stressed, we lost again'), 'upset'); assert.equal(hearMood('what the hell is going on'), 'angry');
+  assert.equal(hearMood("let's go, we pumped!"), 'excited'); assert.equal(hearMood('thanks, great job'), 'happy'); assert.equal(hearMood('how much profit today'), 'neutral');
+  assert.equal(replyMood('We lost 0.3 SOL on that coin.'), 'stern'); assert.equal(replyMood('Profit today is 0.4 SOL.'), 'upbeat');
+  assert.equal(replyMood('Profit today is 0.4 SOL.', 'excited'), 'bright'); assert.equal(replyMood('We lost 0.3 SOL.', 'upset'), 'warm', 'compassion first');
+  assert.equal(replyMood('Here is the status.', 'angry'), 'calm'); assert.equal(replyMood('Here is the status.'), 'neutral');
+  const brian = {voice: 'Polly.Brian', rate: 118, pitch: -5, tract: 5};
+  const stern = expressiveSsml('We lost 3 SOL. Shall I stop?', brian, 'stern'), up = expressiveSsml('Profit is up 12 percent!', brian, 'bright');
+  assert.match(stern, /^<amazon:effect name="drc"><amazon:effect vocal-tract-length="\+5%"><break time="250ms"\/><prosody rate="112%" pitch="-11%" volume="\+2dB">/, 'stern: a beat first, slower, lower, firm');
+  assert.match(stern, /<prosody pitch="\+6%">stop<\/prosody>\?/, 'a question lifts on its last word');
+  assert.match(stern, /<emphasis level="moderate">lost<\/emphasis> <emphasis level="moderate">3 SOL<\/emphasis>/, 'the news is stressed');
+  assert.match(up, /<prosody rate="130%" pitch="\+6%" volume="\+5dB">/, 'bright and energetic, within limits');
+  const warm = expressiveSsml('Take your time, sir.', brian, 'warm');
+  assert.match(warm, /<amazon:effect phonation="soft"><prosody rate="110%" pitch="-6%" volume="-2dB">/, 'warm: softer and gentler');
+  const neural = expressiveSsml('We lost 3 SOL, sadly. Shall I stop?', {voice: 'Polly.Arthur-Neural', rate: 106}, 'stern');
+  assert.doesNotMatch(neural, /pitch=|emphasis|amazon:effect/, 'neural voices: rate, volume and pauses only');
+  assert.match(neural, /<prosody volume="\+3dB">lost<\/prosody>/);
+  const wellFormed = (x) => { const st = []; for (const [, close, name, self] of x.matchAll(/<(\/?)([a-z:]+)[^>]*?(\/?)>/g)) { if (self) continue; if (close) { if (st.pop() !== name) return false; } else st.push(name); } return st.length === 0; };
+  for (const x of [stern, up, warm, neural]) assert.ok(wellFormed(x), 'every tag opens and closes in order: ' + x);
+});
+
+test('a call turn: an upset owner gets the warm voice; Ultron\'s robot voice stays flat', async () => {
+  const u = createUltron({random: () => 0, apiKey: '', actions: {}, data: {}});
+  const id = u.open({}); u.sessions.get(id).callSid = 'S';
+  const jarvis = styleOf({}), robot = STYLES[0];
+  const warm = await u.turn({base: BASE, key: KEY, id, callSid: 'S', speech: 'I am so stressed today', voice: jarvis});
+  assert.match(warm, /phonation="soft"/, 'compassion for a stressed owner');
+  assert.equal(u.sessions.get(id).ownerMood, 'upset');
+  const flat = await u.turn({base: BASE, key: KEY, id, callSid: 'S', speech: 'I am so stressed today', voice: robot});
+  assert.doesNotMatch(flat, /phonation|emphasis/, 'Ultron stays a machine');
+  u.stop();
 });

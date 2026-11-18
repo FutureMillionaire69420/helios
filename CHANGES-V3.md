@@ -818,3 +818,18 @@ No trade setting changed.
 - The two neural voices (6 and 7) are Amazon's natural-speech voices. They take speed only, no pitch or effects, and SignalWire bills them at a premium rate. They come last, so if SignalWire doesn't offer one, the first five still play.
 - Pick by number (one to seven) or by name: deep, jarvis or butler, pure, calm, crisp, natural, arthur.
 
+## v4.27: an expressive Jarvis voice
+
+- **The Jarvis-style voices (2 to 7) speak with expression** (`expressive.mjs`). Ultron's voice (1) stays a flat machine on purpose.
+- **He hears your mood** from your words on every turn: stressed or upset, angry, excited, happy or neutral. The phone gives the bot your words, not your tone of voice. The call log notes the mood whenever it isn't neutral.
+- **He answers in kind:**
+  - Bad news (a loss, a failure, a block, an emergency) is **stern**: a beat before it, then slower, lower and firm.
+  - Good news (profit, a win, all systems clear) is **upbeat**: quicker, brighter and louder. If you're excited or happy too, he's **brighter** still.
+  - If you sound stressed, he's **warm**: softer, gentler and slower. That comes before the news, so compassion first.
+  - If you sound angry, he's **calm**: slow and steady.
+- **Every sentence is shaped:**
+  - numbers, money and the key words are stressed;
+  - a question lifts on its last word, and an exclamation gets extra energy;
+  - there's a short beat after commas and a pause between sentences that fits the mood.
+- The two natural (neural) voices take speed, volume and pauses only, because Amazon ignores pitch and emphasis for them.
+
