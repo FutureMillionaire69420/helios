@@ -727,6 +727,63 @@ function renderVoice(s) {
 }
 $('vc-test').onclick = () => act('/api/call/test', { ok: 'Calling your phone now…', confirmText: 'Ring your phone now with a test call in the Ultron voice?' });
 
+// ---------- Ultron, the talking agent (read-only) ----------
+function renderUltron(s) {
+  const u = s.ultron; if (!u) return;
+  const free = u.mode === 'free';
+  $('ul-state').textContent = !u.ready ? 'Not set up' : free ? 'Ready · free mode' : 'Ready · AI conversation';
+  const last = u.last ? ` Last call: ${when(u.last.at)} (${u.last.reason}) ${u.last.ok ? 'placed' : 'failed: ' + u.last.error}.` : '';
+  const how = free ? 'Free mode (no AI, nothing to pay but the call): Ultron reads your bot\'s numbers and answers profit, coins, trades, brain and health, by voice or keypad. For a real conversation, add ANTHROPIC_API_KEY in Render → Environment.'
+    : 'Press the button and Ultron rings you for a conversation about the bot.';
+  const orders = u.orders ? (u.orders.password ? ' Orders (pause, sell, power, alerts, call back…) unlock with your spoken password, then he asks you to confirm each one.' : ' Orders (pause, sell, power, alerts, call back…) work on calls he places to you, after you confirm. Set ULTRON_PASSPHRASE in Render → Environment to unlock them with a spoken password instead.') + (u.orders.paperOnly ? ' Trading orders: paper mode only.' : '') : '';
+  $('ul-note').textContent = (u.ready ? how + orders : 'Add in Render → Environment: ' + u.missing.join(', ') + '.') + last;
+  $('ul-call').disabled = !u.ready;
+  const sel = $('ul-voice');
+  if (!sel.options.length) for (const v of (u.styles || u.voices)) { const o = document.createElement('option'); o.value = v.id; o.textContent = v.label; sel.append(o); }
+  if (document.activeElement?.closest?.('#ultron')) return; // don't overwrite while editing
+  sel.value = u.settings.style || u.settings.voice; $('ul-bigwin').checked = !!u.settings.bigWinOn; $('ul-pct').value = u.settings.bigWinPct; $('ul-perday').value = u.settings.bigWinPerDay;
+  $('ul-inbound').textContent = u.inboundUrl ? `To call Ultron yourself: in SignalWire → Phone Numbers → your number → Inbound calls, choose "LaML webhooks" and paste this address (keep it private): ${u.inboundUrl}` : '';
+}
+$('ul-call').onclick = () => act('/api/ultron/call', { ok: 'Ultron is calling you…', confirmText: 'Ultron calls your phone now?' });
+$('ul-samples').onclick = () => act('/api/ultron/samples', { ok: 'Ultron is calling you with the voice samples…', confirmText: 'Ultron calls you and plays each voice style? Then say one to five to pick.' });
+
+// The call log: one button per call, then every step of the chosen call (the newest call by default)
+const UL = { call: null };
+const stepLine = (e) => {
+  const { at, call, sid, step, ...rest } = e;
+  const time = new Date(at).toLocaleTimeString('en-US', { timeZone: tz(), hour: 'numeric', minute: '2-digit', second: '2-digit' });
+  let main = '';
+  if (step === 'heard') main = rest.text ? `“${rest.text}”${rest.confidence != null ? ` (confidence ${rest.confidence})` : ''}` : (rest.silence ? '(silence)' : '(nothing heard)');
+  else if (step === 'answer') main = `“${rest.text}” · ${((rest.thinkMs || 0) / 1000).toFixed(1)} s, ${rest.rounds} step${rest.rounds === 1 ? '' : 's'}`;
+  else if (step === 'respond') main = `${rest.action}${rest.text ? `: “${rest.text}”` : ''}`;
+  else if (step === 'claude-response') main = `${rest.model} · ${((rest.ms || 0) / 1000).toFixed(1)} s · ${rest.usage?.input_tokens ?? 0} in / ${rest.usage?.output_tokens ?? 0} out tokens · $${rest.costUsd ?? '?'} · ${rest.stop}${rest.tools ? ' · tools: ' + rest.tools.map((x) => x.name).join(', ') : ''}${rest.thinking ? `\n      thinking: ${rest.thinking}` : ''}`;
+  else if (step === 'tool') main = `${rest.name} ${JSON.stringify(rest.input)} · ${rest.ms} ms · ${rest.chars} chars`;
+  else if (step === 'status') main = `${rest.CallStatus || '?'}${rest.CallDuration ? ` · ${rest.CallDuration} s` : ''}${rest.AnsweredBy ? ` · answered by ${rest.AnsweredBy}` : ''}${rest.SipResponseCode ? ` · SIP ${rest.SipResponseCode}` : ''}`;
+  else if (step === 'call-summary') main = `${rest.why} · ${rest.turns} turns · ${rest.durationSec} s · ${rest.claudeRequests} requests · ${rest.tokens?.input ?? 0} in / ${rest.tokens?.output ?? 0} out tokens · about $${rest.costUsd}`;
+  const full = JSON.stringify(rest);
+  return `${time}  ${step}${main ? '  ' + main : ''}\n      ${full.length > 1500 ? full.slice(0, 1500) + '…' : full}`;
+};
+async function renderUltronLog() {
+  try {
+    const d = await api('/api/ultron/log?' + new URLSearchParams({ limit: '1' }));
+    const box = $('ul-calls'); box.textContent = '';
+    if (!d.calls.length) { box.textContent = 'No calls logged yet.'; $('ul-steps').textContent = ''; return; }
+    const pick = UL.call && d.calls.some((c) => c.call === UL.call) ? UL.call : d.calls[0].call;
+    for (const c of d.calls) {
+      const b = h('button', 'btn small' + (c.call === pick ? ' on' : ''), `${when(Date.parse(c.firstAt))} · ${c.reason || c.call} · ${c.outcome || c.providerStatus || 'in progress'}${c.costUsd != null ? ` · $${c.costUsd}` : ''}${c.errors ? ` · ${c.errors} problem${c.errors === 1 ? '' : 's'}` : ''}`, box);
+      b.onclick = () => { UL.call = c.call; renderUltronLog(); };
+    }
+    const rows = (await api('/api/ultron/log?' + new URLSearchParams({ limit: '1500', call: pick }))).entries;
+    $('ul-steps').textContent = rows.map(stepLine).join('\n');
+  } catch (e) { toast(e.message); }
+}
+$('ul-log').addEventListener('toggle', () => { if ($('ul-log').open) renderUltronLog(); });
+$('ul-log-refresh').onclick = () => renderUltronLog();
+$('ul-save').onclick = () => {
+  const q = new URLSearchParams({ style: $('ul-voice').value, bigWinOn: $('ul-bigwin').checked ? '1' : '0', bigWinPct: $('ul-pct').value, bigWinPerDay: $('ul-perday').value });
+  act('/api/ultron/settings?' + q, { ok: 'Ultron settings saved.' });
+};
+
 function renderMorning(s) {
   const m = s.morningPush; if (!m) return;
   const [hh, mm] = String(m.at || '07:43').split(':').map(Number), t = new Date(2000, 0, 1, hh || 0, mm || 0).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
@@ -739,6 +796,7 @@ function renderBot() {
   const s = S.status; if (!s) return;
   renderCredits(s);
   renderVoice(s);
+  renderUltron(s);
   renderMorning(s);
   if (every('pumpfun', 60000)) renderPumpfun();
   const off = s.power === 'off';

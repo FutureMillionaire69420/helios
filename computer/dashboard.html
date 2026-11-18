@@ -325,6 +325,24 @@
         <p class="fine">It only ever calls the phone in OWNER_PHONE, at most once every 2 minutes and 10 times a day. It can't trade or touch the wallet.</p>
       </article>
 
+      <article class="card" id="ultron">
+        <div class="card-head"><h2>Talk to Ultron</h2><span class="fine" id="ul-state">—</span></div>
+        <p class="fine" id="ul-note">—</p>
+        <div class="btn-row"><button class="btn small" id="ul-call">Ultron, call me now</button><button class="btn small" id="ul-samples">Call me with voice samples</button></div>
+        <label class="fine">Voice <select id="ul-voice"></select></label>
+        <label class="fine"><input type="checkbox" id="ul-bigwin"> Call me on big wins of at least <input type="number" id="ul-pct" min="10" max="10000" step="10" class="num-in">% (up to <input type="number" id="ul-perday" min="1" max="10" step="1" class="num-in short"> a day)</label>
+        <div class="btn-row"><button class="btn small" id="ul-save">Save Ultron settings</button></div>
+        <p class="fine" id="ul-inbound"></p>
+        <details id="ul-log">
+          <summary>Call log: every step of every call</summary>
+          <div class="btn-row"><button class="btn small" id="ul-log-refresh">Refresh</button><button class="btn small" data-download="/api/ultron/log.jsonl">Download the full log</button></div>
+          <div id="ul-calls" class="ul-calls"></div>
+          <pre id="ul-steps" class="ul-steps"></pre>
+          <p class="fine">The same lines are in Render → Logs (they start with [ultron]). Phone numbers are masked; keys are never written.</p>
+        </details>
+        <p class="fine">Ultron only reads the bot: he can't buy, sell, change settings or touch the wallet. He only calls or answers the phone in OWNER_PHONE. Phone alerts off = no big-win calls.</p>
+      </article>
+
       <article class="card" id="morning">
         <div class="card-head"><h2>Morning push</h2><span class="fine" id="mp-state">—</span></div>
         <p class="fine" id="mp-note">—</p>

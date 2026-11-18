@@ -654,3 +654,167 @@ No trade setting changed.
   - Twilio still works when no SignalWire Project ID is set.
   - The SignalWire token is scrubbed from logs like every other key.
 - **Fix: the out-of-credits pause no longer stretches itself.** On the first start, 15 calls already on their way were refused at once and each one doubled the pause, from 2 minutes to 30 in a millisecond. Now a refusal during a pause doesn't extend it, and after a pause only one call checks while the rest wait.
+
+## v4.13: talk to Ultron (read-only)
+
+- **Ultron now holds a phone conversation about the bot.** He's a Claude agent (`claude-opus-5-5` by default, `ULTRON_MODEL`; effort `low` for shorter pauses, `ULTRON_EFFORT`). You talk, the phone service turns your speech into text, Ultron answers, and the service reads the answer aloud.
+  - **Read-only:** his only tools read an overview, the coins held, recent trades, results over N hours, the brain's findings and recent events. None of them can buy, sell, change a setting or touch the wallet, and a test checks that.
+  - **When he calls:** when you press **Ultron, call me now** on the dashboard, and after a closed trade of at least +100% (setting; at most 3 a day; none while phone alerts are off). The normal call limits still apply: one every 2 minutes, 10 a day.
+  - **Calling him:** paste the address shown on the dashboard into SignalWire → your number → Inbound calls (LaML webhooks). He answers only `OWNER_PHONE`; any other caller is rejected. No PIN.
+  - **Voice:** a built-in text-to-speech voice, picked on the dashboard (default Matthew). The test call still plays the recorded message.
+  - **Set up:** add `ANTHROPIC_API_KEY` in Render → Environment. Until then, the card says what's missing.
+  - The call scripts at `/voice/agent/...` work only with a secret key in the address. Each conversation is tied to one call, and calls end after 40 turns, 20 minutes, or two silences. Slow answers say "Processing" and keep the line open.
+  - Claude's server-side fallback is on (`fallbacks: "default"`), so a declined answer is retried on another model. The API key is scrubbed from logs.
+
+## v4.13.1: Ultron runs on Sonnet
+
+- Ultron's default model is now `claude-sonnet-5-5`, about half the cost of Opus, with faster replies on the phone. Set `ULTRON_MODEL=claude-opus-5-5` in Render → Environment to switch back.
+
+## v4.14: a detailed call log for Ultron
+
+- **Every step of every call is logged**, in order, under one call id:
+  - placing the call: the reason, how long the phone service took, its call id and status;
+  - the phone service's progress reports: initiated, ringing, answered, completed, busy or no-answer, with the duration and SIP code. Calls now ask for these reports; if the service ever refused them, the call goes ahead without them;
+  - what Ultron heard (with the recognizer's confidence), and silences;
+  - each Claude request and response: the model that answered, time taken, request id, stop reason, tokens (including cache), estimated cost, a summary of Ultron's reasoning, his text and the tools he called;
+  - each tool: what it read, how long it took, and the full result;
+  - exactly what Ultron said and did on the line (speak and listen, hold, hang up, reject), plus the call script with the secret parts hidden;
+  - every web request from the phone service, with how fast the bot answered;
+  - problems: Claude errors (status, type, message, retry-after), requests for ended calls, requests without the secret key (with the address, at most once a minute), and big-win calls that were skipped and why;
+  - a summary at the end: why it ended, duration, turns, requests, tool calls, holds, tokens and cost.
+- **Where to read it:**
+  - Dashboard → Bot → Talk to Ultron → **Call log**: one button per call, then every step. **Download the full log** saves the whole file.
+  - Render → Logs: the lines that start with `[ultron]`.
+  - The file `ultron-calls.jsonl` next to the engine state (`/var/data` on Render). It survives restarts and rolls over to `.1` at 5 MB.
+- **Kept out of the log:** keys and tokens (scrubbed), Ultron's secret address, the full phone numbers (masked to the last 4 digits), the phone-service account id and number locations.
+- A failed or refused answer is now dropped from the conversation, so the next question starts clean. After a server-side fallback, the turn is passed back the way the API requires.
+- Settings: `ULTRON_LOG_FILE`, `ULTRON_LOG_STDOUT=false` (keep the lines out of Render's log), `ULTRON_THINKING_LOG=false` (don't ask for the reasoning summary).
+
+## v4.14.1: every phone number masked in the call log
+
+- **Fix:** SignalWire's progress reports also name who hung up (`HangupBy`), and the call log wrote that number in full. Now every phone number is masked to its last 4 digits, whatever field it comes in, and any `+` number anywhere in a log line is masked too.
+- At start the bot scrubs the log file (and its `.1`) again with the current rules, so the line written before this fix is cleaned on the next deploy. Lines already sent to Render's log can't be changed from here.
+
+## v4.15: Ultron's free mode (no AI needed)
+
+- **Without `ANTHROPIC_API_KEY`, Ultron now runs in free mode instead of being off.** He uses no AI, so the only cost is the phone call (about a cent a minute on SignalWire).
+  - He calls (on request or on a big win) and answers your calls the same way. He opens with the bot's status: power, mode, profit today, coins held, ready to trade. A big-win call starts with the win.
+  - Ask by voice or keypad: **profit** (1), **coins** (2), **trades** (3), **brain** (4), **health** (5), **goodbye** (9). "This week" and "this month" give longer profit windows. Anything else gets the menu.
+  - The answers come from the same read-only data as the AI mode, so he still can't change anything.
+  - Each free-mode answer is in the call log too (what was asked, the intent, the words spoken). The summary shows mode "free" and a cost of $0.
+- Add `ANTHROPIC_API_KEY` later and he switches to a real conversation, with no other change.
+- Spoken amounts drop trailing zeros ("0.42 SOL", not "0.420 SOL").
+
+## v4.15.1: Ultron knows voicemail, rings longer
+
+- **Voicemail:** if the words heard are a voicemail greeting ("leave a message", "at the tone", "not available"...), Ultron leaves a short message ("This is Ultron. Call me back...") and hangs up. The log says `voicemail`. Before, a greeting ending in "...you may hang up" was taken as a goodbye. No AI is asked about a voicemail.
+- **Rings longer:** calls now ask the phone service to ring for 60 s (`ULTRON_RING_SEC`, 15 to 120). Your phone company can still send a call to voicemail sooner.
+- After he speaks, Ultron now waits 10 s for an answer instead of 7.
+
+## v4.16: Ultron's new script: good morning, sir
+
+- **Greeting by the time of day** in the bot's time zone: "Good morning, sir. Ultron here." (afternoon from 12:00, evening from 17:00).
+- **"Sir" throughout:** every line in free mode was rewritten ("Profit today is...", "We are holding 1 coin, sir.", "Anything else, sir?", "Until next time, sir."). The AI mode is told to address you as sir too.
+- **A little slower:** the Polly voices speak at 88% of normal speed (`ULTRON_RATE`, 60 to 120). The basic robot voices pause for a second between sentences.
+- The menu is clearer: "You can ask about profit, coins, trades, the brain, or health, sir. Or press 1 through 5."
+
+## v4.17: Ultron speaks like a butler AI
+
+- Original lines in a polished, dry-witted butler style, varied from call to call so he does not repeat himself. Examples: "Ultron, at your service.", "Will there be anything else, sir?", "Very good, sir. I will keep an eye on things." No film dialogue is copied.
+- Profit answers end with a short remark: "A respectable showing, sir." on a gain, "Not our finest hour, sir." on a loss.
+- The AI mode is told to speak the same way, in its own words.
+
+## v4.18: a deeper, more robotic butler voice
+
+- The default voice is now **Brian** (British). Your choice on the dashboard still wins.
+- Polly voices now speak a little lower (`ULTRON_PITCH`, default -8%) with a longer vocal tract (`ULTRON_TRACT`, default +12%; 0 turns it off), for a bigger, more synthetic sound. The speed stays at 88%.
+
+## v4.19: Ultron's tasks in one list
+
+- Free mode is now a list of tasks in `ultron.mjs` (`TASKS`). Each task has its menu name, keypad key, the words that ask for it, and its answer. The menu, keypad and word matching are built from the list, so a new task is one entry plus a test. What Ultron says did not change.
+- "Repeat" or "list" now replays the menu.
+
+## v4.20: six new tasks for Ultron
+
+- **Briefing (6):** trades copied in the last 24 hours and how many won, profit today, health, Helius credits, SOL price, brain rank.
+- **SOL price (7):** the price now and the move since yesterday's briefing.
+- **Decu (8):** his last buy (coin, size, when, and whether we copied it or why we skipped it) and his last sale.
+- **Rolex goal** (by voice): the goal and how far the profit has come.
+- **Credits** (by voice): Helius credits used this month, the pace, when the plan resets, or that it is out of credits.
+- **Best and worst** (by voice): the best and worst trade of the last 24 hours, and the winning or losing streak.
+- The menu now offers keys 1 through 8 and names the voice-only tasks. Each new task has a matching read-only tool for the AI mode. All of them only read the bot.
+
+## v4.21: Ultron takes orders (with a spoken password)
+
+- **Orders by phone**, each one confirmed first ("To confirm, sir: I will pause new buys. Shall I proceed? Say yes, or press 1."):
+  - trading: pause buying, resume buying, manual sells, emergency stop, sell one coin (by name, or "the second coin"), sell everything, power off or on;
+  - other: mute or unmute phone alerts, big-win calls on or off, change voice, send the briefing to your phone, "call me back in 10 minutes".
+  - Say "orders" to hear the list. Questions ("what did we sell?") are never taken as orders.
+- **Spoken password:** set `ULTRON_PASSPHRASE` in Render → Environment. Trading orders stay locked on each call until you say it (close mishearings count); then he unlocks for the rest of the call, on calls he places and calls to him. 3 wrong tries lock orders for that call. Reading never needs it. The password is never written to the call log, never sent to the AI and never kept in the code.
+- **Without a password,** trading orders work only on calls Ultron places to you (caller ID on calls to him can be faked). `ULTRON_INBOUND_ACTIONS=true` changes that.
+- **Paper only:** trading orders are refused in live mode unless `ULTRON_LIVE_ACTIONS=true`. Ultron can never switch the bot to live, move money or change trade sizes and rules.
+- Each order runs the same control as the dashboard button and shows on the dashboard as an event; every step (asked, locked, unlocked, confirmed, cancelled, done) is in the call log.
+- In the AI mode, the AI can only propose an order (`request_action`): the same confirmation runs it.
+
+## v4.22: a welcome on the password, no keypad talk
+
+- **Saying the password** now gets "Welcome back, sir. Full access granted. Every system is yours.", then "How may I help, sir?" (or the order you just gave). Every task and order is then open for the rest of the call.
+- **No more keypad numbers read aloud.** The menu ("help") lists what you can ask by name only; the keypad still works if pressed. Confirmations end "Shall I proceed, sir?" (yes or no).
+- **Shorter openings:** the greeting gives the status and asks "How may I help, sir?" instead of reading the whole menu. An unclear request gets "Say help, sir, for the list."
+- Fix: no "Anything else, sir?" right after a question (it used to follow "Shall I proceed, sir?").
+
+## v4.23: the unlock phrase
+
+- When the password is spoken, Ultron says "Zombie GMT Master Two.", pauses 2 seconds, then "Welcome back, sir. Full access granted. Every system is yours. How may I help, sir?" The phrase is `ULTRON_UNLOCK_PHRASE` (empty = welcome only). The greeting on answering is unchanged.
+- "Ultron, ..." in front of a request is treated as his name: "Ultron, pause buying" is an order, "Ultron, what did we sell?" stays a question.
+- `[pause]` in any line is a 2-second silence.
+
+## v4.23.1: small talk, and "hold on"
+
+- Fix: "hold on" was heard as a coins question ("hold" matched "holding"). Coins now need "coins", "positions", "holding" or "held".
+- **"Hold on" / "one second" / "give me a minute"** gets "Take your time, sir. I am here.", and Ultron waits through up to 5 silences before hanging up (2 otherwise).
+- **Small talk:** "hello" or just "Ultron" ("Hello, sir. How may I help?"), "who is this", a lone "yes" or "okay", and "thanks" get a proper reply instead of "I did not understand".
+
+## v4.24: a clearer, quicker voice, and much more conversation
+
+- **Voice:** a little faster (96% of normal, `ULTRON_RATE`) and clearer: a short beat after each sentence and comma, Polly's dynamic range compression so every word carries, and a lighter big-voice effect (`ULTRON_TRACT` +8%, was +12%).
+- **Conversation** (free mode, `CHAT` in `ultron.mjs`, one entry per kind of remark, replies varied): how he is, "I'm good", "are you there", "I'm back", praise, a scolding, jokes (his own), the time and the date (your time zone), motivation, advice ("I report, sir. I do not give financial advice."), who made him, his name, "never mind", "I'm bored". **"Good night"** ends the call with a good-night line.
+- Questions starting "should I" or "do you think" are never taken as orders ("should I sell everything?").
+- Coins without a known name are "an unnamed coin", not a piece of their address.
+- Health answers in plain English: "Helius is out of credits, so we cannot see Decu's trades", "new buys are blocked", instead of the technical log line.
+
+## v4.25: 100 more conversation lines
+
+- Ultron's conversation grows from 44 lines to 145, across 37 topics, all his own: more replies for every existing topic, and new ones: tired or a bad day, stress, a loss ("we lost again"), a win ("let's go"), are you alive, do you sleep, do you like me, are you smart, a compliment, a fun fact, singing (he declines), food, coffee, the weather, the weekend, the Rolex dream, a secret (the password stays secret), what he is doing, what's new, "I made you", his favorite.
+- Small talk only triggers on its own phrases, so real questions still go to their task ("how much have we lost?" is a profit question; "what's up with Decu?" goes to Decu).
+
+## v4.26: voice styles and samples
+
+- **Five voice styles, at normal speed** (or close to it), each with the clarity filter and a beat after sentences: **1 Dark robot** (deep, clear, British; the default), **2 Clear butler** (lighter, crisp), **3 Deep American**, **4 Heavy machine** (the lowest, most robotic), **5 Classic robot** (the old phone robot).
+- **Voice samples:** the dashboard button "Call me with voice samples", or "voice samples" in any call. Ultron reads the same lines in each style, then asks which you prefer: say one to five (or a name: dark, butler, deep, heavy, classic), or "again". His reply already uses the new voice.
+- Voice orders take a style: "switch to voice three", "use the heavy voice". The dashboard's voice picker lists the styles.
+- "Mhm", "uh huh", "hmm" count as an acknowledgement, not a misunderstanding.
+
+## v4.26.1: eight voice styles
+
+- Three more styles for the samples: **6 Commander** (the darkest British), **7 Sentinel** (younger American, sharp), **8 Overlord** (deep Australian, metallic). Say one to eight to pick.
+
+## v4.26.2: faster, clearer voice styles
+
+- The 8 styles are now fast (112%) and faster (118%) versions of the four the owner liked: Dark robot, Clear butler, Deep American, Sentinel. Faster styles get shorter beats between sentences, and a slightly lighter big-voice effect, so the speed is real and every word still lands. The default is Dark robot, fast.
+
+## v4.26.3: the final voice list: Ultron, then six Jarvis-style butler voices
+
+- **The default is the clear butler voice** (old sample 4: British, faster). Everyone starts on it once; a voice picked after that is kept.
+- **Voice samples now play seven voices:**
+  1. **Ultron** (old sample 6): deep American, faster, with the big-voice effect.
+  2. **Jarvis: clear butler, faster** (old sample 4, the default).
+  3. **Jarvis: pure butler.** No pitch drop and no effects, so nothing metallic or dark.
+  4. **Jarvis: calm and measured.**
+  5. **Jarvis: crisp and quick.**
+  6. **Jarvis: natural British** (Polly Brian Neural).
+  7. **Jarvis: refined British** (Polly Arthur Neural).
+- The Jarvis voices say a butler's line ("At your service. All systems are running smoothly..."). They are original butler voices in that spirit, not a copy of any actor's voice.
+- The two neural voices (6 and 7) are Amazon's natural-speech voices. They take speed only, no pitch or effects, and SignalWire bills them at a premium rate. They come last, so if SignalWire doesn't offer one, the first five still play.
+- Pick by number (one to seven) or by name: deep, jarvis or butler, pure, calm, crisp, natural, arthur.
+

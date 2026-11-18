@@ -60,13 +60,16 @@ const xml = (s) => String(s).replace(/[<>&"']/g, (c) => ({ '<': '&lt;', '>': '&g
 /** The call script: play the recorded message once. */
 export const voiceXml = (baseUrl, file) => `<?xml version="1.0" encoding="UTF-8"?><Response><Play>${xml(`${baseUrl}/voice/${file}.mp3`)}</Play></Response>`;
 
-export function createVoiceCaller({ cfg, fetchImpl = globalThis.fetch, now = () => Date.now(), minGapMs = 120_000, perDay = 10 }) {
+export function createVoiceCaller({ cfg, fetchImpl = globalThis.fetch, now = () => Date.now(), minGapMs = 120_000, perDay = 10, ringSec = 60 }) {
   let last = 0, day = null, count = 0;
   const sw = cfg.provider === 'signalwire', name = sw ? 'SignalWire' : 'Twilio';
   return {
-    async call(file = 'ultron-test') {
+    /** file = a recorded message to play; or {url} = a call script address on this server (the talking agent).
+     *  statusUrl = where the provider reports the call's progress (initiated, ringing, answered, completed), for the call log. */
+    async call(file = 'ultron-test', { statusUrl = null } = {}) {
       if (!cfg.ready) throw new Error('Voice calls are not set up: ' + cfg.missing.join(', '));
-      if (!/^[a-z0-9-]+$/.test(file)) throw new Error('bad audio name');
+      const script = typeof file === 'object' && file ? String(file.url || '') : null;
+      if (script != null ? !script.startsWith(cfg.baseUrl + '/voice/') : !/^[a-z0-9-]+$/.test(file)) throw new Error('bad audio name');
       const t = now(), d = new Date(t).toISOString().slice(0, 10);
       if (d !== day) { day = d; count = 0; }
       if (t - last < minGapMs) throw new Error(`Wait ${Math.ceil((minGapMs - (t - last)) / 1000)} s before the next call.`);
@@ -74,8 +77,14 @@ export function createVoiceCaller({ cfg, fetchImpl = globalThis.fetch, now = () 
       last = t; count++;
       const audio = `${cfg.baseUrl}/voice/${file}.mp3`;
       // SignalWire (its Twilio-compatible API): the call fetches the script at Url; Twilio takes it inline
-      const body = sw ? new URLSearchParams({ To: cfg.to, From: cfg.from, Url: `${cfg.baseUrl}/voice/${file}.xml`, Method: 'GET' })
+      const body = script != null ? new URLSearchParams({ To: cfg.to, From: cfg.from, Url: script, Method: 'POST' })
+        : sw ? new URLSearchParams({ To: cfg.to, From: cfg.from, Url: `${cfg.baseUrl}/voice/${file}.xml`, Method: 'GET' })
         : new URLSearchParams({ To: cfg.to, From: cfg.from, Twiml: `<Response><Play>${xml(audio)}</Play></Response>` });
+      body.set('Timeout', String(ringSec)); // how long it rings before giving up (the phone company may send it to voicemail sooner)
+      if (statusUrl && String(statusUrl).startsWith(cfg.baseUrl + '/voice/')) {
+        body.set('StatusCallback', statusUrl); body.set('StatusCallbackMethod', 'POST');
+        for (const ev of ['initiated', 'ringing', 'answered', 'completed']) body.append('StatusCallbackEvent', ev);
+      }
       const endpoint = sw ? `https://${cfg.host}/api/laml/2010-04-01/Accounts/${cfg.accountSid}/Calls.json` : `https://api.twilio.com/2010-04-01/Accounts/${cfg.accountSid}/Calls.json`;
       const send = (secret) => fetchImpl(endpoint, {
         method: 'POST', body, signal: AbortSignal.timeout(10_000),
@@ -84,12 +93,19 @@ export function createVoiceCaller({ cfg, fetchImpl = globalThis.fetch, now = () 
       let r = await send(cfg.secret);
       // SignalWire: a refused first token -> try the second one once (the owner has two and isn't sure which works)
       if (sw && cfg.secret2 && (r.status === 401 || r.status === 403)) r = await send(cfg.secret2);
+      // progress reports are only for the log: if the provider ever refused them, the call goes ahead without
+      let statusReports = !!body.get('StatusCallback');
+      if (statusReports && (r.status === 400 || r.status === 422)) {
+        for (const k of ['StatusCallback', 'StatusCallbackMethod', 'StatusCallbackEvent', 'Timeout']) body.delete(k);
+        statusReports = false; r = await send(cfg.secret);
+        if (sw && cfg.secret2 && (r.status === 401 || r.status === 403)) r = await send(cfg.secret2);
+      }
       const j = await r.json().catch(() => ({}));
       if (!r.ok) {
         const hint = sw && (r.status === 401 || r.status === 403) ? ' (SignalWire needs the Project ID and a project API token with the Voice scope: Dashboard → API)' : '';
         throw new Error(`${name} said no (HTTP ${r.status}${j.code ? `, code ${j.code}` : ''}): ${String(j.message || 'unknown error').slice(0, 160)}${hint}`);
       }
-      return { sid: j.sid || null, status: j.status || 'queued', to: maskPhone(cfg.to), provider: cfg.provider };
+      return { sid: j.sid || null, status: j.status || 'queued', to: maskPhone(cfg.to), provider: cfg.provider, statusReports };
     },
   };
 }

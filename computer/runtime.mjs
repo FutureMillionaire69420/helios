@@ -14,6 +14,8 @@ import {createDuel} from './duel.mjs';
 import {createPumpApi} from './pumpapi.mjs';
 import {createPumpProfile,parseProfile} from './pumpprofile.mjs';
 import {voiceConfig,voiceStatus,createVoiceCaller,voiceXml} from './voicecall.mjs';
+import {createUltron,cleanSettings,hookKey,bigWinDue,providerFields,maskPhones,ULTRON_VOICES,STYLES,styleOf} from './ultron.mjs';
+import {createCallLog} from './calllog.mjs';
 import {morningDue,morningBrief} from './morning.mjs';
 import {tradeRows} from './dashcalc.mjs';
 import {createGoal} from './goal.mjs';
@@ -158,6 +160,7 @@ export async function startRuntime(k, {demo=false}={}) {
   // no new buys for BUY_FAIL_COOLDOWN_MIN (10); Helius websocket down for STALE_DATA_SEC (30) -> no
   // new buys until it is back (late signals mean a high entry premium).
   const breakerFails=number('BUY_FAIL_BREAKER',3), cooldownMs=number('BUY_FAIL_COOLDOWN_MIN',10)*60_000, staleMs=number('STALE_DATA_SEC',30)*1000;
+  let ultronBigWin=null; // set once the Ultron agent exists: rings the owner on a big win
   let failedBuysInRow=0, buyCooldownUntil=0, gateWsDownSince=null, exits=null, onSellFailed=null, exitSeq=0, stopped=false;
   c.gate=()=>{
     if(Date.now()<buyCooldownUntil) return `circuit breaker: ${breakerFails} buys failed in a row, new buys resume in ${Math.ceil((buyCooldownUntil-Date.now())/60000)} min`;
@@ -170,7 +173,7 @@ export async function startRuntime(k, {demo=false}={}) {
   try { if (fs.statSync(k.config.logFile).size > 50e6) fs.renameSync(k.config.logFile, k.config.logFile+'.1'); } catch {}
   const token = val('DASHBOARD_TOKEN','');
   if (!demo && !k.config.dryRun && token.length<24) throw new Error('LIVE requires DASHBOARD_TOKEN of at least 24 characters');
-  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey,k.config.pumpPortalKey,val('GITHUB_VAULT_TOKEN',''),val('GITHUB_BACKUP_TOKEN',''),val('PUMP_API_KEY',''),val('TWILIO_API_SECRET',''),val('TWILIO_AUTH_TOKEN',''),val('SIGNALWIRE_API_TOKEN',''),val('SIGNALWIRE_API_KEY_2','')].filter(Boolean);
+  const secrets = [token,k.config.privateKey,k.config.heliusKey,k.config.solscanKey,k.config.jupiterApiKey,k.config.pumpPortalKey,val('GITHUB_VAULT_TOKEN',''),val('GITHUB_BACKUP_TOKEN',''),val('PUMP_API_KEY',''),val('TWILIO_API_SECRET',''),val('TWILIO_AUTH_TOKEN',''),val('SIGNALWIRE_API_TOKEN',''),val('SIGNALWIRE_API_KEY_2',''),val('ANTHROPIC_API_KEY','')].filter(Boolean);
   const clean = v => { let s=JSON.stringify(v); for(const secret of secrets) s=s.split(secret).join('[REDACTED]'); return JSON.parse(k.redact(s)); };
   const log = e => {
     // Sell outcomes: was the position closed, and how did the fill compare with the exit trigger?
@@ -187,7 +190,7 @@ export async function startRuntime(k, {demo=false}={}) {
     if (e.type==='confirmed' && e.side==='sell' && e.closed) desk?.disarm(e.mint);
     // CLOSED-TRADE LEDGER (analytics): the realized result of every position the bot closed
     if (e.type==='confirmed' && e.side==='sell' && e.closed && engine) { const p=engine.d.positions[e.mint]; if(p && p.costSol>0) { const L=(engine.d.closedTrades ||= []);
-      L.push({mint:e.mint,symbol:study?.records?.findLast?.(r=>r.mint===e.mint)?.symbol||null,boughtAt:p.boughtAt||null,closedAt:Date.now(),costSol:p.costSol,pnlSol:Math.round((p.realizedSol-p.costSol)*1e6)/1e6,pnlPct:e.pnl??null,rule:e.rule||'his sell / other'}); if(L.length>2000) L.splice(0,L.length-2000); goal?.add(c.mode,L.at(-1),solUsd(),{soon:true}); } }
+      L.push({mint:e.mint,symbol:study?.records?.findLast?.(r=>r.mint===e.mint)?.symbol||null,boughtAt:p.boughtAt||null,closedAt:Date.now(),costSol:p.costSol,pnlSol:Math.round((p.realizedSol-p.costSol)*1e6)/1e6,pnlPct:e.pnl??null,rule:e.rule||'his sell / other'}); if(L.length>2000) L.splice(0,L.length-2000); goal?.add(c.mode,L.at(-1),solUsd(),{soon:true}); ultronBigWin?.(L.at(-1)); } }
     // a failed sell may have used a wrong pushed balance: the retry reads the chain. A failed buy leaves
     // nothing to sell: its armed sell (and its token-account watch) goes too.
     if (e.type==='failed' && e.side==='sell') desk?.forgetBalance(e.mint);
@@ -996,7 +999,86 @@ export async function startRuntime(k, {demo=false}={}) {
   },number('READY_CHECK_MS',15000)); readyTimer?.unref?.();
   const balanceCache=new Map();
   // Ultron voice calls (SignalWire or Twilio): off until all settings are present; only the owner's own phone, rate-limited
-  const voiceCfg=voiceConfig(), voiceCaller=demo?null:createVoiceCaller({cfg:voiceCfg}), voiceDir=val('VOICE_DIR','')||path.join(path.dirname(fileURLToPath(import.meta.url)),'voice');
+  const voiceCfg=voiceConfig(), voiceCaller=demo?null:createVoiceCaller({cfg:voiceCfg,ringSec:Math.min(120,Math.max(15,number('ULTRON_RING_SEC',60)))}), voiceDir=val('VOICE_DIR','')||path.join(path.dirname(fileURLToPath(import.meta.url)),'voice');
+  // ULTRON, the talking agent (ultron.mjs): reads the bot, never changes it. Off until ANTHROPIC_API_KEY is set.
+  let ultronCallBack=null; // a "call me back in N minutes" order
+  const ultronSettings=()=>cleanSettings(engine.d.ultron||{}), ultronKey=hookKey(token||val('ANTHROPIC_API_KEY','')), bigWinState={};
+  // THE CALL LOG (calllog.mjs): every step of every call, to Render's log ([ultron] lines), a file next to the engine
+  // state and the dashboard. Keys, tokens and Ultron's secret address are scrubbed; phone numbers are masked.
+  const callLog=createCallLog({file:demo&&!process.env.ULTRON_LOG_FILE?null:val('ULTRON_LOG_FILE',path.join(path.dirname(engineFile),'ultron-calls.jsonl')),
+    print:val('ULTRON_LOG_STDOUT','true')==='false'?()=>{}:(line)=>console.log(line),
+    redact:(x)=>{ for(const secret of [...secrets,ultronKey,val('ULTRON_PASSPHRASE','')].filter(Boolean)) x=x.split(secret).join('[REDACTED]'); return maskPhones(k.redact(x)); }});
+  const callTrace=(e)=>callLog.add(e);
+  const pctOf=(x)=>Number.isFinite(x)?Math.round(x*1000)/10:null, sym=(m)=>study?.records?.findLast?.(r=>r.mint===m)?.symbol||null;
+  const ultron=demo?null:createUltron({apiKey:val('ANTHROPIC_API_KEY',''),model:val('ULTRON_MODEL','claude-sonnet-5-5'),effort:val('ULTRON_EFFORT','low'),thinkingLog:val('ULTRON_THINKING_LOG','true')!=='false',timezone:c.timezone||'UTC',rate:number('ULTRON_RATE',96),unlockPhrase:val('ULTRON_UNLOCK_PHRASE','Zombie GMT Master Two.'),pitch:number('ULTRON_PITCH',-8),tract:number('ULTRON_TRACT',8),
+    log:(m)=>engine.event('connection',{message:m}),trace:callTrace,
+    // ORDERS by phone: trading orders in paper mode only (ULTRON_LIVE_ACTIONS=true allows live), after the spoken
+    // password (ULTRON_PASSPHRASE); without a password, only on calls Ultron places (ULTRON_INBOUND_ACTIONS=true allows calls to him)
+    policy:()=>({mode:c.mode,liveActions:val('ULTRON_LIVE_ACTIONS','false')==='true',inboundActions:val('ULTRON_INBOUND_ACTIONS','false')==='true',passphrase:val('ULTRON_PASSPHRASE','')}),
+    actions:{
+      'pause-buys':()=>{ engine.style('off'); engine.event('ultron-order',{message:'Ultron (phone): new buys paused'}); engine.save(); return 'Done, sir. New buys are paused. Coins we hold keep their exit rules.'; },
+      'resume-buys':()=>{ engine.style('auto'); engine.event('ultron-order',{message:'Ultron (phone): trading resumed, auto buy and auto sell'}); engine.save(); return 'Done, sir. We are trading again, with auto buy and auto sell.'; },
+      'manual-sells':()=>{ engine.style('manual'); engine.event('ultron-order',{message:'Ultron (phone): auto buy, manual sells'}); engine.save(); return 'Done, sir. Auto buy, and you sell.'; },
+      'emergency':()=>{ engine.style('off'); engine.event('emergency-stop',{message:'emergency stop from Ultron (phone): no new buys'}); engine.save(); return 'Emergency stop made, sir. No new buys.'; },
+      'sell-all':()=>{ engine.style('off'); const held=Object.entries(engine.d.positions).filter(([,p])=>BigInt(p.raw||'0')>0n);
+        for(const [mint,p] of held) exitNow(mint,p,'sell-all',null);
+        engine.event('emergency-stop',{message:`sell everything from Ultron (phone): ${held.length} position(s)`}); engine.save();
+        return held.length?`Selling ${held.length} coin${held.length===1?'':'s'} now, sir, and new buys are stopped.`:'We hold no coins, sir. New buys are stopped.'; },
+      'sell-coin':({mint,coin})=>{ const p=engine.d.positions[mint];
+        if(!p || BigInt(p.raw||'0')<=0n) return 'We no longer hold that coin, sir.';
+        if(engine.d.jobs[mint]?.side==='sell' || engine.d.queues[mint]?.some(x=>x.side==='sell')) return `A sell of ${coin} is already on its way, sir.`;
+        const m=monitors.get(mint); exitNow(mint,p,'manual-sell',Number.isFinite(m?.last)?m.last:null,null);
+        engine.event('ultron-order',{mint,message:`Ultron (phone): sell ${coin}`}); return `Selling ${coin} now, sir.`; },
+      'power-off':()=>{ const problem=setPower(false,{by:'ultron'}); return problem?`I could not, sir. ${problem}`:'The bot is powered off, sir. I can still answer, but the data will not move.'; },
+      'power-on':()=>{ const problem=setPower(true,{by:'ultron'}); return problem?`I could not, sir. ${problem}`:'The bot is powered on, sir.'; },
+      'alerts-off':()=>{ engine.mute(true); engine.save(); return 'Phone alerts are muted, sir.'; },
+      'alerts-on':()=>{ engine.mute(false); engine.save(); return 'Phone alerts are back on, sir.'; },
+      'big-wins-off':()=>{ engine.d.ultron=cleanSettings(engine.d.ultron||{},{bigWinOn:'0'}); engine.saveSoon?.(); return 'I will not call about big wins, sir.'; },
+      'big-wins-on':()=>{ engine.d.ultron=cleanSettings(engine.d.ultron||{},{bigWinOn:'1'}); engine.saveSoon?.(); return `I will call you about big wins again, sir: ${engine.d.ultron.bigWinPct} percent or more.`; },
+      'voice':({style})=>{ if(!style) return 'Which voice, sir? Say voice samples, and I will play them for you.'; engine.d.ultron=cleanSettings(engine.d.ultron||{},{style}); engine.saveSoon?.(); return 'Voice changed, sir. You will hear it from my next sentence.'; },
+      'send-briefing':async()=>{ await sendMorning({test:true}); return 'The briefing is on its way to your phone, sir.'; },
+      'call-back':({minutes})=>{ clearTimeout(ultronCallBack); const due=Date.now()+minutes*60_000;
+        ultronCallBack=setTimeout(()=>{ ultronCallBack=null; ultronCall('call back you asked for',null,'You asked me to call you back, sir.').catch(()=>{}); },minutes*60_000); ultronCallBack.unref?.();
+        callTrace({call:null,step:'call-back-scheduled',minutes,at:new Date(due).toISOString()});
+        return `Very good, sir. I will call you back in ${minutes} minute${minutes===1?'':'s'}. If the bot restarts before then, the call back is lost.`; },
+    },
+    data:{ // READ-ONLY views of the bot
+      overview:()=>{const r=readiness(),sn=engine.snapshot();return {mode:c.mode,paperIsPractice:c.mode==='paper',power:engine.d.dataOff?'off':'on',style:sn.paused?'off':sn.autoCopy?'auto buy + auto sell':'auto buy + manual sell',balanceSol:c.mode==='live'?(status.balance??null):engine.d.paperBalance,pnlTodaySol:sn.pnlToday,coinsHeld:sn.open,maxPositions:sn.maxPositions,readyToTrade:r.ready,blocking:r.blocking,solUsd:solUsd(),timezone:c.timezone,now:new Date().toISOString()};},
+      positions:()=>heldNow().map(h=>({mint:h.mint,coin:h.symbol||null,costSol:h.costSol,profitPct:pctOf(h.pnl),peakPct:pctOf(h.peak),valueSol:h.valueSol,boughtAt:h.boughtAt?new Date(h.boughtAt).toISOString():null,selling:h.selling})),
+      closed:()=>(engine.d.closedTrades||[]).map(t=>({coin:t.symbol||null,mint:t.mint,pnlSol:t.pnlSol,profitPct:t.costSol>0?Math.round(t.pnlSol/t.costSol*1000)/10:null,costSol:t.costSol,rule:t.rule,closedAt:t.closedAt,closedAtIso:new Date(t.closedAt).toISOString()})),
+      brain:()=>{const t=thinking?.status?.();return t?{rank:t.rank,patterns:t.patterns,rules:t.rules,goal:t.goal,mirror:t.mirror,decisions:t.decisions?.slice?.(-5)}:(study?{summary:summaryText(study.summary())}:'The brain is off.');},
+      events:()=>engine.d.events.slice(-30).map(e=>({type:e.type,at:e.at?new Date(e.at).toISOString():null,message:String(e.message||'').slice(0,200)})),
+      solUsd:()=>solUsd(),
+      brainLine:()=>thinking?.rankLine?.()||null,
+      price:()=>({solUsd:solUsd(),yesterday:engine.d.morningPush?.solUsd??null}),
+      decu:()=>({lastSignalAt:status.lastSignal||null,
+        buys:(study?.records||[]).slice(-3).reverse().map(x=>({coin:x.symbol||null,at:Date.parse(x.time),sol:x.hisSol??null,usd:x.hisUsd??null,taken:x.taken!==false&&!x.skipReason,skip:x.skipReason||null})),
+        sells:engine.d.events.filter(e=>e.type==='leader-sold').slice(-2).reverse().map(e=>({coin:sym(e.mint)||null,at:e.at}))}),
+      goal:()=>{ const g=goal?.summary?.({solUsd:solUsd(),mode:c.mode}); return g?{name:g.name,goalUsd:g.goalUsd,mode:c.mode,paperUsd:g.paper?.usd??null,liveUsd:g.live?.usd??null}:null; },
+      credits:()=>k.heliusUsage?.()||null,
+      briefing:()=>morningFacts(),
+    }});
+  // ready = Ultron can call: the phone settings are enough. Without ANTHROPIC_API_KEY he runs in free mode (scripted answers, no AI).
+  const ultronStatus=()=>({ready:!!ultron&&voiceCfg.ready,agent:!!ultron?.ai,mode:ultron?.ai?'ai':'free',phone:voiceCfg.ready,missing:[...voiceCfg.missing],forConversation:ultron?.ai?[]:['ANTHROPIC_API_KEY'],orders:{password:!!val('ULTRON_PASSPHRASE',''),paperOnly:val('ULTRON_LIVE_ACTIONS','false')!=='true',inbound:val('ULTRON_INBOUND_ACTIONS','false')==='true'},settings:ultronSettings(),voices:ULTRON_VOICES,styles:STYLES.map(x=>({id:x.id,label:x.label})),
+    inboundUrl:voiceCfg.baseUrl?`${voiceCfg.baseUrl}/voice/agent/in?k=${ultronKey}`:null,last:engine.d.ultronLast||null});
+  let agentRejectLogAt=0, agentRejects=0; const testCalls=new Map(); // provider call id -> test call id, for the log
+  const ultronCall=async(reason,opener,announce=null,{samples=false}={})=>{ if(!ultron||!voiceCaller||!voiceCfg.ready) { const why='Ultron is not set up: '+ultronStatus().missing.join(', '); callTrace({call:null,step:'call-failed',reason,error:why}); throw new Error(why); }
+    const id=ultron.open({reason,opener,announce,samples}), s=ultron.sessions.get(id), t0=Date.now();
+    callTrace({call:s.cid,step:'call-requested',reason,to:voiceStatus(voiceCfg).to,from:voiceStatus(voiceCfg).from,provider:voiceCfg.provider,voice:ultronSettings().voice});
+    try { const r=await voiceCaller.call({url:`${voiceCfg.baseUrl}/voice/agent/start?k=${ultronKey}&s=${id}`},{statusUrl:`${voiceCfg.baseUrl}/voice/agent/status?k=${ultronKey}&s=${id}`});
+      ultron.placed(id,r.sid); callTrace({call:s.cid,sid:r.sid,step:'call-placed',ms:Date.now()-t0,providerStatus:r.status,to:r.to,provider:r.provider,statusReports:r.statusReports});
+      engine.d.ultronLast={at:Date.now(),reason,ok:true,status:r.status,call:s.cid}; engine.event('connection',{message:`Ultron is calling ${r.to} (${reason})`}); engine.saveSoon?.(); return r; }
+    catch(e) { callTrace({call:s.cid,step:'call-failed',reason,ms:Date.now()-t0,error:String(e.message).slice(0,500)}); ultron.end(s,'the call could not be placed');
+      engine.d.ultronLast={at:Date.now(),reason,ok:false,error:String(e.message).slice(0,200),call:s.cid}; engine.event('connection',{message:`Ultron call failed (${reason}): ${String(e.message).slice(0,200)}`}); throw e; } };
+  ultronBigWin=(t)=>{ const st=ultronSettings(), pct=t.costSol>0?Math.round(t.pnlSol/t.costSol*100):null;
+    if(!st.bigWinOn || !(pct>=st.bigWinPct)) return; // not a big win (or big-win calls are off): nothing to log
+    const info={coin:t.symbol||t.mint?.slice(0,6)||null,pnlSol:t.pnlSol,pct,threshold:st.bigWinPct};
+    if(!ultron||!voiceCfg.ready) return callTrace({call:null,step:'big-win-skipped',why:'Ultron is not set up: '+ultronStatus().missing.join(', '),...info});
+    if(engine.d.alertsOff) return callTrace({call:null,step:'big-win-skipped',why:'phone alerts are off',...info});
+    if(!bigWinDue(t,st,bigWinState)) return callTrace({call:null,step:'big-win-skipped',why:`daily limit of ${st.bigWinPerDay} big-win calls reached`,...info});
+    callTrace({call:null,step:'big-win',...info});
+    ultronCall('big win',`You are calling because of a big win: ${t.symbol||'a coin'} just closed up about ${pct} percent, ${t.pnlSol} SOL${c.mode==='paper'?' (paper, practice money)':''}. Greet him with good morning, afternoon or evening, sir, announce it in one or two dramatic sentences, then ask if he wants more details, sir.`,
+      `Big win${c.mode==='paper'?' in paper trading':''}: ${t.symbol||'a coin'} just closed up ${pct} percent, ${t.pnlSol} SOL.`).catch(()=>{}); };
   // your pump.fun profile's trades, READ-ONLY (Solscan history of that public wallet; never trades)
   const pumpProfile=demo?null:createPumpProfile({activities:k.solscanActivities||null,tokenMeta:k.tokenMeta||null,solUsd});
   const profileAddr=()=>engine.d.pumpfunProfile||parseProfile(val('PUMPFUN_PROFILE',''))||null;
@@ -1012,11 +1094,31 @@ export async function startRuntime(k, {demo=false}={}) {
     if((req.method==='GET'||req.method==='POST') && /^\/voice\/[a-z0-9-]+\.xml$/.test(url.pathname)) { // public: the call script SignalWire fetches; it only plays the audio below
       const name=path.basename(url.pathname,'.xml'), f=path.join(voiceDir,name+'.mp3');
       if(!fs.existsSync(f)) { res.writeHead(404,{'Content-Type':'text/plain'}); return res.end('not found'); }
+      callTrace({call:testCalls.get(url.searchParams.get('CallSid'))||'test',sid:url.searchParams.get('CallSid'),step:'script-fetched',file:name,...providerFields(Object.fromEntries(url.searchParams))});
       res.writeHead(200,{'Content-Type':'text/xml','Cache-Control':'no-store'}); return res.end(voiceXml(voiceCfg.baseUrl,name));
     }
     if(req.method==='GET' && /^\/voice\/[a-z0-9-]+\.mp3$/.test(url.pathname)) { // public so Twilio can fetch it; robot-voice audio only
       const f=path.join(voiceDir,path.basename(url.pathname));
       try { const b=fs.readFileSync(f); res.writeHead(200,{'Content-Type':'audio/mpeg','Content-Length':b.length}); return res.end(b); } catch { res.writeHead(404); return res.end('Not found'); }
+    }
+    // ULTRON call scripts: public so the phone provider can reach them, but only with the secret key in the address
+    const agentRoute=url.pathname.match(/^\/voice\/agent\/(start|in|turn|wait|status)$/);
+    if(agentRoute && (req.method==='POST'||req.method==='GET')) {
+      const okKey=Buffer.from(String(url.searchParams.get('k')||'')), want=Buffer.from(ultronKey);
+      if(!ultron || okKey.length!==want.length || !crypto.timingSafeEqual(okKey,want)) {
+        if(Date.now()-agentRejectLogAt>60_000) { agentRejectLogAt=Date.now(); callTrace({call:null,step:'webhook-rejected',route:agentRoute[1],why:ultron?'wrong or missing secret key':'Ultron is off (demo)',ip:String(req.headers['x-forwarded-for']||req.socket.remoteAddress||'').split(',')[0].trim()||null,refusedSinceLastLog:agentRejects}); agentRejects=0; } else agentRejects++;
+        res.writeHead(404,{'Content-Type':'text/plain'}); return res.end('not found'); }
+      const t0=Date.now(); let raw=''; if(req.method==='POST') { for await (const ch of req) { raw+=ch; if(raw.length>20000) break; } }
+      const f=new URLSearchParams(raw), params={...Object.fromEntries(url.searchParams),...Object.fromEntries(f)}; delete params.k; delete params.s; delete params.t; delete params.silence;
+      const p=(n)=>params[n]??null, sid=url.searchParams.get('s'), cid=sid?sid.slice(0,8):(agentRoute[1]==='in'?'inbound':null);
+      if(agentRoute[1]==='status') { ultron.status({id:sid,test:url.searchParams.get('t'),params}); res.writeHead(200,{'Content-Type':'text/xml'}); return res.end('<?xml version="1.0" encoding="UTF-8"?><Response/>'); }
+      const a={base:voiceCfg.baseUrl,key:ultronKey,id:sid,callSid:p('CallSid'),voice:styleOf(ultronSettings()),params};
+      let out;
+      try { out=await (agentRoute[1]==='in'?ultron.inbound({...a,from:p('From'),owner:voiceCfg.to})
+        :agentRoute[1]==='start'?ultron.start(a):agentRoute[1]==='wait'?ultron.wait(a):ultron.turn({...a,speech:p('SpeechResult'),digits:p('Digits'),confidence:p('Confidence'),silence:url.searchParams.get('silence')==='1'})); }
+      catch(e) { callTrace({call:cid,sid:p('CallSid'),step:'webhook-error',route:agentRoute[1],error:String(e?.stack||e).slice(0,800)}); out='<?xml version="1.0" encoding="UTF-8"?><Response><Say>Ultron hit an error. Goodbye.</Say><Hangup/></Response>'; }
+      callTrace({call:cid,sid:p('CallSid'),step:'webhook',route:agentRoute[1],method:req.method,ms:Date.now()-t0,callStatus:p('CallStatus'),bytes:out.length});
+      res.writeHead(200,{'Content-Type':'text/xml'}); return res.end(out);
     }
     if(url.pathname==='/health') {res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify({running:true,mode:c.mode}));}
     if(url.pathname==='/ready') { const r=readiness(); res.writeHead(r.ready?200:503,{'Content-Type':'application/json'}); return res.end(JSON.stringify({ready:r.ready,mode:r.mode,at:r.at,blocking:r.blocking,warnings:r.warnings})); }
@@ -1025,7 +1127,7 @@ export async function startRuntime(k, {demo=false}={}) {
       if(!token && c.mode==='live') {res.writeHead(403);return res.end('Token required');}
       if(url.pathname==='/api/status' && req.method==='GET') {
         status.pumpportal=pumpPortalStatus(); status.pumpportalBuilder=ppCheck.result; status.rpcHealth=k.rpcHealth?.()||null;
-        const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',solscanUsage:k.solscanUsage?.()||null,voiceCall:voiceStatus(voiceCfg),morningPush:morningStatus(),heliusUsage:k.heliusUsage?.()||null,paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
+        const snap={...engine.snapshot(),power:engine.d.dataOff?'off':'on',solscanUsage:k.solscanUsage?.()||null,voiceCall:voiceStatus(voiceCfg),ultron:ultronStatus(),morningPush:morningStatus(),heliusUsage:k.heliusUsage?.()||null,paper:c.mode==='paper'?paperSummary(engine.d.paperStats):undefined,balance:c.mode==='live'?(status.balance??null):engine.d.paperBalance,connection:status,
           wallet:{publicKey:c.wallet||null,signerAddress:k.kp?.publicKey||null,signer:c.mode==='live'?'local-ed25519':'paper-simulated',autonomous:c.mode==='live'&&!!k.kp,phantomBrowserVerification:true},
           held:heldNow(),readiness:readiness(),solUsd:solUsd(),timezone:c.timezone,leader:{label:k.config.leaderLabel||'Decu',address:k.config.leader||null},
           settings:{buySol:c.buySol,maxPositions:c.maxPositions,minLeaderUsd:c.minLeaderUsd,dailyCapUsd:c.dailyCapUsd||0,dailyLossLimit:c.dailyLossLimit||0,rules:{...rules},ruleDefaults:{...ruleDefaults},holdLimitSec:holdLimitMs/1000,gateSec:maxHoldMs/1000,autoTune:c.mode==='paper'&&val('BRAIN_AUTOTUNE','true')!=='false'}};
@@ -1089,10 +1191,22 @@ export async function startRuntime(k, {demo=false}={}) {
         const m=monitors.get(mint); exitNow(mint,p,'manual-sell',Number.isFinite(m?.last)?m.last:null,null);
         res.writeHead(200,{'Content-Type':'text/plain'}); return res.end('OK');
       }
+      if(url.pathname==='/api/ultron' && req.method==='GET') return sendJson(req,res,ultronStatus());
+      if(url.pathname==='/api/ultron/log' && req.method==='GET') { const call=url.searchParams.get('call')||null, limit=Math.min(3000,Math.max(1,Number(url.searchParams.get('limit'))||400));
+        return sendJson(req,res,{file:callLog.file?path.basename(callLog.file):null,calls:callLog.calls(30),entries:callLog.recent({limit,call})}); }
+      if(url.pathname==='/api/ultron/log.jsonl' && req.method==='GET') { res.writeHead(200,{'Content-Type':'application/x-ndjson; charset=utf-8','Content-Disposition':`attachment; filename="ultron-calls-${new Date().toISOString().slice(0,10)}.jsonl"`}); return res.end(callLog.jsonl()); }
+      if(url.pathname==='/api/ultron/settings' && req.method==='POST') { // voice and big-win calls only: never a trading setting
+        const ch={}; for(const n of ['voice','style','bigWinOn','bigWinPct','bigWinPerDay']) if(url.searchParams.has(n)) ch[n]=url.searchParams.get(n);
+        engine.d.ultron=cleanSettings(engine.d.ultron||{},ch); engine.saveSoon?.(); return sendJson(req,res,ultronStatus()); }
+      if(url.pathname==='/api/ultron/samples' && req.method==='POST') {
+        try { return sendJson(req,res,await ultronCall('voice samples',null,null,{samples:true})); } catch(e) { res.writeHead(400,{'Content-Type':'text/plain'}); return res.end(String(e.message).slice(0,300)); } }
+      if(url.pathname==='/api/ultron/call' && req.method==='POST') {
+        try { return sendJson(req,res,await ultronCall('you asked',null)); } catch(e) { res.writeHead(400,{'Content-Type':'text/plain'}); return res.end(String(e.message).slice(0,300)); } }
       if(url.pathname==='/api/call/test' && req.method==='POST') {
         if(!voiceCaller) { res.writeHead(503,{'Content-Type':'text/plain'}); return res.end('Voice calls are off in demo mode.'); }
-        try { const r=await voiceCaller.call('ultron-test'); engine.event('connection',{message:`Ultron test call placed to ${r.to} via ${r.provider} (${r.status})`}); return sendJson(req,res,r); }
-        catch(e) { const why=String(e.message).slice(0,300); engine.event('connection',{message:`Ultron test call failed: ${why}`}); res.writeHead(400,{'Content-Type':'text/plain'}); return res.end(why); }
+        const t0=Date.now(), tid='test-'+crypto.randomBytes(3).toString('hex'); callTrace({call:tid,step:'call-requested',reason:'test call (recorded message)',to:voiceStatus(voiceCfg).to,provider:voiceCfg.provider});
+        try { const r=await voiceCaller.call('ultron-test',{statusUrl:`${voiceCfg.baseUrl}/voice/agent/status?k=${ultronKey}&t=${tid}`}); if(r.sid) { testCalls.set(r.sid,tid); if(testCalls.size>50) testCalls.delete(testCalls.keys().next().value); } callTrace({call:tid,sid:r.sid,step:'call-placed',ms:Date.now()-t0,providerStatus:r.status,to:r.to,provider:r.provider,statusReports:r.statusReports}); engine.event('connection',{message:`Ultron test call placed to ${r.to} via ${r.provider} (${r.status})`}); return sendJson(req,res,r); }
+        catch(e) { const why=String(e.message).slice(0,300); callTrace({call:tid,step:'call-failed',ms:Date.now()-t0,error:why}); engine.event('connection',{message:`Ultron test call failed: ${why}`}); res.writeHead(400,{'Content-Type':'text/plain'}); return res.end(why); }
       }
       if(url.pathname==='/api/pumpfun' && req.method==='GET') {
         const address=profileAddr(), base={address,on:!!pumpProfile,profileUrl:address?'https://pump.fun/profile/'+address:null};
@@ -1178,5 +1292,5 @@ export async function startRuntime(k, {demo=false}={}) {
     sendMorning().then(m=>engine.event('morning-push',{message:m})).catch(e=>engine.event('error',{message:'morning push: '+e.message}));
   },60_000); morningTimer?.unref?.();
   const morningStatus=()=>({on:morningOn()&&!demo,at:morningAt(),timezone:c.timezone,alertsOff:!!engine.d.alertsOff,lastAt:engine.d.morningPush?.at||null,lastResult:engine.d.morningPush?.result||null});
-  return {engine,server,study,thinking,rules,goal,duel,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;duel?.stop();clearInterval(readyTimer);study?.stop?.();goal?.flush?.();clearInterval(digestTimer);clearInterval(morningTimer);thinking?.stop?.();desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);server.close();}};
+  return {engine,server,study,thinking,rules,goal,duel,latency:latencyOf,setPower,desk,sendDigest,analytics:analyticsNow,stop:()=>{stopped=true;duel?.stop();clearInterval(readyTimer);study?.stop?.();goal?.flush?.();clearInterval(digestTimer);clearInterval(morningTimer);thinking?.stop?.();desk?.stop();ppFeed?.stop();if(engine.saveTimer){try{engine.save();}catch{}}for(const m of monitors?.values?.()??[]){try{m.unwatch?.();}catch{}}monitors?.clear();stopWatcher();stopSolscan();clearInterval(pruneTimer);clearInterval(watchdog);clearInterval(globalTimer);local?.blockhash?.stop();clearInterval(timer);clearInterval(balanceTimer);clearInterval(demonstration);ultron?.stop?.();clearTimeout(ultronCallBack);server.close();}};
 }

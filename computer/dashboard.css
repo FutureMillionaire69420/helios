@@ -481,3 +481,11 @@ table.t caption { text-align: left; padding: 12px 0 4px; }
 .pf-stats b.up { color: #8fe08f; } .pf-stats b.down { color: #ffb4b4; }
 .pf-h { margin: 16px 0 8px; }
 #pf-trades { max-height: 360px; }
+
+/* Ultron settings */
+.num-in { width: 5em; }
+.num-in.short { width: 3em; }
+#ultron label { display: block; margin: 6px 0; }
+.ul-calls { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.ul-calls .btn.on { outline: 2px solid currentColor; }
+.ul-steps { white-space: pre-wrap; word-break: break-word; max-height: 480px; overflow: auto; font-size: 12px; line-height: 1.45; margin: 8px 0; }
