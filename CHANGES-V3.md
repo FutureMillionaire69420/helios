@@ -833,3 +833,7 @@ No trade setting changed.
   - there's a short beat after commas and a pause between sentences that fits the mood.
 - The two natural (neural) voices take speed, volume and pauses only, because Amazon ignores pitch and emphasis for them.
 
+## v4.27.1: Jarvis 4 is the bot's voice
+
+- **Sample 4, Jarvis calm and measured, is the default voice** (the owner's pick). Everyone's saved voice moves to it once; a voice picked after that is kept.
+

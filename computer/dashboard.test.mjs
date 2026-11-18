@@ -190,7 +190,7 @@ test('ultron: secret-key call scripts, owner-only answering, read-only settings 
   assert.equal(rej.status, 200); assert.match(await rej.text(), /<Reject/, 'a stranger is not answered');
   // the owner calls: free mode answers with the bot's numbers, and the keypad works
   const hi = await (await fetch(base + '/voice/agent/in?k=' + key, {method: 'POST', body: new URLSearchParams({From: '+15559998888', CallSid: 'C1'})})).text();
-  assert.match(said(hi), /Good (morning|afternoon|evening), sir\. Ultron[^.]*\. All systems are online, in paper mode\. Profit today is /); assert.match(hi, /<Say voice="Polly.Brian"><amazon:effect name="drc"><amazon:effect vocal-tract-length="\+5%"><prosody rate="1\d\d%" pitch="[+-]\d+%"/, 'the clear butler voice (old sample 4) by default, spoken expressively'); assert.match(hi, /<Gather input="dtmf speech" numDigits="1"/);
+  assert.match(said(hi), /Good (morning|afternoon|evening), sir\. Ultron[^.]*\. All systems are online, in paper mode\. Profit today is /); assert.match(hi, /<Say voice="Polly.Brian"><amazon:effect name="drc"><prosody rate="(9\d|1\d\d)%" pitch="[+-]\d+%"/, 'the calm Jarvis voice (sample 4) by default, spoken expressively'); assert.match(hi, /<Gather input="dtmf speech" numDigits="1"/);
   const turnUrl = hi.match(/action="([^"]+)"/)[1].replace(/&amp;/g, '&').replace('https://bot.example.com', base);
   const coins = await (await fetch(turnUrl, {method: 'POST', body: new URLSearchParams({CallSid: 'C1', Digits: '2'})})).text();
   assert.match(said(coins), /We are not holding any coins right now, sir\. [^<]*sir\?/);

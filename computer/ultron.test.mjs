@@ -372,15 +372,15 @@ test('voice samples: Ultron first, then six Jarvis-style butler voices; "two" pi
   await u.turn({base: BASE, key: KEY, id, callSid: 'S', speech: 'the deep one', voice: styleOf({})}); assert.equal(picked.at(-1), 'deep2');
   assert.deepEqual(parseOrder('switch to voice three').args, {style: 'jarvis-pure', voice: null});
   assert.equal(styleFromWords('use the jarvis voice'), 'butler2'); assert.equal(styleFromWords('arthur'), 'jarvis-arthur');
-  assert.equal(styleFromWords('banana'), null); assert.equal(styleOf({style: 'nope'}).id, 'butler2', 'an old or unknown voice: the default');
+  assert.equal(styleFromWords('banana'), null); assert.equal(styleOf({style: 'nope'}).id, 'jarvis-calm', 'an old or unknown voice: the default');
   u.stop();
 });
 
 test('voice list: everyone starts on the default butler voice once; later picks are kept', () => {
-  assert.equal(cleanSettings({style: 'dark'}).style, 'butler2', 'an old saved voice moves to the new default');
-  assert.equal(cleanSettings({style: 'deep2'}).style, 'butler2', 'even one still on the list, once');
+  assert.equal(cleanSettings({style: 'dark'}).style, 'jarvis-calm', 'an old saved voice moves to the new default');
+  assert.equal(cleanSettings({style: 'butler2', voiceList: 2}).style, 'jarvis-calm', 'even one still on the list, once');
   const picked = cleanSettings({style: 'dark'}, {style: 'jarvis-calm'});
-  assert.equal(picked.style, 'jarvis-calm'); assert.equal(picked.voiceList, 2);
+  assert.equal(picked.style, 'jarvis-calm'); assert.equal(picked.voiceList, 3);
   assert.equal(cleanSettings(picked).style, 'jarvis-calm', 'after that, his choice stays');
 });
 

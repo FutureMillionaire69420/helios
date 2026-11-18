@@ -19,21 +19,21 @@ export const ULTRON_VOICES = [
   {id: 'Polly.Russell', label: 'Russell (Australian)'},
 ];
 /** The final voice list (owner, 2026-11-18): 1 is the Ultron voice he liked (old sample 6), 2-7 are Jarvis-style
- *  butler voices: British, pure and clear, no metallic or dark effect. 2 is his favourite (old sample 4) and the default.
+ *  butler voices: British, pure and clear, no metallic or dark effect. 4 (calm and measured) is his pick and the default.
  *  An original butler voice in that spirit, not a copy of any actor's voice. Neural voices (natural speech) ignore
  *  pitch and the big-voice effect, so they get the speed only. */
 const ULTRON_LINE = 'Good evening, sir. Ultron online. All systems are clear, and I am ready for your orders.';
 const JARVIS_LINE = 'Good evening, sir. At your service. All systems are running smoothly, and I am ready whenever you are.';
 export const STYLES = [
   {id: 'deep2', label: 'Ultron: deep American, faster', voice: 'Polly.Matthew', rate: 118, pitch: -10, tract: 10, line: ULTRON_LINE},
-  {id: 'butler2', label: 'Jarvis: clear butler, faster (default)', voice: 'Polly.Brian', rate: 118, pitch: -5, tract: 5, line: JARVIS_LINE, expressive: true},
+  {id: 'butler2', label: 'Jarvis: clear butler, faster', voice: 'Polly.Brian', rate: 118, pitch: -5, tract: 5, line: JARVIS_LINE, expressive: true},
   {id: 'jarvis-pure', label: 'Jarvis: pure butler, no effects', voice: 'Polly.Brian', rate: 112, pitch: 0, tract: 0, line: JARVIS_LINE, expressive: true},
-  {id: 'jarvis-calm', label: 'Jarvis: calm and measured', voice: 'Polly.Brian', rate: 106, pitch: -2, tract: 0, line: JARVIS_LINE, expressive: true},
+  {id: 'jarvis-calm', label: 'Jarvis: calm and measured (default)', voice: 'Polly.Brian', rate: 106, pitch: -2, tract: 0, line: JARVIS_LINE, expressive: true},
   {id: 'jarvis-crisp', label: 'Jarvis: crisp and quick', voice: 'Polly.Brian', rate: 118, pitch: -2, tract: 0, line: JARVIS_LINE, expressive: true},
   {id: 'jarvis-natural', label: 'Jarvis: natural British (neural)', voice: 'Polly.Brian-Neural', rate: 108, pitch: 0, tract: 0, line: JARVIS_LINE, expressive: true},
   {id: 'jarvis-arthur', label: 'Jarvis: refined British (neural)', voice: 'Polly.Arthur-Neural', rate: 106, pitch: 0, tract: 0, line: JARVIS_LINE, expressive: true},
 ];
-export const DEFAULT_STYLE = 'butler2';
+export const DEFAULT_STYLE = 'jarvis-calm'; // the owner's pick, 2026-11-18 (sample 4)
 const SAMPLE_NUMBERS = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
 const STYLE_IDS = new Set(STYLES.map((x) => x.id));
 /** The style to speak in, from the settings. */
@@ -47,13 +47,13 @@ export function styleFromWords(t = '') {
   const names = [['ultron', 'deep2'], ['deep', 'deep2'], ['american', 'deep2'], ['robot', 'deep2'], ['jarvis', 'butler2'], ['butler', 'butler2'], ['pure', 'jarvis-pure'], ['calm', 'jarvis-calm'], ['crisp', 'jarvis-crisp'], ['natural', 'jarvis-natural'], ['neural', 'jarvis-natural'], ['arthur', 'jarvis-arthur'], ['refined', 'jarvis-arthur']];
   return names.find(([w]) => new RegExp(`\\b${w}\\b`).test(x))?.[1] || null;
 }
-export const DEFAULT_SETTINGS = {style: DEFAULT_STYLE, voiceList: 2, voice: 'Polly.Brian', bigWinOn: true, bigWinPct: 100, bigWinPerDay: 3};
+export const DEFAULT_SETTINGS = {style: DEFAULT_STYLE, voiceList: 3, voice: 'Polly.Brian', bigWinOn: true, bigWinPct: 100, bigWinPerDay: 3};
 const VOICE_IDS = new Set(ULTRON_VOICES.map((v) => v.id));
 
 /** Merge a settings change, keeping only valid values. */
 export function cleanSettings(cur = {}, change = {}) {
   const s = {...DEFAULT_SETTINGS, ...cur};
-  if (!(cur.voiceList >= 2)) { s.style = DEFAULT_STYLE; s.voiceList = 2; } // the final voice list: start on the owner's favourite
+  if (!(cur.voiceList >= 3)) { s.style = DEFAULT_STYLE; s.voiceList = 3; } // the final voice list: start on the owner's favourite
   if (change.voice != null && VOICE_IDS.has(String(change.voice))) s.voice = String(change.voice);
   if (change.style != null && STYLE_IDS.has(String(change.style))) s.style = String(change.style);
   if (change.bigWinOn != null) s.bigWinOn = change.bigWinOn === true || change.bigWinOn === 'true' || change.bigWinOn === '1';
