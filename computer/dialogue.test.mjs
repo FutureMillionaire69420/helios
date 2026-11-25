@@ -75,6 +75,7 @@ test('guest: "I\'m with <name>" or "<name> is here" gets that guest\'s greeting;
   for (const x of [`hey Ultron I'm with ${N}`, `${N} is here`, `${NAME}'s here`, `Ultron, I am here with ${N}`, `${N} just arrived`])
     assert.equal(guestFor(x)?.line, GUESTS[0].line, x);
   for (const x of [`${NAME}ry work`, N, 'how is the bot']) assert.equal(guestFor(x), null, x);
+  for (const g of GUESTS) assert.equal(guestFor(`hey, ${g.id[0].toUpperCase() + g.id.slice(1)} is here`)?.id, g.id, `every guest is greeted: ${g.id}`);
 });
 
 const BASE = 'https://bot.example.com', KEY = 'k'.repeat(32);
