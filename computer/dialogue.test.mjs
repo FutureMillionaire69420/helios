@@ -61,10 +61,10 @@ test('packs: a new JSON file in dialogue/packs adds lines or whole categories wi
 const HAS_GUESTS = fs.existsSync(path.join(DIR, 'guests.json')); // private file: not in the public mirror
 test('guest greetings come from a guests file; nothing matches without one', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dlg-'));
-  assert.equal(guestFor('Alex is here', dir), null);
+  assert.equal(guestFor('Taylor is here', dir), null);
   const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'dlg-'));
-  fs.writeFileSync(path.join(dir2, 'guests.json'), JSON.stringify([{id: 'alex', words: ['\\balex is here\\b'], line: 'Welcome, Alex.'}]));
-  assert.equal(guestFor('Ultron, Alex is here', dir2).line, 'Welcome, Alex.');
+  fs.writeFileSync(path.join(dir2, 'guests.json'), JSON.stringify([{id: 'taylor', words: ['\\btaylor is here\\b'], line: 'Welcome, Taylor.'}]));
+  assert.equal(guestFor('Ultron, Taylor is here', dir2).line, 'Welcome, Taylor.');
 });
 
 // the owner's guests (private, so the phrases and the greeting are read from the file, not written here)
