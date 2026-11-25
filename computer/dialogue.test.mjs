@@ -88,7 +88,11 @@ const call = (random = () => 0.9) => {
 
 test('a call: the guest greeting in free mode; library categories answer what used to be "I did not understand"', async () => {
   const {u, ask} = call();
-  if (HAS_GUESTS) assert.equal(await ask(`Hey Ultron, I'm with ${NAME}`), GUESTS[0].line);
+  if (HAS_GUESTS && !GUESTS[0].line.includes('{greeting}')) assert.equal(await ask(`Hey Ultron, I'm with ${NAME}`), GUESTS[0].line);
+  for (const g of GUESTS.filter((x) => x.line.includes('{greeting}'))) {
+    const r = await ask(`hey, ${g.id[0].toUpperCase() + g.id.slice(1)} is here`);
+    assert.match(r, /^Good (morning|afternoon|evening), sir\. /, 'opens with the time of day'); assert.doesNotMatch(r, /\{greeting\}/);
+  }
   const philo = await ask('what do you think about free will');
   assert.doesNotMatch(philo, /did not understand/); assert.ok(philo.length > 20, philo);
   assert.equal(freeIntent('roast me ultron', '', {match: (x) => (/roast/.test(x) ? 'roast' : null)}), 'lib:roast');

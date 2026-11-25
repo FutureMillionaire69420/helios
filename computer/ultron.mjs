@@ -819,7 +819,7 @@ export function createUltron({apiKey, model = 'claude-sonnet-5-5', effort = 'low
       if (gated != null) return reply(base, key, s, voice, Promise.resolve(gated).then((g) => { t(s, 'answer', {kind: 'order', text: g}); return /\?\s*$/.test(g) ? g : `${g} ${pick(LINES.more)}`; }));
       if (isPass) return listen(base, key, s, s.lockedOut ? 'Orders stay locked for this call, sir.' : 'I am already unlocked, sir.', voice);
       const guest = guestFor(text); // "I'm with <name>", "<name> is here": a greeting for a guest the owner introduces (dialogue/guests.json, private)
-      if (guest) { t(s, 'answer', {kind: 'guest', guest: guest.id, text: guest.line}); s.guest = guest.id; return listen(base, key, s, guest.line, voice); }
+      if (guest) { const line = guest.line.replace(/\{greeting\}/g, greeting(now(), timezone)); t(s, 'answer', {kind: 'guest', guest: guest.id, text: line}); s.guest = guest.id; return listen(base, key, s, line, voice); } // {greeting}: good morning, afternoon or evening, sir
       if (s.mode === 'free') {
         const order = parseOrder(text);
         if (order) return reply(base, key, s, voice, takeOrder(s, order).then((g) => { t(s, 'answer', {kind: 'order', mode: 'free', intent: order.id, text: g}); return /\?\s*$|password/i.test(g) ? g : `${g} ${pick(LINES.more)}`; }));
