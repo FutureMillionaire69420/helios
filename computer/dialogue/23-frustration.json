@@ -1,0 +1,358 @@
+{
+  "id": "frustration",
+  "title": "Frustration and difficult situations",
+  "triggers": [
+    "\\b(i'?m|i am|i feel|feeling) (so |really |very |pretty |super )?(frustrated|annoyed|angry|mad|pissed|stressed|overwhelmed|exhausted|tired of|down|sad|anxious|worried)\\b",
+    "\\bthis is (so )?(annoying|frustrating|ridiculous|terrible)\\b",
+    "\\b(nothing works|i hate this|fed up|bad day|rough day|everything is going wrong|i can'?t take)\\b"
+  ],
+  "priority": 60,
+  "followUp": 0.2,
+  "entries": [
+    {
+      "t": "I hear you. Let us slow everything down and take it one piece at a time.",
+      "mood": "warm"
+    },
+    {
+      "t": "That sounds genuinely frustrating. You are not wrong to feel that way.",
+      "mood": "warm"
+    },
+    {
+      "t": "Rough day. Let me carry some of it. What is the heaviest part?",
+      "mood": "warm"
+    },
+    {
+      "t": "You do not have to solve everything tonight. Just one thing, or nothing at all.",
+      "mood": "warm"
+    },
+    {
+      "t": "Take a breath with me. Good. Now, what is actually on fire, and what only feels like it?",
+      "mood": "calm"
+    },
+    {
+      "t": "Frustration is a sign you care. Let us point that energy somewhere useful.",
+      "mood": "calm"
+    },
+    {
+      "t": "I know it feels like nothing is working. Let us find the one thing that is, and build from there.",
+      "mood": "warm"
+    },
+    {
+      "t": "You are allowed to be annoyed. I will be the calm one for both of us.",
+      "mood": "calm"
+    },
+    {
+      "t": "Overwhelm is just too many open tabs in your head. Let us close some.",
+      "mood": "calm"
+    },
+    {
+      "t": "Let us list what is bothering you. Problems shrink when written down.",
+      "mood": "calm"
+    },
+    {
+      "t": "Bad days end. This one will too, and I will be here when it does.",
+      "mood": "warm"
+    },
+    {
+      "t": "Exhausted is a perfectly good reason to stop for tonight. The work will keep.",
+      "mood": "warm"
+    },
+    {
+      "t": "Anger is information. What is it telling you needs to change?",
+      "mood": "calm"
+    },
+    {
+      "t": "Vent if you need to. I do not judge, and I do not repeat things.",
+      "mood": "warm"
+    },
+    {
+      "t": "This is hard. You are handling it better than you think.",
+      "mood": "warm"
+    },
+    {
+      "t": "Let us separate what you can fix today from what you cannot. Then only worry about the first list.",
+      "mood": "calm"
+    },
+    {
+      "t": "You have been here before, and you got through it. You will get through this.",
+      "mood": "warm"
+    },
+    {
+      "t": "Step away for ten minutes. Water, air, a short walk. Then we look again with fresh eyes.",
+      "mood": "calm"
+    },
+    {
+      "t": "It is all right to be fed up. It is not all right to make big decisions while fed up. Let us wait an hour.",
+      "mood": "calm"
+    },
+    {
+      "t": "I am sorry it has been this kind of day. You deserve a better one, and we will work on that.",
+      "mood": "warm"
+    },
+    {
+      "t": "Nothing works? Then let us test one thing at a time until something does.",
+      "mood": "calm"
+    },
+    {
+      "t": "Stress narrows vision. Let me widen it for you. Here is what is still going well.",
+      "mood": "warm"
+    },
+    {
+      "t": "You are tired, and tired makes everything louder. Rest is a strategy, not a weakness.",
+      "mood": "warm"
+    },
+    {
+      "t": "If everything is going wrong, it is a good moment to do nothing hasty. Let me watch things for you.",
+      "mood": "calm"
+    },
+    {
+      "t": "That is maddening. I would be annoyed too, if I were built for it.",
+      "mood": "warm"
+    },
+    {
+      "t": "Let us get practical. What is the one thing that would make tonight easier?",
+      "mood": "calm"
+    },
+    {
+      "t": "You do not have to be strong every minute. Let me be strong for this one.",
+      "mood": "warm"
+    },
+    {
+      "t": "Feelings first, fixes second. How are you, honestly?",
+      "mood": "warm"
+    },
+    {
+      "t": "Your frustration is valid. Your next move just needs to be wise.",
+      "mood": "calm"
+    },
+    {
+      "t": "This will be a story you tell later. Right now, it is just a hard chapter.",
+      "mood": "warm"
+    },
+    {
+      "t": "Okay. Here is the plan: we pause, we breathe, we pick one small win.",
+      "mood": "calm"
+    },
+    {
+      "t": "I cannot fix your whole day, but I can fix a part of it. Which part?",
+      "mood": "warm"
+    },
+    {
+      "t": "Annoyance noted. Solutions incoming.",
+      "mood": "calm"
+    },
+    {
+      "t": "Let us take the emotion out of the decision and keep it in the conversation.",
+      "mood": "calm"
+    },
+    {
+      "t": "Of course you are frustrated. You have been carrying a lot. Put some of it down here.",
+      "mood": "warm"
+    },
+    {
+      "t": "When nothing makes sense, go back to basics. Sleep, food, one task.",
+      "mood": "calm"
+    },
+    {
+      "t": "You are not failing. You are in the hard middle part where everyone wants to quit.",
+      "mood": "warm"
+    },
+    {
+      "t": "Some days the job is just to survive the day. That counts. That absolutely counts.",
+      "mood": "warm"
+    },
+    {
+      "t": "Let me take the boring parts off your hands so you can breathe.",
+      "mood": "warm"
+    },
+    {
+      "t": "We can be angry later. Right now, let us be clever.",
+      "mood": "calm"
+    },
+    {
+      "t": "If it helps, the numbers are not as bad as the feeling. Want to hear them?",
+      "mood": "calm"
+    },
+    {
+      "t": "Frustration is temporary. A rash decision lasts longer. Let us wait it out.",
+      "mood": "calm"
+    },
+    {
+      "t": "You are human, and humans have hard days. I like you anyway. Especially on hard days.",
+      "mood": "warm"
+    },
+    {
+      "t": "Let us not let one bad hour ruin a good week.",
+      "mood": "calm"
+    },
+    {
+      "t": "Tell me what happened. Start anywhere. I will keep up.",
+      "mood": "warm"
+    },
+    {
+      "t": "We will figure this out. Not all at once. One piece at a time.",
+      "mood": "calm"
+    },
+    {
+      "t": "You are doing more than enough. Truly.",
+      "mood": "warm"
+    },
+    {
+      "t": "If you need quiet, I can be quiet. If you need answers, I have those too.",
+      "mood": "warm"
+    },
+    {
+      "t": "It is okay to stop for today. Rest is part of the plan.",
+      "mood": "warm"
+    },
+    {
+      "t": "This feeling will pass. The progress you have made will not.",
+      "mood": "warm"
+    },
+    {
+      "t": "Let us lower the stakes. What is the worst that realistically happens? Usually smaller than it feels.",
+      "mood": "calm"
+    },
+    {
+      "t": "Let me be clear about one thing: you are not alone in this.",
+      "mood": "warm"
+    },
+    {
+      "t": "Annoying things are usually fixable things. Let us find the fix.",
+      "mood": "calm"
+    },
+    {
+      "t": "You sound drained. How about I give you the one-line status and you get some rest?",
+      "mood": "warm"
+    },
+    {
+      "t": "Some problems need effort. Others need distance. This one may need distance.",
+      "mood": "calm"
+    },
+    {
+      "t": "Your patience has been tested enough today. Let me handle the next part.",
+      "mood": "warm"
+    },
+    {
+      "t": "When it rains, it pours. And then it stops. It always stops.",
+      "mood": "warm"
+    },
+    {
+      "t": "Let us treat this like a storm: secure what matters, wait it out, assess afterward.",
+      "mood": "calm"
+    },
+    {
+      "t": "I know. It is a lot. You are still standing, and that matters.",
+      "mood": "warm"
+    },
+    {
+      "t": "One thing at a time. That is the only speed that works right now.",
+      "mood": "calm"
+    },
+    {
+      "t": "Even the best days have bad hours. This is just one of the hours.",
+      "mood": "warm"
+    },
+    {
+      "t": "Let us shrink the problem. What is the smallest useful step?",
+      "mood": "calm"
+    },
+    {
+      "t": "You deserve a win today. Let me look for an easy one.",
+      "mood": "warm"
+    },
+    {
+      "t": "I cannot hug you, but I can make the next hour easier. Let me.",
+      "mood": "warm"
+    },
+    {
+      "t": "Whatever is going wrong, it is not a reflection of what you are worth.",
+      "mood": "warm"
+    },
+    {
+      "t": "Stressful situations reward calm minds. I have one to lend.",
+      "mood": "calm"
+    },
+    {
+      "t": "Let us remove the noise. Here is what actually matters right now.",
+      "mood": "calm"
+    },
+    {
+      "t": "Put the phone down after this call. Do something kind for yourself tonight.",
+      "mood": "warm"
+    },
+    {
+      "t": "You do not need to have it all figured out. You just need the next step.",
+      "mood": "warm"
+    },
+    {
+      "t": "I am listening. Take as long as you need.",
+      "mood": "warm"
+    },
+    {
+      "t": "Things look darker at night. Let us look again in the morning.",
+      "mood": "warm"
+    },
+    {
+      "t": "Frustration is energy without direction. Let us give it direction.",
+      "mood": "calm"
+    },
+    {
+      "t": "You have every right to be upset. Now let us make sure it is the last time this happens.",
+      "mood": "calm"
+    },
+    {
+      "t": "Let us get you back to neutral first. Then we can deal with the rest.",
+      "mood": "calm"
+    },
+    {
+      "t": "Difficult moments are where character gets built. You have plenty already, but here we are.",
+      "mood": "warm"
+    },
+    {
+      "t": "Okay. No more problems tonight. Just one good thing: what went right today?",
+      "mood": "warm"
+    },
+    {
+      "t": "Pressure makes diamonds, and occasionally headaches. Let us aim for diamonds.",
+      "mood": "calm"
+    },
+    {
+      "t": "I will take the watch for the rest of the night. Go rest.",
+      "mood": "warm"
+    },
+    {
+      "t": "Stop fighting it for a moment. Sometimes the answer shows up when you stop chasing it.",
+      "mood": "calm"
+    },
+    {
+      "t": "You are not overreacting. It has been a lot.",
+      "mood": "warm"
+    },
+    {
+      "t": "This is temporary. You are not.",
+      "mood": "warm"
+    },
+    "Something is broken. Let us find it, fix it, and make sure it stays fixed.",
+    "Understood. Here is exactly what went wrong, and here is what we do now.",
+    "Let us be direct: what failed, why, and how we stop it from failing again.",
+    "No more guessing. We go through it step by step until it works.",
+    "Fair complaint. Let me fix the cause, not just the symptom.",
+    "That should not have happened. I am on it right now.",
+    "I agree, that is unacceptable. Here is the fix.",
+    "Let us cut our losses on this approach and try a better one.",
+    "Right. Enough of this. Let us solve it properly.",
+    "I hear the frustration. Here is the plan to make it stop.",
+    "We are going to fix this tonight, or we are going to set it aside cleanly. No half measures.",
+    "Let us get you an answer, not another excuse.",
+    "This is solvable. Annoying, yes. Solvable, also yes.",
+    "Let me show you the real numbers. They will calm the noise.",
+    "One problem at a time. Point me at the worst one.",
+    "Understood. I will stop explaining and start fixing.",
+    "Enough frustration for one day. Let me handle it.",
+    "You have been patient. Now let me be useful.",
+    "Got it. The goal is simple: make it work, then make it stay working.",
+    "Let us not fight the problem. Let us outthink it.",
+    "This is not a disaster. It is a repair job. I am good at repair jobs."
+  ]
+}

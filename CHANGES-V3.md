@@ -837,3 +837,35 @@ No trade setting changed.
 
 - **Sample 4, Jarvis calm and measured, is the default voice** (the owner's pick). Everyone's saved voice moves to it once; a voice picked after that is kept.
 
+## v4.28: Ultron's dialogue library (4,018 lines) and guest greetings
+
+- **A dialogue library of 4,018 unique lines**, all original, in 35 categories under `dialogue/`. It covers:
+  - greetings, good morning and evening, small talk and conversation starters;
+  - humor, sarcasm, playful roasts, encouragement and motivation;
+  - philosophy, science, the future of AI, strategy and problem-solving;
+  - assistant replies, task completion, follow-up questions and clarification;
+  - surprises and discoveries, success, mistakes and recovery, apologies and acknowledgments, frustration;
+  - entertainment, gaming (with GTA and Vice City flavour), cybersecurity and brainstorming;
+  - short acknowledgments, long-form answers and stories, topic transitions and goodbyes;
+  - unusual questions, improvisation and spontaneous thoughts;
+  - **308 signature lines**.
+- **How he picks a line:**
+  - by category, with weights;
+  - matched to mood: warm when you are upset, calm when you are angry, upbeat when you are happy;
+  - never repeated within a call, and not reused for the next 400 lines across calls;
+  - sometimes with a follow-up question;
+  - a category is read from disk only when first needed.
+- **When the library is used:**
+  - Remarks that used to get "I did not understand" now go to a matching category: "roast me", "what if...", "impress me", "tell me about yourself", "guess what".
+  - Feelings come first: "I am so stressed today" gets compassion, not a profit report.
+  - The old small-talk topics, greetings, acknowledgments, thanks and goodbyes draw from the library half the time, so he rarely sounds scripted.
+  - With an AI key, the AI is given the same personality brief instead.
+- **New packs** go in `dialogue/packs/` as JSON files, with no code change. A pack can add lines to a category or a whole new one (a humor pack, a tactical pack...).
+- **Validation:** `node dialogue.mjs`, and a test, check every file. The checks:
+  - at least 4,000 unique lines across all 35 categories;
+  - no duplicates or near-duplicates, and no empty lines;
+  - nothing the voice would read aloud as symbols, and nothing too long to speak;
+  - valid triggers and moods;
+  - no opening phrase overused within a category.
+- **Guest greetings:** "Hey Ultron, I'm with <name>" or "<name> is here" gets that guest's own greeting, in both modes. Guests live in `dialogue/guests.json`, which is private and not mirrored.
+
