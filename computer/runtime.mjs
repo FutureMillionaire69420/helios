@@ -1010,7 +1010,7 @@ export async function startRuntime(k, {demo=false}={}) {
     redact:(x)=>{ for(const secret of [...secrets,ultronKey,val('ULTRON_PASSPHRASE','')].filter(Boolean)) x=x.split(secret).join('[REDACTED]'); return maskPhones(k.redact(x)); }});
   const callTrace=(e)=>callLog.add(e);
   const pctOf=(x)=>Number.isFinite(x)?Math.round(x*1000)/10:null, sym=(m)=>study?.records?.findLast?.(r=>r.mint===m)?.symbol||null;
-  const ultron=demo?null:createUltron({apiKey:val('ANTHROPIC_API_KEY',''),model:val('ULTRON_MODEL','claude-sonnet-5-5'),effort:val('ULTRON_EFFORT','low'),thinkingLog:val('ULTRON_THINKING_LOG','true')!=='false',timezone:c.timezone||'UTC',rate:number('ULTRON_RATE',96),unlockPhrase:val('ULTRON_UNLOCK_PHRASE','Zombie GMT Master Two.'),pitch:number('ULTRON_PITCH',-8),tract:number('ULTRON_TRACT',8),
+  const ultron=demo?null:createUltron({apiKey:/^REPLACE-/i.test(val('ANTHROPIC_API_KEY',''))?'':val('ANTHROPIC_API_KEY',''),model:val('ULTRON_MODEL','claude-sonnet-5-5'),effort:val('ULTRON_EFFORT','low'),thinkingLog:val('ULTRON_THINKING_LOG','true')!=='false',timezone:c.timezone||'UTC',rate:number('ULTRON_RATE',96),unlockPhrase:val('ULTRON_UNLOCK_PHRASE','Zombie GMT Master Two.'),pitch:number('ULTRON_PITCH',-8),tract:number('ULTRON_TRACT',8),
     log:(m)=>engine.event('connection',{message:m}),trace:callTrace,
     // ORDERS by phone: trading orders in paper mode only (ULTRON_LIVE_ACTIONS=true allows live), after the spoken
     // password (ULTRON_PASSPHRASE); without a password, only on calls Ultron places (ULTRON_INBOUND_ACTIONS=true allows calls to him)

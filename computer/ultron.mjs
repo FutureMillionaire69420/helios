@@ -5,7 +5,7 @@
 // setting, or touch the wallet. Only the phone in OWNER_PHONE is ever called or answered.
 // Settings (Render → Environment): the voice-call settings in voicecall.mjs. ANTHROPIC_API_KEY is optional: without it
 // Ultron runs in FREE MODE (no AI, nothing to pay but the call): scripted answers read from the same data.
-// ULTRON_MODEL (default claude-sonnet-5-5), ULTRON_EFFORT (default low: shorter pauses on the phone).
+// ULTRON_MODEL (default claude-sonnet-5-5; claude-haiku-5-5 is the cheapest), ULTRON_EFFORT (default low: shorter pauses on the phone).
 
 import crypto from 'node:crypto';
 import {hearMood, replyMood, expressiveSsml} from './expressive.mjs';
@@ -537,7 +537,8 @@ export function createUltron({apiKey, model = 'claude-sonnet-5-5', effort = 'low
   async function ask(s, round) {
     const d = new Date(now()).toISOString().slice(0, 10); if (d !== day) { day = d; used = 0; }
     if (++used > perDayRequests) { s.stats.errors++; t(s, 'claude-error', {round, error: `daily limit of ${perDayRequests} requests reached`}); throw new Error('daily limit'); }
-    const body = {model, max_tokens: 2000, system: SYSTEM, tools: TOOLS, output_config: {effort}, fallbacks: 'default', messages: s.messages};
+    const body = {model, max_tokens: 2000, system: SYSTEM, tools: TOOLS, output_config: {effort}, messages: s.messages};
+    if (!/haiku/.test(model)) body.fallbacks = 'default'; // Haiku has no server-side refusal fallback
     if (thinkingLog) body.thinking = {type: 'adaptive', display: 'summarized'}; // a readable summary of Ultron's reasoning, for the log
     t(s, 'claude-request', {round, model, effort, messages: s.messages.length, bytes: JSON.stringify(s.messages).length, requestOfDay: used});
     const t0 = Date.now(); let r, j;

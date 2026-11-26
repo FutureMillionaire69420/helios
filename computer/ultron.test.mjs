@@ -416,3 +416,14 @@ test('a call turn: an upset owner gets the warm voice; Ultron\'s robot voice sta
   assert.doesNotMatch(flat, /phonation|emphasis/, 'Ultron stays a machine');
   u.stop();
 });
+
+test('AI requests: Haiku is sent without the server-side fallback (unsupported there); other models keep it', async () => {
+  for (const [model, wantFallback] of [['claude-haiku-5-5', false], ['claude-sonnet-5-5', true]]) {
+    let body = null;
+    const u = createUltron({apiKey: 'k', model, data: {}, actions: {}, fetchImpl: async (url, init) => { body = JSON.parse(init.body); return {ok: true, status: 200, headers: {get: () => null}, json: async () => ({id: 'm', model, stop_reason: 'end_turn', content: [{type: 'text', text: 'Good evening, sir.'}], usage: {input_tokens: 10, output_tokens: 5}})}; }});
+    const id = u.open({}); u.sessions.get(id).callSid = 'S';
+    await u.start({base: 'https://x', key: 'k'.repeat(32), id, callSid: 'S', voice: 'Polly.Brian'});
+    assert.equal(body.model, model); assert.equal('fallbacks' in body, wantFallback, model);
+    u.stop();
+  }
+});
