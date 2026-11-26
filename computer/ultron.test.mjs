@@ -427,3 +427,21 @@ test('AI requests: Haiku is sent without the server-side fallback (unsupported t
     u.stop();
   }
 });
+
+test('Ultron finishes speaking before listening; faint low-confidence noise is ignored unless it is his name; caching is on', async () => {
+  const u = createUltron({random: () => 0, apiKey: '', data: {}, actions: {}});
+  const id = u.open({}); u.sessions.get(id).callSid = 'S';
+  const T = (speech, confidence) => u.turn({base: 'https://x', key: 'k'.repeat(32), id, callSid: 'S', speech, confidence, voice: 'Polly.Brian'});
+  const x = await T('hello', 0.9);
+  assert.match(x, /<Response><Say[\s\S]*<\/Say><Gather [^>]*><\/Gather>/, 'speech first, then an empty Gather: noise cannot cut him off');
+  const noise = await T('uh', 0.2);
+  assert.doesNotMatch(noise, /<Say/, 'faint noise: no reply, he keeps listening'); assert.match(noise, /<Gather/);
+  assert.match(await T('ultron', 0.2), /<Say/, 'his name always gets through');
+  assert.match(await T('jarvis', 0.3), /<Say/);
+  u.stop();
+  let body = null;
+  const a = createUltron({apiKey: 'k', model: 'claude-haiku-5-5', data: {}, actions: {}, fetchImpl: async (url, init) => { body = JSON.parse(init.body); return {ok: true, status: 200, headers: {get: () => null}, json: async () => ({id: 'm', stop_reason: 'end_turn', content: [{type: 'text', text: 'Hello, sir.'}], usage: {input_tokens: 1, output_tokens: 1}})}; }});
+  const id2 = a.open({}); a.sessions.get(id2).callSid = 'S';
+  await a.start({base: 'https://x', key: 'k'.repeat(32), id: id2, callSid: 'S', voice: 'Polly.Brian'});
+  assert.deepEqual(body.cache_control, {type: 'ephemeral'}); a.stop();
+});

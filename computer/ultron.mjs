@@ -537,7 +537,7 @@ export function createUltron({apiKey, model = 'claude-sonnet-5-5', effort = 'low
   async function ask(s, round) {
     const d = new Date(now()).toISOString().slice(0, 10); if (d !== day) { day = d; used = 0; }
     if (++used > perDayRequests) { s.stats.errors++; t(s, 'claude-error', {round, error: `daily limit of ${perDayRequests} requests reached`}); throw new Error('daily limit'); }
-    const body = {model, max_tokens: 2000, system: SYSTEM, tools: TOOLS, output_config: {effort}, messages: s.messages};
+    const body = {model, max_tokens: 2000, system: SYSTEM, tools: TOOLS, output_config: {effort}, cache_control: {type: 'ephemeral'}, messages: s.messages}; // automatic prompt caching: the instructions and the call so far are re-read cheaply
     if (!/haiku/.test(model)) body.fallbacks = 'default'; // Haiku has no server-side refusal fallback
     if (thinkingLog) body.thinking = {type: 'adaptive', display: 'summarized'}; // a readable summary of Ultron's reasoning, for the log
     t(s, 'claude-request', {round, model, effort, messages: s.messages.length, bytes: JSON.stringify(s.messages).length, requestOfDay: used});
@@ -677,7 +677,7 @@ export function createUltron({apiKey, model = 'claude-sonnet-5-5', effort = 'low
     t(s, 'respond', {action, text: text != null ? speakable(text) : undefined, voice: voice && typeof voice === 'object' ? (voice.id || voice.voice) : voice, ...extra, xml: hide(s, out)});
     return out;
   };
-  const listen = (base, key, s, text, voice, extra) => doc(s, 'speak-and-listen', text, voice, `<Response><Gather input="${s?.mode === 'free' ? 'dtmf speech' : 'speech'}"${s?.mode === 'free' ? ' numDigits="1"' : ''} speechTimeout="auto" timeout="10" language="en-US" action="${xml(`${base}/voice/agent/turn?k=${key}&s=${s.id}`)}" method="POST">${say(text, voice, s)}</Gather><Redirect method="POST">${xml(`${base}/voice/agent/turn?k=${key}&s=${s.id}&silence=1`)}</Redirect></Response>`, extra);
+  const listen = (base, key, s, text, voice, extra) => doc(s, 'speak-and-listen', text, voice, `<Response>${say(text, voice, s)}<Gather input="${s?.mode === 'free' ? 'dtmf speech' : 'speech'}"${s?.mode === 'free' ? ' numDigits="1"' : ''} speechTimeout="auto" timeout="10" language="en-US" action="${xml(`${base}/voice/agent/turn?k=${key}&s=${s.id}`)}" method="POST"></Gather><Redirect method="POST">${xml(`${base}/voice/agent/turn?k=${key}&s=${s.id}&silence=1`)}</Redirect></Response>`, extra);
   const bye = (s, text, voice) => doc(s, 'speak-and-hang-up', text, voice, `<Response>${say(text, voice, s)}<Hangup/></Response>`);
   const hold = (base, key, s, voice, extra) => { s.holds++; return doc(s, 'hold-the-line', s.holdLine = pick(LINES.hold), voice, `<Response>${say(s.holdLine, voice, s)}<Redirect method="POST">${xml(`${base}/voice/agent/wait?k=${key}&s=${s.id}`)}</Redirect></Response>`, extra); };
 
@@ -807,6 +807,9 @@ export function createUltron({apiKey, model = 'claude-sonnet-5-5', effort = 'low
         if (silence && ++s.silent >= (s.patient ? 5 : 2)) { const out = bye(s, pick(LINES.lost), voice); end(s, 'no answer twice in a row (silence)'); return out; }
         return listen(base, key, s, silence ? pick(LINES.still) : 'I did not catch that, sir.', voice);
       }
+      // faint noise: a very short, low-confidence transcript without his name is ignored (he just keeps listening)
+      const conf = confidence != null && confidence !== '' ? Number(confidence) : null;
+      if (!d && conf != null && conf < 0.45 && said.split(/\s+/).length <= 3 && !/\b(ultron|jarvis)\b/i.test(said)) { t(s, 'ignored-noise', {confidence: conf}); return listen(base, key, s, '', voice); }
       s.silent = 0;
       s.ownerMood = hearMood(said); if (s.ownerMood !== 'neutral') t(s, 'mood', {owner: s.ownerMood}); // how he sounds: the Jarvis voices answer in kind
       if (VOICEMAIL.test(text)) { // a voicemail greeting: leave a short message and hang up (no AI, no menu)
