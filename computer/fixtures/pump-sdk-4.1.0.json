@@ -1,0 +1,241 @@
+{
+ "source": "@pump-fun/pump-sdk 4.1.0 (npm, published 2026-10-13), src/idl/pump.json",
+ "program": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+ "instructions": {
+  "sell": {
+   "discriminator": "33e685a4017f83ad",
+   "args": [
+    {
+     "name": "amount",
+     "type": "u64"
+    },
+    {
+     "name": "min_sol_output",
+     "type": "u64"
+    }
+   ],
+   "accounts": [
+    {
+     "name": "global",
+     "writable": false,
+     "signer": false
+    },
+    {
+     "name": "fee_recipient",
+     "writable": true,
+     "signer": false
+    },
+    {
+     "name": "mint",
+     "writable": false,
+     "signer": false
+    },
+    {
+     "name": "bonding_curve",
+     "writable": true,
+     "signer": false
+    },
+    {
+     "name": "associated_bonding_curve",
+     "writable": true,
+     "signer": false
+    },
+    {
+     "name": "associated_user",
+     "writable": true,
+     "signer": false
+    },
+    {
+     "name": "user",
+     "writable": true,
+     "signer": true
+    },
+    {
+     "name": "system_program",
+     "writable": false,
+     "signer": false,
+     "address": "11111111111111111111111111111111"
+    },
+    {
+     "name": "creator_vault",
+     "writable": true,
+     "signer": false
+    },
+    {
+     "name": "token_program",
+     "writable": false,
+     "signer": false
+    },
+    {
+     "name": "event_authority",
+     "writable": false,
+     "signer": false
+    },
+    {
+     "name": "program",
+     "writable": false,
+     "signer": false,
+     "address": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+    },
+    {
+     "name": "fee_config",
+     "writable": false,
+     "signer": false
+    },
+    {
+     "name": "fee_program",
+     "writable": false,
+     "signer": false,
+     "address": "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
+    }
+   ]
+  },
+  "buy_exact_sol_in": {
+   "discriminator": "38fc74089edfcd5f",
+   "args": [
+    {
+     "name": "spendable_sol_in",
+     "type": "u64"
+    },
+    {
+     "name": "min_tokens_out",
+     "type": "u64"
+    },
+    {
+     "name": "track_volume",
+     "type": {
+      "defined": {
+       "name": "OptionBool"
+      }
+     }
+    },
+    {
+     "name": "partial_fill",
+     "type": {
+      "defined": {
+       "name": "OptionBool"
+      }
+     }
+    }
+   ],
+   "accounts": [
+    {
+     "name": "global",
+     "writable": false,
+     "signer": false
+    },
+    {
+     "name": "fee_recipient",
+     "writable": true,
+     "signer": false
+    },
+    {
+     "name": "mint",
+     "writable": false,
+     "signer": false
+    },
+    {
+     "name": "bonding_curve",
+     "writable": true,
+     "signer": false
+    },
+    {
+     "name": "associated_bonding_curve",
+     "writable": true,
+     "signer": false
+    },
+    {
+     "name": "associated_user",
+     "writable": true,
+     "signer": false
+    },
+    {
+     "name": "user",
+     "writable": true,
+     "signer": true
+    },
+    {
+     "name": "system_program",
+     "writable": false,
+     "signer": false,
+     "address": "11111111111111111111111111111111"
+    },
+    {
+     "name": "token_program",
+     "writable": false,
+     "signer": false
+    },
+    {
+     "name": "creator_vault",
+     "writable": true,
+     "signer": false
+    },
+    {
+     "name": "event_authority",
+     "writable": false,
+     "signer": false
+    },
+    {
+     "name": "program",
+     "writable": false,
+     "signer": false,
+     "address": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+    },
+    {
+     "name": "global_volume_accumulator",
+     "writable": false,
+     "signer": false
+    },
+    {
+     "name": "user_volume_accumulator",
+     "writable": true,
+     "signer": false
+    },
+    {
+     "name": "fee_config",
+     "writable": false,
+     "signer": false
+    },
+    {
+     "name": "fee_program",
+     "writable": false,
+     "signer": false,
+     "address": "pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ"
+    }
+   ]
+  }
+ },
+ "remainingAccounts": {
+  "sell": [
+   "user_volume_accumulator (writable, cashback coins only)",
+   "bonding_curve_v2 (read-only)",
+   "buyback_fee_recipient (writable)"
+  ],
+  "buy": [
+   "bonding_curve_v2 (read-only)",
+   "buyback_fee_recipient (writable)"
+  ],
+  "from": "sdk.ts getSellInstructionInternal / getBuyInstructionInternal"
+ },
+ "BondingCurve": [
+  "virtual_token_reserves:u64",
+  "virtual_quote_reserves:u64",
+  "real_token_reserves:u64",
+  "real_quote_reserves:u64",
+  "token_total_supply:u64",
+  "complete:bool",
+  "creator:pubkey",
+  "is_mayhem_mode:bool",
+  "is_cashback_coin:bool",
+  "quote_mint:pubkey",
+  "creator_fee_bps:u64",
+  "can_edit_creator_fee:bool",
+  "is_holder_reward:bool",
+  "creator_fee:u64",
+  "protocol_fees:u64",
+  "depth:u8",
+  "initial_virtual_quote_reserves:u64",
+  "post_complete_base_out:u64",
+  "post_complete_quote_in:u64"
+ ]
+}
